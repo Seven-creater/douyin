@@ -39,8 +39,10 @@ def test_no_audio_stream():
 
 
 def test_rotation_normalized():
-    assert inspect_video(sample_ffprobe(rotation=-90))["rotation"] == 90
+    # 语义：归一化到 [0,360) 的绝对角度（-90 display-matrix → 270）
+    assert inspect_video(sample_ffprobe(rotation=-90))["rotation"] == 270
     assert inspect_video(sample_ffprobe(rotation=180))["rotation"] == 180
+    assert inspect_video(sample_ffprobe(rotation=90))["rotation"] == 90
 
 
 def test_missing_video_stream_raises():
