@@ -125,7 +125,8 @@ class OmniRunner:
                 padding=True,
                 use_audio_in_video=True,
             )
-        return inputs.to(self._model.device)
+        # 官方示例原样：device + dtype 双 cast（processor 输出 float32，模型 bf16，缺 dtype 会炸 conv）
+        return inputs.to(self._model.device).to(self._model.dtype)
 
     # ---------- 观看 ----------
     def watch(self, video_path: Path, prompt: str, *,
