@@ -28,6 +28,7 @@ paths:                     # 相对仓库根，加载时解析为绝对路径
   processed_dir: data/processed
   videos_dir: data/videos
   logs_dir: logs
+  perception_dir: data/perception
 
 ranking:
   top_n: 20
@@ -48,12 +49,34 @@ sync:                      # 本地下载产物回传服务器（Phase 2 感知�
   enabled: true
   ssh_target: wangqihao@10.1.4.86
   remote_root: /data02/usr/wangqihao/Demo/research
-  tiktok:                  # 方案乙'：TikTokDownloader Web API 兜底
-    project_dir: tools/TikTokDownloader
-    host: 127.0.0.1
-    port: 5555
-    startup_timeout_seconds: 60
-    venv_python: null      # null = 自动探测 .venv/Scripts/python.exe | .venv/bin/python
+
+perception:                # Phase 2 视频感知工具层
+  ffmpeg_bin: ffmpeg
+  ffprobe_bin: ffprobe
+  frames:
+    fps: 1.0
+    max_frames: 64         # 超出则降 effective_fps（帧索引里记录）
+    jpeg_quality: 2        # ffmpeg -qscale:v（2=高质量）
+  shots:
+    threshold: 0.3         # ffmpeg scene 阈值（抖音硬切为主）
+    min_shot_len_s: 0.5
+  ocr:
+    engine: rapidocr
+    stride: 1              # frames 默认 1fps 已稀疏，逐帧 OCR
+    min_confidence: 0.5
+  transcribe:
+    model: iic/SenseVoiceSmall   # 首次自动从 ModelScope 下载 ~1GB
+    vad_model: fsmn-vad
+    vad_max_single_segment_ms: 30000  # SenseVoice 单段 30s 限制 → VAD 预分段
+    language: auto
+    device: cuda:0         # 轻占；可改 cpu
+  omni:
+    model_path: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/qwen3-omni-30b-a3b-instruct
+    visible_gpus: "0,1"    # thinker-only BF16 ≈69GB → 2×A6000；OOM 兜底 "0,1,2"
+    fps: 2.0               # 官方评测口径
+    max_pixels: null       # null=processor 默认；OOM 时降为 589824
+    max_new_tokens: 2048
+    use_qwen_omni_utils: false  # 原生 apply_chat_template 失败时置 true（需 pip install qwen-omni-utils）
 
 logging:
   level: INFO

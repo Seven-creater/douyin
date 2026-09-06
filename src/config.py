@@ -63,6 +63,7 @@ class PathsCfg:
     processed_dir: Path
     videos_dir: Path
     logs_dir: Path
+    perception_dir: Path
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class AppConfig:
     paths: PathsCfg
     ranking: dict[str, Any]
     download: dict[str, Any]
+    perception: dict[str, Any]
     logging_level: str
 
 
@@ -100,9 +102,11 @@ def load_config(path: Path | None = None) -> AppConfig:
             processed_dir=_abs_path(paths["processed_dir"]),
             videos_dir=_abs_path(paths["videos_dir"]),
             logs_dir=_abs_path(paths["logs_dir"]),
+            perception_dir=_abs_path(paths.get("perception_dir", "data/perception")),
         ),
         ranking=dict(raw.get("ranking") or {}),
         download=dict(raw.get("download") or {}),
+        perception=dict(raw.get("perception") or {}),
         logging_level=str((raw.get("logging") or {}).get("level", "INFO")).upper(),
     )
     for p in cfg.paths.__dict__.values():
@@ -143,10 +147,11 @@ class SecretMaskFilter(logging.Filter):
         return True
 
 
-def setup_logging(logs_dir: Path, level: str = "INFO", secrets: list[str] | None = None) -> Path:
+def setup_logging(logs_dir: Path, level: str = "INFO", secrets: list[str] | None = None,
+                  filename_prefix: str = "collect_trends") -> Path:
     """控制台 + 按次轮转文件双 handler，全部挂密钥脱敏。返回日志文件路径。"""
     logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / f"collect_trends_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_path = logs_dir / f"{filename_prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
 
     root = logging.getLogger()
     root.setLevel(getattr(logging, level, logging.INFO))
