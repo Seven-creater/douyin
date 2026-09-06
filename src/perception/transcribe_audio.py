@@ -20,14 +20,23 @@ logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"<\|([^|]+)\|>")
 _LANG_TAGS = {"ZH", "EN", "YUE", "JA", "KO", "AUTO"}  # 与 extract_tags 的 upper() 对齐
+_PROC_TAGS = {"WITHITN"}  # 处理标记（ITN），非音频事件
 # 情感标签单独归档（对模板分析也有用）
 _EMO_TAGS = {"HAPPY", "SAD", "ANGRY", "NEUTRAL", "EMO_UNKNOWN", "FEARDISGUST", "SURPRISED"}
+# rich_transcription_postprocess 会把事件/情感标签转成 emoji 留在文本里 → 清掉
+_EMOJI_RE = re.compile(
+    "[\U0001F3B5\U0001F60A\U0001F622\U0001F621\U0001F631\U0001F62E\U0001F922\U0001F602\U0001F44F\U0001F600]"
+)
+
+
+def _clean_text(text: str) -> str:
+    return _EMOJI_RE.sub("", _TAG_RE.sub("", text)).strip()
 
 
 def extract_tags(text: str) -> tuple[list[str], list[str]]:
     """返回 (audio_events, emotions)，从原始输出里抽 <|BGM|>/<|APPLAUSE|>/... 标签。"""
     tags = [t.upper() for t in _TAG_RE.findall(text)]
-    events = sorted({t for t in tags if t not in _LANG_TAGS and t not in _EMO_TAGS})
+    events = sorted({t for t in tags if t not in _LANG_TAGS | _PROC_TAGS and t not in _EMO_TAGS})
     emotions = sorted({t for t in tags if t in _EMO_TAGS})
     return events, emotions
 
@@ -37,7 +46,7 @@ def parse_sensevoice_result(raw: dict, *, postprocess=None) -> dict:
     （延迟注入便于单测；None 时只做标签剥离）。"""
     raw_text = raw.get("text") or ""
     events, emotions = extract_tags(raw_text)
-    clean = postprocess(raw_text) if postprocess else _TAG_RE.sub("", raw_text).strip()
+    clean = _clean_text(postprocess(raw_text) if postprocess else raw_text)
 
     segments = []
     for si in raw.get("sentence_info") or []:
@@ -45,7 +54,7 @@ def parse_sensevoice_result(raw: dict, *, postprocess=None) -> dict:
             segments.append({
                 "start_ms": int(si.get("start") or 0),
                 "end_ms": int(si.get("end") or 0),
-                "text": _TAG_RE.sub("", str(si.get("text"))).strip(),
+                "text": _clean_text(str(si.get("text"))),
             })
     return {
         "full_text": clean,
@@ -70,7 +79,9 @@ def load_transcriber(*, model: str, vad_model: str, vad_max_segment_ms: int, dev
 
 
 def transcribe_with_model(model, video_path: Path, *, language: str = "auto") -> dict:
-    res = model.generate(input=str(video_path), language=language, use_itn=True)
+    # merge_vad/merge_length_s/batch_size_s：官方 SenseVoice 示例参数（让 sentence_info 出毫秒分段）
+    res = model.generate(input=str(video_path), language=language, use_itn=True,
+                         batch_size_s=60, merge_vad=True, merge_length_s=15)
     post = None
     try:
         from funasr.utils.postprocess_utils import rich_transcription_postprocess

@@ -51,3 +51,11 @@ def test_parse_no_sentence_info_degrades():
 def test_parse_empty_text():
     out = parse_sensevoice_result({"text": ""})
     assert out["full_text"] == "" and out["audio_events"] == []
+
+
+def test_withitn_filtered_and_emoji_stripped():
+    # 真实踩坑：WITHITN（ITN 处理标记）混入事件；postprocess 会把标签转成 emoji 留在文本
+    raw = {"text": "<|BGM|><|zh|><|WITHITN|>🎼我就是鸡蛋。😊"}
+    out = parse_sensevoice_result(raw, postprocess=lambda s: s)  # postprocess 原样回显
+    assert out["audio_events"] == ["BGM"]          # WITHITN 被过滤
+    assert out["full_text"] == "我就是鸡蛋。"        # 🎼😊 被剥离
