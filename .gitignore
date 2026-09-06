@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行产物
+results/
+output/
+*.log
+*.pid
+
+# 大文件 / 媒体（素材走别的同步方式，不进 git）
+*.mp4
+*.mp3
+*.wav
+*.pt
+*.safetensors
+
+# IDE / 系统
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
