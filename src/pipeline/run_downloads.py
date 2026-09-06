@@ -15,7 +15,7 @@ from typing import Any
 from src.config import AppConfig
 from src.download.direct_downloader import DirectCDNDownloader
 from src.download.manifest import Manifest
-from src.download.models import DownloadItem
+from src.download.models import DownloadItem, DownloadResult
 from src.download.sync import push_videos
 
 logger = logging.getLogger(__name__)
@@ -98,13 +98,20 @@ def run_download_stage(
         stats["attempted"] += 1
         attempted_videos += 1
         result = None
-        for attempt in range(1, max_attempts + 1):
-            result = downloader.download_video(item)
-            if result.success:
-                break
-            logger.warning("[download %s] 第 %d/%d 次失败", mv.aweme_id, attempt, max_attempts)
-            if attempt < max_attempts:
-                time.sleep(backoff)
+        try:
+            for attempt in range(1, max_attempts + 1):
+                result = downloader.download_video(item)
+                if result.success:
+                    break
+                logger.warning("[download %s] 第 %d/%d 次失败", mv.aweme_id, attempt, max_attempts)
+                if attempt < max_attempts:
+                    time.sleep(backoff)
+        except Exception as exc:  # noqa: BLE001 - 单条意外错误只记失败，不杀整个 batch
+            logger.exception("[download %s] 意外异常", mv.aweme_id)
+            result = DownloadResult(
+                success=False, aweme_id=mv.aweme_id, url=item.url,
+                error=f"unexpected: {type(exc).__name__}: {exc}",
+            )
 
         if result and result.success:
             meta_path = _write_metadata(cfg.paths.videos_dir, item, mv.record.to_dict())

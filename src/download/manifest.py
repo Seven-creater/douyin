@@ -32,8 +32,8 @@ class Manifest:
                 self.data = loaded
 
     # ---- 查询 ----
-    def get(self, aweme_id: str) -> dict | None:
-        return self.data["downloads"].get(aweme_id)
+    def get(self, aweme_id: str, default: dict | None = None) -> dict | None:
+        return self.data["downloads"].get(aweme_id, default)
 
     def is_done(self, aweme_id: str) -> bool:
         """success 且文件还在 → 可跳过。"""
@@ -46,15 +46,16 @@ class Manifest:
         return (self.videos_dir.parent / rel).exists() if not Path(rel).is_absolute() else Path(rel).exists()
 
     # ---- 写入 ----
-    def record_success(self, item_aweme_id: str, *, url: str, title: str | None, video_path: Path, file_size: int) -> None:
-        self.data["downloads"][item_aweme_id] = {
+    def record_success(self, aweme_id: str, *, url: str, title: str | None, video_path: Path, file_size: int) -> None:
+        prev = self.get(aweme_id) or {}
+        self.data["downloads"][aweme_id] = {
             "status": "success",
             "url": url,
             "title": title,
             "video_path": video_path.relative_to(self.videos_dir.parent).as_posix(),
             "file_size_bytes": file_size,
-            "attempts": self.get(item_aweme_id, {}).get("attempts", 0) + 1 if self.get(item_aweme_id) else 1,
-            "errors": (self.get(item_aweme_id) or {}).get("errors", []),
+            "attempts": prev.get("attempts", 0) + 1,
+            "errors": prev.get("errors", []),
             "downloaded_at": datetime.now().isoformat(timespec="seconds"),
         }
 

@@ -88,6 +88,22 @@ def test_manifest_failure_appends_error_history(tmp_path):
     assert [e["error"] for e in entry["errors"]] == ["boom-1", "boom-2"]
 
 
+def test_manifest_success_after_failure_keeps_history(tmp_path):
+    """回归：上轮失败、本轮成功（2026-09-06 真实踩坑路径）。"""
+    videos_dir = tmp_path / "videos"
+    vpath = videos_dir / "A" / "video.mp4"
+    vpath.parent.mkdir(parents=True)
+    vpath.write_bytes(b"x" * 100)
+    m = Manifest(videos_dir / "manifest.json", videos_dir)
+    m.record_failure("A", url="u", title=None, stage="download", error="broken pipe")
+    m.record_success("A", url="u", title="t", video_path=vpath, file_size=100)
+    entry = m.get("A")
+    assert entry["status"] == "success"
+    assert entry["attempts"] == 2                      # 失败1次 + 成功1次
+    assert entry["errors"][0]["error"] == "broken pipe"  # 历史保留
+    assert m.is_done("A") is True
+
+
 # ---------- direct downloader ----------
 
 def test_download_success_writes_mp4(tmp_path):
