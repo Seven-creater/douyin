@@ -43,6 +43,15 @@ SECTION_KEYS = {
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
+def dedupe_repetition(text: str, section_marker: str = "### 1.") -> str:
+    """贪心解码复读保险：同一小节标记第二次出现即截断（实测 30B 在短输入上有复读倾向）。"""
+    first = text.find(section_marker)
+    if first < 0:
+        return text
+    second = text.find(section_marker, first + len(section_marker))
+    return text[:second].rstrip() if second > 0 else text
+
+
 def parse_baseline_sections(text: str) -> dict[str, str]:
     """按 '## ' 行切分六小节；缺节容忍（值为空串）；剥离 <think>。"""
     cleaned = _THINK_RE.sub("", text).strip()

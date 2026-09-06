@@ -12,7 +12,7 @@ from pathlib import Path
 
 from src.config import AppConfig, ensure_utf8_stdio, setup_logging
 from src.perception import common
-from src.perception.omni_prompts import BASELINE_PROMPT, parse_baseline_sections
+from src.perception.omni_prompts import BASELINE_PROMPT, dedupe_repetition, parse_baseline_sections
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,7 @@ def run_for_video(cfg: AppConfig, aweme_id: str, *, force: bool = False,
     answer = runner.watch(video, build_prompt(question),
                           max_new_tokens=p_cfg.get("omni", {}).get("max_new_tokens", 2048),
                           duration_s=duration_s)
+    answer.text = dedupe_repetition(answer.text)  # 复读保险
     total_s = time.time() - t0
 
     output = {

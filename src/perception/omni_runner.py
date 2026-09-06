@@ -150,7 +150,10 @@ class OmniRunner:
         torch.cuda.reset_peak_memory_stats()
         max_new = int(max_new_tokens or self.cfg.get("max_new_tokens", 2048))
         t0 = time.time()
-        generated = self._model.generate(**inputs, use_audio_in_video=True, max_new_tokens=max_new)
+        generated = self._model.generate(
+            **inputs, use_audio_in_video=True, max_new_tokens=max_new,
+            repetition_penalty=float(self.cfg.get("repetition_penalty", 1.05)),
+        )
         elapsed = time.time() - t0
 
         text = self._processor.batch_decode(
