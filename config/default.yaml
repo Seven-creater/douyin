@@ -39,9 +39,15 @@ download:
     max_attempts: 2
     backoff_seconds: 10
   per_video_timeout_seconds: 600
-  direct:                  # 方案甲：CDN 直下
+  min_valid_bytes: 10240   # 小于 10KB 判为无效（防错误页/空文件）
+  direct:                  # CDN 直下（Gate A 实测：本地可行、无需 Cookie）
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     referer: "https://www.douyin.com/"
+
+sync:                      # 本地下载产物回传服务器（Phase 2 感知用；失败不致命）
+  enabled: true
+  ssh_target: wangqihao@10.1.4.86
+  remote_root: /data02/usr/wangqihao/Demo/research
   tiktok:                  # 方案乙'：TikTokDownloader Web API 兜底
     project_dir: tools/TikTokDownloader
     host: 127.0.0.1

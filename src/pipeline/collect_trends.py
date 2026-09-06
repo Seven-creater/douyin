@@ -127,12 +127,18 @@ def print_summary(trend_stats: dict[str, Any], download_stats: dict[str, Any] | 
     print(f"各榜视频数: {per}")
     print(f"条目: {trend_stats['total_records']} → 去重后 {trend_stats['unique_videos']} · TopN {trend_stats['top_n']}")
     if download_stats:
+        skipped_total = download_stats["skipped"] + download_stats.get("skipped_image", 0)
         print(
             f"下载: 成功 {download_stats['success']} / 失败 {download_stats['failed']}"
-            f" / 跳过 {download_stats['skipped']}（明细见 data/videos/manifest.json）"
+            f" / 跳过 {skipped_total}"
+            f"（已下载 {download_stats['skipped']} + 图集 {download_stats.get('skipped_image', 0)}）"
+            f"（明细见 data/videos/manifest.json）"
         )
+        if download_stats.get("sync"):
+            sc = download_stats["sync"]
+            print(f"回传服务器: 推送 {sc['pushed']} 个视频目录，失败 {len(sc['errors'])} 项")
     else:
-        print("下载: 未启用（--no-download 或下载阶段未接入）")
+        print("下载: 未启用（--no-download）")
     print(f"总耗时: {elapsed_s:.1f}s")
     print(f"产物: {trend_stats['outputs']['jsonl']}")
     print(f"      {trend_stats['outputs']['csv']}")
