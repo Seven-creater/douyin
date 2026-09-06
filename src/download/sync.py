@@ -1,7 +1,11 @@
-"""本地 ↔ 服务器同步（scp，免密已配；失败不致命只告警）。
+"""本地 → 服务器视频同步（scp；失败不致命只记录）。
 
-- push_videos：把新下载成功的 data/videos/<id>/ 目录 + manifest + processed 产物推到服务器
-  （Phase 2 的 Qwen3-Omni 感知在服务器跑，视频必须在那边）
+同步策略（对账式，幂等）：
+    远端已有目录 = ssh ls 一次
+    需推送 = (manifest 中 success 且本地文件在) − 远端已有
+    逐个推送：单文件超时 1800s、最多 2 次尝试、单文件异常只记录不中断
+这覆盖了"上轮崩溃没推成 / 手工修复的孤儿记录 / 任何历史遗漏"，
+而不只是本轮新下载——服务器最终与本地 manifest 的 success 集合一致。
 """
 from __future__ import annotations
 
@@ -11,12 +15,62 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+_SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
+_PER_FILE_TIMEOUT = 1800  # 秒；覆盖慢速/卡顿连接下 ~20MB 级文件
+_ATTEMPTS = 2
 
 
-def _run(cmd: list[str]) -> tuple[int, str]:
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+def _run(cmd: list[str], timeout: float) -> tuple[int, str]:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return proc.returncode, (proc.stderr or proc.stdout or "").strip()
+
+
+def compute_missing(local_success_ids: list[str], remote_ids: list[str]) -> list[str]:
+    """需推送 = 本地成功集合 − 远端已有（纯函数，供单测）。"""
+    remote = set(remote_ids)
+    seen: set[str] = set()
+    missing: list[str] = []
+    for i in local_success_ids:
+        if i not in seen and i not in remote:
+            seen.add(i)
+            missing.append(i)
+    return missing
+
+
+def list_remote_video_dirs(ssh_target: str, remote_videos_dir: str) -> list[str]:
+    """远端 data/videos/ 下已有哪些 <aweme_id> 目录。失败返回 []（触发全量补推）。"""
+    try:
+        code, out = _run(
+            ["ssh", *_SSH_OPTS, ssh_target, f"ls -1 {remote_videos_dir} 2>/dev/null || true"],
+            timeout=30,
+        )
+        if code != 0:
+            logger.warning("[sync] 列远端目录失败（code=%s）：%s", code, out[:200])
+            return []
+        return [line.strip() for line in out.splitlines() if line.strip() and line.strip() != "manifest.json"]
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("[sync] 列远端目录异常: %s", exc)
+        return []
+
+
+def _push_one_dir(ssh_target: str, remote_videos_dir: str, local_dir: Path) -> str | None:
+    """推一个视频目录，重试 _ATTEMPTS 次。成功返回 None，失败返回错误串。"""
+    last_err = "unknown"
+    for attempt in range(1, _ATTEMPTS + 1):
+        try:
+            code, err = _run(
+                ["scp", "-q", *_SSH_OPTS, "-r", str(local_dir), f"{ssh_target}:{remote_videos_dir}/"],
+                timeout=_PER_FILE_TIMEOUT,
+            )
+            if code == 0:
+                return None
+            last_err = f"scp code={code}: {err[:200]}"
+        except subprocess.TimeoutExpired:
+            last_err = f"scp 超时（>{_PER_FILE_TIMEOUT}s，第 {attempt} 次）"
+        except OSError as exc:
+            last_err = f"scp 启动失败: {exc}"
+        logger.warning("[sync %s] 第 %d 次推送失败: %s", local_dir.name, attempt, last_err)
+    return last_err
 
 
 def push_videos(
@@ -25,39 +79,42 @@ def push_videos(
     videos_dir: Path,
     processed_dir: Path,
     *,
-    new_ids: list[str],
+    manifest_success_ids: list[str],
     manifest_path: Path,
 ) -> dict:
-    """推送新下载内容到服务器。返回 {"pushed": n, "errors": [...]}。"""
-    result = {"pushed": 0, "errors": []}
-    if not new_ids:
-        return result
-    for aweme_id in new_ids:
-        local_dir = videos_dir / aweme_id
-        if not local_dir.exists():
-            continue
-        code, err = _run([
-            "scp", "-q", *_SSH_OPTS, "-r",
-            str(local_dir), f"{ssh_target}:{remote_root}/data/videos/",
-        ])
-        if code == 0:
+    """对账式推送：缺什么推什么。返回 {"pushed": n, "errors": [...], "checked": n}。"""
+    remote_videos = f"{remote_root}/data/videos"
+    local_ids = [i for i in manifest_success_ids if (videos_dir / i / "video.mp4").exists()]
+    remote_ids = list_remote_video_dirs(ssh_target, remote_videos)
+    missing = compute_missing(local_ids, remote_ids)
+
+    result: dict = {"pushed": 0, "errors": [], "checked": len(local_ids)}
+    logger.info("[sync] 本地成功 %d 条 / 远端已有 %d 条 / 待推 %d 条", len(local_ids), len(remote_ids), len(missing))
+
+    for aweme_id in missing:
+        err = _push_one_dir(ssh_target, remote_videos, videos_dir / aweme_id)
+        if err is None:
             result["pushed"] += 1
         else:
-            result["errors"].append({"id": aweme_id, "error": err[:300]})
-            logger.warning("[sync %s] 推送失败: %s", aweme_id, err[:200])
-    # 台账与榜单产物（幂等，覆盖远端）
+            result["errors"].append({"id": aweme_id, "error": err})
+
+    # 台账与榜单产物（幂等覆盖）
     for src, dst in (
-        (manifest_path, f"{ssh_target}:{remote_root}/data/videos/manifest.json"),
+        (manifest_path, f"{ssh_target}:{remote_videos}/manifest.json"),
         (processed_dir / "trending_videos.jsonl", f"{ssh_target}:{remote_root}/data/processed/"),
         (processed_dir / "trending_videos.csv", f"{ssh_target}:{remote_root}/data/processed/"),
     ):
         if not src.exists():
             continue
-        code, err = _run(["scp", "-q", *_SSH_OPTS, str(src), dst])
-        if code != 0:
-            result["errors"].append({"id": str(src.name), "error": err[:300]})
+        try:
+            code, err = _run(["scp", "-q", *_SSH_OPTS, str(src), dst], timeout=120)
+            if code != 0:
+                result["errors"].append({"id": src.name, "error": err[:200]})
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            result["errors"].append({"id": src.name, "error": str(exc)[:200]})
+
     if result["errors"]:
-        logger.warning("[sync] %d 项同步失败（不致命）", len(result["errors"]))
+        logger.warning("[sync] %d 项同步失败（不致命，重跑流水线会自动补推）", len(result["errors"]))
     else:
-        logger.info("[sync] 已推送 %d 个视频目录 + manifest + 榜单产物 → %s", result["pushed"], ssh_target)
+        logger.info("[sync] 完成：推送 %d 个视频目录 + manifest + 榜单产物", result["pushed"])
     return result

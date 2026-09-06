@@ -169,10 +169,15 @@ def main(argv: list[str] | None = None) -> int:
 
     download_stats: dict[str, Any] | None = None
     if not args.no_download:
-        # Step 6 接入：本地 CDN 直下 + 回传服务器
+        # 本地 CDN 直下 + 回传服务器；下载阶段的意外异常不掩盖已完成的榜单结果
         from src.pipeline.run_downloads import run_download_stage  # 延迟导入（服务器无需）
 
-        download_stats = run_download_stage(cfg, top, max_downloads=args.max_downloads)
+        try:
+            download_stats = run_download_stage(cfg, top, max_downloads=args.max_downloads)
+        except Exception:  # noqa: BLE001
+            logger.exception("download 阶段意外失败（榜单结果已保留）")
+            download_stats = {"success": 0, "failed": 0, "skipped": 0, "skipped_image": 0,
+                              "attempted": 0, "errors": [{"id": "-", "error": "download stage crashed, see log"}], "sync": None}
 
     print_summary(trend_stats, download_stats, time.time() - t0)
 

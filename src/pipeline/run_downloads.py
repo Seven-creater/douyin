@@ -130,13 +130,17 @@ def run_download_stage(
             stats["failed"] += 1
             stats["errors"].append({"id": mv.aweme_id, "error": error})
 
-    # 回传服务器（Phase 2 感知在服务器；失败不致命）
+    # 回传服务器（对账式：缺什么推什么；失败不致命）
     sync_cfg = _load_sync_cfg()
-    if sync_cfg.get("enabled") and new_success_ids:
+    if sync_cfg.get("enabled"):
+        success_ids = [
+            aid for aid, e in manifest.data["downloads"].items()
+            if e.get("status") == "success"
+        ]
         stats["sync"] = push_videos(
             sync_cfg["ssh_target"], sync_cfg["remote_root"],
             cfg.paths.videos_dir, cfg.paths.processed_dir,
-            new_ids=new_success_ids, manifest_path=cfg.paths.videos_dir / "manifest.json",
+            manifest_success_ids=success_ids, manifest_path=cfg.paths.videos_dir / "manifest.json",
         )
 
     return stats

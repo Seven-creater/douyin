@@ -150,3 +150,15 @@ def test_download_sends_browser_headers(tmp_path):
     h = sess.calls[0]["headers"]
     assert h["User-Agent"] == "UA-test"
     assert h["Referer"] == "https://www.douyin.com/"
+
+
+# ---------- sync 对账 ----------
+
+def test_compute_missing_basic():
+    from src.download.sync import compute_missing
+
+    assert compute_missing(["a", "b", "c"], ["b"]) == ["a", "c"]      # 补缺
+    assert compute_missing(["a"], ["a"]) == []                        # 已有不动
+    assert compute_missing(["a", "a"], []) == ["a"]                   # 去重
+    assert compute_missing([], ["x"]) == []                           # 本地空则无
+    assert compute_missing(["m"], ["manifest.json"]) == ["m"]         # manifest 不算视频目录
