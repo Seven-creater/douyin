@@ -49,16 +49,22 @@ def extract_frames(
         str(out_dir / "frame_%06d.jpg"),
     ])
     files = sorted(out_dir.glob("frame_*.jpg"))
+    # fps 滤镜对小数 fps 有量化（实测 0.685 → 实际 ~0.5），以实际产出反推：
+    # 首帧 t=0、之后均匀分布是 fps 滤镜的确定行为 → t_s = index / actual_fps 自洽
+    n_actual = len(files)
+    if n_actual < min(n_expected, 4):  # 连 4 帧都没有基本是抽帧失败
+        raise RuntimeError(f"抽帧异常：期望≈{n_expected} 实得 {n_actual}")
+    actual_fps = (n_actual - 1) / duration_s if n_actual >= 2 and duration_s > 0 else 0.0
     frames = [
-        {"index": i, "t_s": round(i / effective_fps, 3), "file": f.name, "size_bytes": f.stat().st_size}
+        {"index": i, "t_s": round(i / actual_fps, 3) if actual_fps else 0.0,
+         "file": f.name, "size_bytes": f.stat().st_size}
         for i, f in enumerate(files)
     ]
-    if len(frames) < min(n_expected, 4):  # 连 4 帧都没有基本是抽帧失败
-        raise RuntimeError(f"抽帧异常：期望≈{n_expected} 实得 {len(frames)}")
     return {
         "requested_fps": fps,
-        "fps": round(effective_fps, 4),
-        "count": len(frames),
+        "fps": round(actual_fps, 4),
+        "planned_fps": round(effective_fps, 4),
+        "count": n_actual,
         "max_frames": max_frames,
         "frames": frames,
     }
