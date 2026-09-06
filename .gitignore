@@ -23,3 +23,9 @@ output/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# Phase 1
+.env
+data/
+logs/
+tools/

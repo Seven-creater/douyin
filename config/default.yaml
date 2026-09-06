@@ -1,0 +1,53 @@
+# Phase 1 全局配置（无密钥；密钥只放 .env 的 WELLBYTE_API_KEY）
+
+wellbyte:
+  base_url: https://api.wellbyte.net
+  endpoint: /v1/douyin/billboard/fetch_hot_total_video_list
+  timeout_seconds: 30
+  # 五类榜单：单一 endpoint，靠 sub_type 区分
+  sub_types: [1001, 1002, 1003, 1004, 1005]
+  sub_type_names:
+    1001: 视频总榜
+    1002: 低粉爆款
+    1003: 高完播率
+    1004: 高涨粉率
+    1005: 高点赞率
+  # 第一版统一请求参数（不要随意扩大，API 有 credits 成本）
+  request_params:
+    date_window: 24
+    page: 1
+    page_size: 20
+    keyword: ""
+    tags: []
+  retry:
+    max_attempts: 3        # 仅网络错误/5xx/42901 限流时重试；40101/40201 立即失败
+    backoff_seconds: 5
+
+paths:                     # 相对仓库根，加载时解析为绝对路径
+  raw_dir: data/raw/wellbyte
+  processed_dir: data/processed
+  videos_dir: data/videos
+  logs_dir: logs
+
+ranking:
+  top_n: 20
+
+download:
+  enabled: true
+  concurrency: 1           # 固定串行（尊重外部工具的智能延时，不做并发）
+  retry:
+    max_attempts: 2
+    backoff_seconds: 10
+  per_video_timeout_seconds: 600
+  direct:                  # 方案甲：CDN 直下
+    user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    referer: "https://www.douyin.com/"
+  tiktok:                  # 方案乙'：TikTokDownloader Web API 兜底
+    project_dir: tools/TikTokDownloader
+    host: 127.0.0.1
+    port: 5555
+    startup_timeout_seconds: 60
+    venv_python: null      # null = 自动探测 .venv/Scripts/python.exe | .venv/bin/python
+
+logging:
+  level: INFO
