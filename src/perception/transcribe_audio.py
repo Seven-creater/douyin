@@ -19,7 +19,7 @@ from src.perception import common
 logger = logging.getLogger(__name__)
 
 _TAG_RE = re.compile(r"<\|([^|]+)\|>")
-_LANG_TAGS = {"zh", "en", "yue", "ja", "ko", "auto"}
+_LANG_TAGS = {"ZH", "EN", "YUE", "JA", "KO", "AUTO"}  # 与 extract_tags 的 upper() 对齐
 # 情感标签单独归档（对模板分析也有用）
 _EMO_TAGS = {"HAPPY", "SAD", "ANGRY", "NEUTRAL", "EMO_UNKNOWN", "FEARDISGUST", "SURPRISED"}
 
