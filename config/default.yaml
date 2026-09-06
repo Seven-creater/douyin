@@ -76,7 +76,9 @@ perception:                # Phase 2 视频感知工具层
     fps: 2.0               # 官方评测口径
     max_pixels: null       # null=processor 默认；OOM 时降为 589824
     max_new_tokens: 2048
-    use_qwen_omni_utils: false  # 原生 apply_chat_template 失败时置 true（需 pip install qwen-omni-utils）
+    use_qwen_omni_utils: true   # 2026-09-06 实测：transformers 5.8.0 原生 apply_chat_template 在
+                                # use_audio_in_video=True 时 audio 占位符替换抛 StopIteration，
+                                # 切换官方 qwen-omni-utils 三步路径（process_mm_info/processor/generate 三处一致）
 
 logging:
   level: INFO

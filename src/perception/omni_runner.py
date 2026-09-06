@@ -104,13 +104,14 @@ class OmniRunner:
         }]
         fps = float(self.cfg.get("fps", 2.0))
         if self.cfg.get("use_qwen_omni_utils"):
+            # 官方 README 路径（逐字对齐；三处 use_audio_in_video=True 必须一致）
             from qwen_omni_utils import process_mm_info
 
             audios, images, videos = process_mm_info(conversation, use_audio_in_video=True)
             text = self._processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = self._processor(
                 text=text, audio=audios, images=images, videos=videos,
-                return_tensors="pt", padding=True, fps=fps, use_audio_in_video=True,
+                return_tensors="pt", padding=True, use_audio_in_video=True,
             )
         else:
             inputs = self._processor.apply_chat_template(
