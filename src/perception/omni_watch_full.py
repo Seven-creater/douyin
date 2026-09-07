@@ -25,9 +25,9 @@ def build_prompt(question: str | None) -> str:
 
 def run_for_video(cfg: AppConfig, aweme_id: str, *, force: bool = False,
                   question: str | None = None, prompt_name: str = "baseline_v1",
-                  runner=None):
+                  runner=None, video_override: Path | None = None):
     p_cfg = common.perception_cfg(cfg)
-    video = common.resolve_video_path(cfg.paths.videos_dir, aweme_id)
+    video = video_override or common.resolve_video_path(cfg.paths.videos_dir, aweme_id)
     tdir = common.tool_dir_for(cfg.paths.perception_dir, aweme_id, "omni_full")
     params = {"prompt_name": prompt_name, "fps": p_cfg.get("omni", {}).get("fps", 2.0),
               "question": question}
@@ -97,9 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     set_visible_gpus(gpus)  # 必须在 import torch 前
 
     try:
-        aweme_id, _ = common.resolve_target(cfg, args)
+        aweme_id, video = common.resolve_target(cfg, args)
         path = run_for_video(cfg, aweme_id, force=args.force, question=args.question,
-                             prompt_name=args.prompt_name)
+                             prompt_name=args.prompt_name,
+                             video_override=video if args.video else None)
         common.emit_status_line("ok", output=str(path), gpus=gpus)
         return 0
     except Exception as exc:  # noqa: BLE001
