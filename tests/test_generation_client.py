@@ -34,7 +34,7 @@ def test_manifest_roundtrip_and_done(tmp_path):
     m.save()
     assert not m.is_done("v1", 0)                       # done 但文件不存在
     p = m.clip_path("v1", 0)
-    p.parent.mkdir(parents=True)
+    p.parent.mkdir(parents=True)  # 含 clips/ 子目录
     p.write_bytes(b"x" * 20000)
     assert m.is_done("v1", 0)                            # done 且文件在
     # 重新加载持久化检查
@@ -46,6 +46,7 @@ def test_manifest_key_format(tmp_path):
     m = GenerationManifest(tmp_path / "m.json", tmp_path)
     assert m.key("giftbox", 3) == "giftbox/u03"
     assert m.clip_path("giftbox", 3).name == "u03.mp4"
+    assert "clips" in str(m.clip_path("giftbox", 3))
 
 
 # ---------- expected_job_seconds ----------
@@ -131,7 +132,7 @@ def test_scheduler_end_to_end(fake_server, tmp_path, monkeypatch):
                     num_frames=124, output_name="t_v1_u00.mp4")
     stats = sched.run(svc, [task])
     assert manifest.is_done("v1", 0)
-    assert (clips_root / "v1" / "u00.mp4").stat().st_size == 20000
+    assert (clips_root / "v1" / "clips" / "u00.mp4").stat().st_size == 20000
     entry = manifest.get("v1", 0)
     assert entry["status"] == "done" and entry["seed"] == 42
     assert stats["done"] >= 1
@@ -143,7 +144,7 @@ def test_scheduler_skips_done(fake_server, tmp_path, monkeypatch):
 
     clips_root = tmp_path / "clips"
     manifest = GenerationManifest(tmp_path / "manifest.json", clips_root)
-    p = clips_root / "v1" / "u00.mp4"
+    p = clips_root / "v1" / "clips" / "u00.mp4"
     p.parent.mkdir(parents=True)
     p.write_bytes(b"x" * 20000)
     manifest.record("v1", 0, status="done")

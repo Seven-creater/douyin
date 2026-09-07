@@ -168,7 +168,8 @@ class GenerationManifest:
         return f"{variant_id}/u{unit_id:02d}"
 
     def clip_path(self, variant_id: str, unit_id: int) -> Path:
-        return self.clips_root / variant_id / f"u{unit_id:02d}.mp4"
+        # 与 assemble 的 clips_dir 对齐：variants/<vid>/clips/uXX.mp4
+        return self.clips_root / variant_id / "clips" / f"u{unit_id:02d}.mp4"
 
     def get(self, variant_id: str, unit_id: int) -> dict | None:
         return self.data["clips"].get(self.key(variant_id, unit_id))
