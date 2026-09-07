@@ -66,9 +66,11 @@ class MiniMaxService:
         return h if h and h.get("status") in ("ready", "loading") else None
 
     def start_instance(self, port: int, gpu_pair: str) -> bool:
-        """运行 serve.sh（运行非改码）。"""
-        env = {"HOST": "0.0.0.0", "PORT": str(port), "CUDA_VISIBLE_DEVICES": gpu_pair,
-               "PATH": "/usr/bin:/bin:" + ( __import__("os").environ.get("PATH", ""))}
+        """运行 serve.sh（运行非改码）。继承完整环境（缺 HOME/LD_LIBRARY_PATH 会让
+        accelerate 静默回退 CPU 加载——2026-09-07 实测踩坑），只覆盖三个变量。"""
+        import os
+
+        env = {**os.environ, "HOST": "0.0.0.0", "PORT": str(port), "CUDA_VISIBLE_DEVICES": gpu_pair}
         proc = subprocess.Popen(
             ["bash", self.serve_sh, "start"], env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -106,33 +108,58 @@ class MiniMaxService:
         timeout = float(self.cfg.get("health_timeout_s", 1500))
         for i in range(n):
             port = base + i
-            h = self.probe(port)
-            if h and h.get("status") == "ready":
+            pair = free_pairs[i] if i < len(free_pairs) else (pairs_all[i] if i < len(pairs_all) else "0,1")
+            if self._instance_healthy_on_gpu(port, pair):
                 ready.append(port)
                 continue
+            h = self.probe(port)
             if h:  # loading 中
-                logger.info("[minimax] 端口 %d 已在加载中", port)
+                logger.info("[minimax] 端口 %d 已在加载中（gpus=%s）", port, pair)
             else:
-                pair = free_pairs[i] if i < len(free_pairs) else (pairs_all[i] if i < len(pairs_all) else "0,1")
                 logger.info("[minimax] 启动实例 port=%d gpus=%s", port, pair)
                 self.start_instance(port, pair)
-            # 等就绪
+            # 等就绪（HTTP ready + GPU 显存 >1GB，防 CPU 静默回退的假就绪）
             t0 = time.time()
             while time.time() - t0 < timeout:
-                h = self.http.health(self.base_url(port))
-                if h and h.get("status") == "ready":
+                if self._instance_healthy_on_gpu(port, pair):
                     ready.append(port)
                     break
+                h = self.http.health(self.base_url(port))
                 if h and h.get("status") == "failed":
                     warns.append(f"端口 {port} 服务 failed（看 serve.log）")
                     break
+                if h and h.get("status") == "ready" and not self._instance_healthy_on_gpu(port, pair):
+                    # ready 但 GPU 空 = CPU 回退，等一会再验（刚 ready 显存可能未完全提交）
+                    if time.time() - t0 > 120:
+                        warns.append(f"端口 {port} ready 但 GPU 无显存（疑似 CPU 回退），已剔除")
+                        self.stop_instance(port)
+                        break
                 time.sleep(10)
             else:
                 warns.append(f"端口 {port} 等待就绪超时（{timeout:.0f}s）")
         return ready, warns
 
+    def gpu_mem_used_mb(self, gpu_pair: str) -> int:
+        """只读：卡对内任一卡的最大已用显存（MiB）。"""
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            used = {line.split(",")[0].strip(): int(line.split(",")[1]) for line in out.splitlines() if "," in line}
+            return max((used.get(g.strip(), 0) for g in gpu_pair.split(",")), default=0)
+        except (subprocess.SubprocessError, ValueError):
+            return 0
+
+    def _instance_healthy_on_gpu(self, port: int, gpu_pair: str) -> bool:
+        """就绪 + 显存 >1GB（防 CPU 静默回退的假就绪）。"""
+        h = self.probe(port)
+        return bool(h and h.get("status") == "ready" and self.gpu_mem_used_mb(gpu_pair) > 1024)
+
     def stop_instance(self, port: int) -> None:
-        env = {"PORT": str(port), "PATH": "/usr/bin:/bin:" + (__import__("os").environ.get("PATH", ""))}
+        import os
+
+        env = {**os.environ, "PORT": str(port)}
         subprocess.run(["bash", self.serve_sh, "stop"], env=env,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
