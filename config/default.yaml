@@ -64,6 +64,11 @@ perception:                # Phase 2 视频感知工具层
     engine: rapidocr
     stride: 1              # frames 默认 1fps 已稀疏，逐帧 OCR
     min_confidence: 0.5
+  beats:
+    sr: 16000
+    hop_ms: 50
+    min_interval_s: 0.3    # 过滤 <200BPM 伪峰
+    max_beats: 160
   transcribe:
     model: iic/SenseVoiceSmall   # 首次自动从 ModelScope 下载 ~1GB
     vad_model: fsmn-vad
@@ -79,6 +84,11 @@ perception:                # Phase 2 视频感知工具层
     use_qwen_omni_utils: true   # 2026-09-06 实测：transformers 5.8.0 原生 apply_chat_template 在
                                 # use_audio_in_video=True 时 audio 占位符替换抛 StopIteration，
                                 # 切换官方 qwen-omni-utils 三步路径（process_mm_info/processor/generate 三处一致）
+
+template:                 # Phase 3 模板抽取
+  max_context_chars: 6000
+  max_new_tokens: 2048
+  max_retries: 1          # JSON 解析/校验失败后的 repair 重试次数
 
 logging:
   level: INFO

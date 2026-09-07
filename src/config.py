@@ -73,6 +73,7 @@ class AppConfig:
     ranking: dict[str, Any]
     download: dict[str, Any]
     perception: dict[str, Any]
+    template: dict[str, Any]
     logging_level: str
 
 
@@ -107,6 +108,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         ranking=dict(raw.get("ranking") or {}),
         download=dict(raw.get("download") or {}),
         perception=dict(raw.get("perception") or {}),
+        template=dict(raw.get("template") or {}),
         logging_level=str((raw.get("logging") or {}).get("level", "INFO")).upper(),
     )
     for p in cfg.paths.__dict__.values():

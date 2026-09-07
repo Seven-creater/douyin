@@ -158,7 +158,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = AppConfig(  # dataclass 不可变，覆盖 top_n 重建
             wellbyte=cfg.wellbyte, paths=cfg.paths,
             ranking={**cfg.ranking, "top_n": args.top_n},
-            download=cfg.download, perception=cfg.perception, logging_level=cfg.logging_level,
+            download=cfg.download, perception=cfg.perception,
+            template=cfg.template, logging_level=cfg.logging_level,
         )
 
     try:

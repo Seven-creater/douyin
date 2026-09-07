@@ -15,11 +15,11 @@ from pathlib import Path
 
 from src.config import AppConfig, ensure_utf8_stdio, load_config, setup_logging
 from src.perception import common
-from src.perception import detect_shots, extract_frames, inspect_video, ocr_frames, transcribe_audio
+from src.perception import detect_beats, detect_shots, extract_frames, inspect_video, ocr_frames, transcribe_audio
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TOOLS = ("inspect", "frames", "shots", "ocr", "transcribe")
+DEFAULT_TOOLS = ("inspect", "frames", "shots", "ocr", "transcribe", "beats")
 
 
 def run_all(cfg: AppConfig, *, ids: list[str] | None = None, force: bool = False,
@@ -45,6 +45,8 @@ def run_all(cfg: AppConfig, *, ids: list[str] | None = None, force: bool = False
                     if "ocr" not in t_models:
                         t_models["ocr"] = ocr_frames.load_ocr()
                     path = ocr_frames.run_for_video(cfg, aweme_id, force=force, ocr=t_models["ocr"])
+                elif tool == "beats":
+                    path = detect_beats.run_for_video(cfg, aweme_id, force=force)
                 elif tool == "transcribe":
                     if "asr" not in t_models:
                         t_models["asr"] = transcribe_audio.load_transcriber(

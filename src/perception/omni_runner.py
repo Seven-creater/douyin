@@ -133,8 +133,6 @@ class OmniRunner:
               start_s: float | None = None, end_s: float | None = None,
               clip_dir: Path | None = None, max_new_tokens: int | None = None,
               duration_s: float | None = None) -> OmniAnswer:
-        import torch
-
         self.load()
         clip_path = None
         t_pre0 = time.time()
@@ -146,14 +144,49 @@ class OmniRunner:
         inputs = self._build_inputs(actual, prompt)
         input_build_s = time.time() - t_pre0
 
+        frames_est = None
+        if duration_s is not None:
+            frames_est = round(duration_s * float(self.cfg.get("fps", 2.0)))
+
+        return self._generate(inputs, max_new_tokens=max_new_tokens,
+                              use_audio_in_video=True, frames_estimate=frames_est,
+                              clip_path=clip_path, input_build_s=input_build_s)
+
+    # ---------- 纯文本推理（Phase 3 模板抽取用） ----------
+    def ask(self, prompt: str, *, max_new_tokens: int | None = None) -> OmniAnswer:
+        """纯文本问答：tokenizer 直连，绕开 omni processor 的 audio 占位符路径（5.8.0 已知坑）。"""
+        self.load()
+        t_pre0 = time.time()
+        conversation = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        tok = self._processor.tokenizer
+        text = tok.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+        inputs = tok(text=text, return_tensors="pt")
+        # BatchEncoding.to(dtype) 只转浮点张量（int 的 input_ids 不动）——S6 已实证安全
+        inputs = inputs.to(self._model.device).to(self._model.dtype)
+        input_build_s = time.time() - t_pre0
+        try:
+            return self._generate(inputs, max_new_tokens=max_new_tokens,
+                                  input_build_s=input_build_s)
+        except TypeError:
+            # 5.8.0 若 generate 强制要求 use_audio_in_video，补传 False 重试一次
+            return self._generate(inputs, max_new_tokens=max_new_tokens,
+                                   use_audio_in_video=False, input_build_s=input_build_s)
+
+    # ---------- 共享生成尾部 ----------
+    def _generate(self, inputs, *, max_new_tokens: int | None = None,
+                  use_audio_in_video: bool | None = None, frames_estimate: int | None = None,
+                  clip_path: Path | None = None, input_build_s: float = 0.0) -> OmniAnswer:
+        import torch
+
         input_len = inputs["input_ids"].shape[1]
         torch.cuda.reset_peak_memory_stats()
         max_new = int(max_new_tokens or self.cfg.get("max_new_tokens", 2048))
+        gen_kwargs = dict(max_new_tokens=max_new,
+                          repetition_penalty=float(self.cfg.get("repetition_penalty", 1.05)))
+        if use_audio_in_video is not None:
+            gen_kwargs["use_audio_in_video"] = use_audio_in_video
         t0 = time.time()
-        generated = self._model.generate(
-            **inputs, use_audio_in_video=True, max_new_tokens=max_new,
-            repetition_penalty=float(self.cfg.get("repetition_penalty", 1.05)),
-        )
+        generated = self._model.generate(**inputs, **gen_kwargs)
         elapsed = time.time() - t0
 
         text = self._processor.batch_decode(
@@ -166,10 +199,6 @@ class OmniRunner:
             vram_peak.append(round(torch.cuda.max_memory_allocated(i) / 2**30, 2))
             vram_reserved.append(round(torch.cuda.memory_reserved(i) / 2**30, 2))
 
-        frames_est = None
-        if duration_s is not None:
-            frames_est = round(duration_s * float(self.cfg.get("fps", 2.0)))
-
         return OmniAnswer(
             text=text,
             input_tokens=int(input_len),
@@ -177,7 +206,7 @@ class OmniRunner:
             elapsed_s=round(elapsed, 2),
             vram_peak_gb=vram_peak,
             vram_reserved_gb=vram_reserved,
-            frames_estimate=frames_est,
+            frames_estimate=frames_estimate,
             clip_path=clip_path,
             input_build_s=round(input_build_s, 2),
         )
