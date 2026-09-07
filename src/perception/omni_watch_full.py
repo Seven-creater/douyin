@@ -25,7 +25,8 @@ def build_prompt(question: str | None) -> str:
 
 def run_for_video(cfg: AppConfig, aweme_id: str, *, force: bool = False,
                   question: str | None = None, prompt_name: str = "baseline_v1",
-                  runner=None, video_override: Path | None = None):
+                  runner=None, video_override: Path | None = None,
+                  max_new_tokens: int | None = None):
     p_cfg = common.perception_cfg(cfg)
     video = video_override or common.resolve_video_path(cfg.paths.videos_dir, aweme_id)
     tdir = common.tool_dir_for(cfg.paths.perception_dir, aweme_id, "omni_full")
@@ -43,7 +44,7 @@ def run_for_video(cfg: AppConfig, aweme_id: str, *, force: bool = False,
     duration_s = common.video_duration_s(p_cfg.get("ffprobe_bin", "ffprobe"), video)
     t0 = time.time()
     answer = runner.watch(video, build_prompt(question),
-                          max_new_tokens=p_cfg.get("omni", {}).get("max_new_tokens", 2048),
+                          max_new_tokens=max_new_tokens or p_cfg.get("omni", {}).get("max_new_tokens", 2048),
                           duration_s=duration_s)
     answer.text = dedupe_repetition(answer.text)  # 复读保险
     total_s = time.time() - t0
@@ -100,7 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         aweme_id, video = common.resolve_target(cfg, args)
         path = run_for_video(cfg, aweme_id, force=args.force, question=args.question,
                              prompt_name=args.prompt_name,
-                             video_override=video if args.video else None)
+                             video_override=video if args.video else None,
+                             max_new_tokens=args.max_new_tokens)
         common.emit_status_line("ok", output=str(path), gpus=gpus)
         return 0
     except Exception as exc:  # noqa: BLE001
