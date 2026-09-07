@@ -29,6 +29,7 @@ paths:                     # 相对仓库根，加载时解析为绝对路径
   videos_dir: data/videos
   logs_dir: logs
   perception_dir: data/perception
+  generation_dir: data/generation
 
 ranking:
   top_n: 20
@@ -89,6 +90,39 @@ template:                 # Phase 3 模板抽取
   max_context_chars: 6000
   max_new_tokens: 2048
   max_retries: 1          # JSON 解析/校验失败后的 repair 重试次数
+
+generation:               # Phase 4 MiniMax 生成管线
+  minimax:
+    serve_sh: /data02/usr/wangqihao/Demo/test/minimax_h3/serve.sh
+    host: 127.0.0.1
+    base_port: 8300
+    gpu_pairs: ["0,1", "2,3", "4,5", "6,7"]   # 8×A6000 → 最多 4 实例
+    max_instances: 4
+    results_dir: /data02/usr/wangqihao/Demo/test/minimax_h3/results
+    health_timeout_s: 1500    # 冷启动 ~20min
+    poll_interval_s: 20
+    job_timeout_factor: 2.0   # 超时 = expected_s × factor + 300；expected = frames/124×690+60
+    max_retries: 2            # 每片段重提次数（seed+1 换文件名）
+  plan:
+    fps: 24
+    width: 544                # 竖屏 9:16（G1 闸门验证，失败回退 960×544+rotate）
+    height: 960
+    min_unit_s: 5.2
+    max_unit_s: 10.0
+    head_pad_s: 0.3
+    tail_pad_s: 0.3
+    max_frames: 260           # 17×15+5，单 job 墙钟上限 ~21min
+  rewrite:
+    max_new_tokens: 2048
+    max_retries: 1
+  variant:
+    mode: propose             # propose(ask()) | preset | file
+  assemble:
+    crf: 20
+    preset: veryfast
+    audio_rate: 44100
+    font: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+    font_size: 56
 
 logging:
   level: INFO

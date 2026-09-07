@@ -64,6 +64,7 @@ class PathsCfg:
     videos_dir: Path
     logs_dir: Path
     perception_dir: Path
+    generation_dir: Path
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class AppConfig:
     download: dict[str, Any]
     perception: dict[str, Any]
     template: dict[str, Any]
+    generation: dict[str, Any]
     logging_level: str
 
 
@@ -104,11 +106,13 @@ def load_config(path: Path | None = None) -> AppConfig:
             videos_dir=_abs_path(paths["videos_dir"]),
             logs_dir=_abs_path(paths["logs_dir"]),
             perception_dir=_abs_path(paths.get("perception_dir", "data/perception")),
+            generation_dir=_abs_path(paths.get("generation_dir", "data/generation")),
         ),
         ranking=dict(raw.get("ranking") or {}),
         download=dict(raw.get("download") or {}),
         perception=dict(raw.get("perception") or {}),
         template=dict(raw.get("template") or {}),
+        generation=dict(raw.get("generation") or {}),
         logging_level=str((raw.get("logging") or {}).get("level", "INFO")).upper(),
     )
     for p in cfg.paths.__dict__.values():

@@ -25,14 +25,16 @@ class ValidationResult:
 # ---------- 抽取 ----------
 
 def extract_json_block(text: str) -> str | None:
-    """剥 think/围栏 → 从首个 { 配对扫描到最后闭合 }（中文字符串里的花括号不杀扫描）。"""
+    """剥 think/围栏 → 从首个 { 或 [ 起配对扫描到外层容器闭合（对象或数组皆可）。"""
     cleaned = _THINK_RE.sub("", text).strip()
     m = _FENCE_RE.search(cleaned)
     if m:
         cleaned = m.group(1).strip()
-    start = cleaned.find("{")
+    start = min((i for i in (cleaned.find("{"), cleaned.find("[")) if i >= 0), default=-1)
     if start < 0:
         return None
+    opener = cleaned[start]
+    closer = "}" if opener == "{" else "]"
     depth, in_str, esc = 0, False, False
     for i, ch in enumerate(cleaned[start:], start=start):
         if in_str:
@@ -45,12 +47,14 @@ def extract_json_block(text: str) -> str | None:
             continue
         if ch == '"':
             in_str = True
-        elif ch == "{":
+        elif ch in "{[":
             depth += 1
-        elif ch == "}":
+        elif ch in "}]":
             depth -= 1
             if depth == 0:
-                return cleaned[start : i + 1]
+                if ch == closer:
+                    return cleaned[start : i + 1]
+                return None  # 外层类型不匹配（截断/损坏）
     return None
 
 

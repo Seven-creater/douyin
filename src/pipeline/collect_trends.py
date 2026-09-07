@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             wellbyte=cfg.wellbyte, paths=cfg.paths,
             ranking={**cfg.ranking, "top_n": args.top_n},
             download=cfg.download, perception=cfg.perception,
-            template=cfg.template, logging_level=cfg.logging_level,
+            template=cfg.template, generation=cfg.generation, logging_level=cfg.logging_level,
         )
 
     try:
