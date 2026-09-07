@@ -87,8 +87,34 @@ python -m tests.smoke_real_api # 真实 API 冒烟（手动，花 credits）
 - 回传失败 → 不致命，检查 ssh 免密；单独重推：`scp -r data/videos/<id> wangqihao@10.1.4.86:/data02/usr/wangqihao/Demo/research/data/videos/`
 - `.env` 缺失 → `cp .env.example .env` 并填 key
 
-# Phase 2+（规划中）
+# Phase 2：多模态感知（已完成）
 
-- perception（视频理解）：Qwen3-Omni 感知工具层，见 `src/perception/README.md`
-- generation（素材生成）：MiniMax-H3，见 `src/generation/README.md`
-- 服务器资源详情见 `minimax_linux.md`
+Qwen3-Omni-30B thinker + FunASR/RapidOCR/librosa/ffmpeg 工具层，
+一条命令 `python -m src.perception.run_all --gpus 0,1,2,3`，产物 `data/perception/<id>/<tool>/result.json`。
+详见 `src/perception/README.md`。
+
+# Phase 3：模板抽取（已完成）
+
+感知产物 → 结构化 Trend Template JSON（timeline/role/fixed/replaceable），
+三层防编造防线，12/13 条 json 一次过。详见 `src/template/README.md`。
+
+# Phase 4：MiniMax 批量翻拍生成（已完成）
+
+```
+Template JSON → planner（role 感知单元合并）→ variant（LLM 提议 3 套替换）
+→ rewrite（英文 t2va prompt）→ MiniMax-H3 4 实例并行生成 → FFmpeg 装配 → final.mp4
+```
+
+```bash
+# 服务器一条命令（全流程幂等，断点续跑）
+python -m src.generation.run_generation --template-id <aweme_id> --variants 3 --instances 4
+```
+
+2026-09-07 实测（纸箱梗模板 7681612687865084623）：1 模板 × 3 变体（抽象文字舞/都市购物/
+赛博朋克），2 生成单元 × 3 = 6 片段全部一次成功（124f≈13min、192f≈21min，4 实例并行），
+3 个 final.mp4（544×960 竖屏 H.264+AAC+字幕，10.14s）装配完成；重跑全 skip。
+详见 `src/generation/README.md`。
+
+# 服务器资源
+
+详见 `minimax_linux.md`。
