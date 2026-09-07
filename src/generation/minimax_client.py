@@ -108,14 +108,20 @@ class MiniMaxService:
     def ensure_instances(self, n: int) -> tuple[list[int], list[str]]:
         """探测→补启动→等就绪。返回 (就绪端口列表, 告警)。"""
         pairs_all = self.cfg.get("gpu_pairs") or []
-        n = min(n, int(self.cfg.get("max_instances", 4)), len(pairs_all))
         free_pairs, warns = self.preflight_gpus()
+        # 实例数不得超过空闲卡对数：free_pairs ⊆ pairs_all，原兜底按 pairs_all[i]
+        # 取值会给多余实例重复分配已占用/已分配的卡对（2026-09-07 单命令模式下
+        # Omni 常驻 0,1 时实测会触发：第 4 实例与第 3 实例同抢 "6,7" → OOM）
+        n_capped = min(n, int(self.cfg.get("max_instances", 4)), len(pairs_all), len(free_pairs))
+        if n_capped < n:
+            warns.append(f"空闲卡对不足（{len(free_pairs)}/{len(pairs_all)}），实例数 {n} → {n_capped}")
+        n = n_capped
         ready: list[int] = []
         base = int(self.cfg.get("base_port", 8300))
         timeout = float(self.cfg.get("health_timeout_s", 1500))
         for i in range(n):
             port = base + i
-            pair = free_pairs[i] if i < len(free_pairs) else (pairs_all[i] if i < len(pairs_all) else "0,1")
+            pair = free_pairs[i]
             h = self.probe(port)
             if h and h.get("status") == "ready":
                 ready.append(port)

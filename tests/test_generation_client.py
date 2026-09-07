@@ -156,6 +156,31 @@ def test_scheduler_skips_done(fake_server, tmp_path, monkeypatch):
     assert FakeMiniMaxHandler.jobs == {}  # 完全没提交
 
 
+def test_ensure_instances_caps_to_free_pairs(monkeypatch):
+    """空闲卡对不足时实例数收敛到 free_pairs，且不重复分配卡对。"""
+    import src.generation.minimax_client as mc
+
+    svc = mc.MiniMaxService({"host": "127.0.0.1", "base_port": 8300,
+                             "gpu_pairs": ["0,1", "2,3", "4,5", "6,7"],
+                             "max_instances": 4, "health_timeout_s": 5})
+    monkeypatch.setattr(svc, "preflight_gpus", lambda: (["2,3", "4,5", "6,7"], ["卡对 0,1 忙"]))
+    started: list[tuple[int, str]] = []
+    monkeypatch.setattr(svc, "start_instance",
+                        lambda port, pair: started.append((port, pair)) or True)
+    calls = {"n": 0}
+
+    def fake_health(base_url):  # 首查未启动，启动后 ready
+        calls["n"] += 1
+        return {"status": "ready"} if calls["n"] % 2 == 0 else None
+
+    monkeypatch.setattr(svc.http, "health", fake_health)
+    ready, warns = svc.ensure_instances(4)
+    assert len(started) == 3 and len(ready) == 3          # 4 → 3，不再抢卡
+    pairs = [p for _, p in started]
+    assert pairs == ["2,3", "4,5", "6,7"] and len(set(pairs)) == 3
+    assert any("3" in w for w in warns)                   # 降容告警落账
+
+
 # ---------- assemble 纯函数 ----------
 
 def test_escape_drawtext():
