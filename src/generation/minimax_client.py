@@ -109,52 +109,30 @@ class MiniMaxService:
         for i in range(n):
             port = base + i
             pair = free_pairs[i] if i < len(free_pairs) else (pairs_all[i] if i < len(pairs_all) else "0,1")
-            if self._instance_healthy_on_gpu(port, pair):
+            h = self.probe(port)
+            if h and h.get("status") == "ready":
                 ready.append(port)
                 continue
-            h = self.probe(port)
             if h:  # loading 中
                 logger.info("[minimax] 端口 %d 已在加载中（gpus=%s）", port, pair)
             else:
                 logger.info("[minimax] 启动实例 port=%d gpus=%s", port, pair)
                 self.start_instance(port, pair)
-            # 等就绪（HTTP ready + GPU 显存 >1GB，防 CPU 静默回退的假就绪）
+            # 等就绪：只信 HTTP（auto_cpu_offload 模式下空闲时 GPU 显存≈0 是正常形态，
+            # 2026-09-07 实测：用"GPU 空=假就绪"判断会连环误杀健康实例）
             t0 = time.time()
             while time.time() - t0 < timeout:
-                if self._instance_healthy_on_gpu(port, pair):
+                h = self.http.health(self.base_url(port))
+                if h and h.get("status") == "ready":
                     ready.append(port)
                     break
-                h = self.http.health(self.base_url(port))
                 if h and h.get("status") == "failed":
                     warns.append(f"端口 {port} 服务 failed（看 serve.log）")
                     break
-                if h and h.get("status") == "ready" and not self._instance_healthy_on_gpu(port, pair):
-                    # ready 但 GPU 空 = CPU 回退，等一会再验（刚 ready 显存可能未完全提交）
-                    if time.time() - t0 > 120:
-                        warns.append(f"端口 {port} ready 但 GPU 无显存（疑似 CPU 回退），已剔除")
-                        self.stop_instance(port)
-                        break
                 time.sleep(10)
             else:
                 warns.append(f"端口 {port} 等待就绪超时（{timeout:.0f}s）")
         return ready, warns
-
-    def gpu_mem_used_mb(self, gpu_pair: str) -> int:
-        """只读：卡对内任一卡的最大已用显存（MiB）。"""
-        try:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,memory.used", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=15,
-            ).stdout
-            used = {line.split(",")[0].strip(): int(line.split(",")[1]) for line in out.splitlines() if "," in line}
-            return max((used.get(g.strip(), 0) for g in gpu_pair.split(",")), default=0)
-        except (subprocess.SubprocessError, ValueError):
-            return 0
-
-    def _instance_healthy_on_gpu(self, port: int, gpu_pair: str) -> bool:
-        """就绪 + 显存 >1GB（防 CPU 静默回退的假就绪）。"""
-        h = self.probe(port)
-        return bool(h and h.get("status") == "ready" and self.gpu_mem_used_mb(gpu_pair) > 1024)
 
     def stop_instance(self, port: int) -> None:
         import os
