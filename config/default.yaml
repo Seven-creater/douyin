@@ -94,6 +94,8 @@ template:                 # Phase 3 模板抽取
 generation:               # Phase 4 MiniMax 生成管线
   minimax:
     serve_sh: /data02/usr/wangqihao/Demo/test/minimax_h3/serve.sh
+    python: /data02/usr/wangqihao/miniconda3/envs/h3/bin/python
+    instance_log_dir: /data02/usr/wangqihao/Demo/research/logs   # 多实例各自日志（serve.log 是共享单实例设计）
     host: 127.0.0.1
     base_port: 8300
     gpu_pairs: ["0,1", "2,3", "4,5", "6,7"]   # 8×A6000 → 最多 4 实例

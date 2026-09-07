@@ -66,17 +66,24 @@ class MiniMaxService:
         return h if h and h.get("status") in ("ready", "loading") else None
 
     def start_instance(self, port: int, gpu_pair: str) -> bool:
-        """运行 serve.sh（运行非改码）。继承完整环境（缺 HOME/LD_LIBRARY_PATH 会让
-        accelerate 静默回退 CPU 加载——2026-09-07 实测踩坑），只覆盖三个变量。"""
+        """直接运行 serve.py 多实例（serve.sh 是单实例设计：共享 serve.pid/log，
+        第二实例 start 会因 alive() 误判跳过——2026-09-07 实测）。运行非改码。"""
         import os
 
-        env = {**os.environ, "HOST": "0.0.0.0", "PORT": str(port), "CUDA_VISIBLE_DEVICES": gpu_pair}
+        serve_dir = Path(self.serve_sh).parent
+        python = self.cfg.get("python", "/data02/usr/wangqihao/miniconda3/envs/h3/bin/python")
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu_pair}
+        log_path = Path(self.cfg.get("instance_log_dir", "/tmp")) / f"mm_instance_{port}.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_f = open(log_path, "ab")
         proc = subprocess.Popen(
-            ["bash", self.serve_sh, "start"], env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            [python, "serve.py", "--host", "0.0.0.0", "--port", str(port)],
+            cwd=str(serve_dir), env=env,
+            stdout=log_f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
-        proc.wait(timeout=30)
-        return proc.returncode == 0
+        logger.info("[minimax] serve.py pid=%d port=%d → %s", proc.pid, port, log_path)
+        return True
 
     def preflight_gpus(self) -> tuple[list[str], list[str]]:
         """只读探测；返回 (可用卡对, 告警)。占用 >10GB 的对视为忙。"""
@@ -135,11 +142,9 @@ class MiniMaxService:
         return ready, warns
 
     def stop_instance(self, port: int) -> None:
-        import os
-
-        env = {**os.environ, "PORT": str(port)}
-        subprocess.run(["bash", self.serve_sh, "stop"], env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        """按 cmdline 匹配停我们自己拉起的 serve.py（也顺带停 serve.sh 拉起的单实例）。"""
+        subprocess.run(["pkill", "-f", f"serve.py --host 0.0.0.0 --port {port}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
 
 
 # ---------- 台账 ----------
