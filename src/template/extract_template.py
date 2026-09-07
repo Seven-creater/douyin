@@ -23,11 +23,12 @@ from src.template.prompts import build_repair_prompt, build_template_prompt, ded
 logger = logging.getLogger(__name__)
 
 
-def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=None) -> Path | None:
+def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=None,
+               max_new_tokens: int | None = None) -> Path | None:
     t_cfg = cfg.template or {}
     max_chars = int(t_cfg.get("max_context_chars", 6000))
     max_retries = int(t_cfg.get("max_retries", 1))
-    max_new = int(t_cfg.get("max_new_tokens", 2048))
+    max_new = int(max_new_tokens or t_cfg.get("max_new_tokens", 2048))
 
     bundle = tctx.load_perception_bundle(cfg.paths.perception_dir, aweme_id, cfg.paths.videos_dir)
     duration_s = tctx.duration_of(bundle)
@@ -126,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="热点模板抽取")
     common.add_common_cli_args(ap)
     ap.add_argument("--dry-run", action="store_true", help="只打印上下文与预算，不调模型")
+    ap.add_argument("--max-new-tokens", type=int, default=None,
+                    help="超长视频时间线被 2048 截断时调大（如 4096）")
     args = ap.parse_args(argv)
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="template_extract")
@@ -145,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         aweme_id, _ = common.resolve_target(cfg, args)
-        path = synthesize(cfg, aweme_id, force=args.force)
+        path = synthesize(cfg, aweme_id, force=args.force, max_new_tokens=args.max_new_tokens)
         if path is None:
             common.emit_status_line("error", aweme_id=aweme_id, error="parse failed (see raw_answer.txt)")
             return 1
