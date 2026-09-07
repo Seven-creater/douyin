@@ -154,13 +154,15 @@ class OmniRunner:
 
     # ---------- 纯文本推理（Phase 3 模板抽取用） ----------
     def ask(self, prompt: str, *, max_new_tokens: int | None = None) -> OmniAnswer:
-        """纯文本问答：tokenizer 直连，绕开 omni processor 的 audio 占位符路径（5.8.0 已知坑）。"""
+        """纯文本问答。注意：chat template 在 processor 上（tokenizer.chat_template 未设，
+        2026-09-07 冒烟实测）；纯文本消息无多模态占位符，不经过 audio 占位符替换的坑路径。"""
         self.load()
         t_pre0 = time.time()
         conversation = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        tok = self._processor.tokenizer
-        text = tok.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
-        inputs = tok(text=text, return_tensors="pt")
+        inputs = self._processor.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=True,
+            return_dict=True, return_tensors="pt", padding=True,
+        )
         # BatchEncoding.to(dtype) 只转浮点张量（int 的 input_ids 不动）——S6 已实证安全
         inputs = inputs.to(self._model.device).to(self._model.dtype)
         input_build_s = time.time() - t_pre0
