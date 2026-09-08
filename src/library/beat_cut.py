@@ -8,7 +8,12 @@
   逐段截 0.5s 级片段（fps24/544×960 统一）→ concat（重编码，帧率混杂教训）→
   切点处白帧（drawbox enable between）→ 模板原声 → final.mp4 + 审计
 
-CLI：python -m src.library.beat_cut --template-id <tid> [--style 高能] [--force]
+CLI：python -m src.library.beat_cut --template-id <tid> [--crop center|blurpad] [--force]
+
+裁切策略（2026-09-08 用户反馈"比例/布局奇怪"）：
+  center  居中裁 9:16——16:9 源会裁掉 ~70% 宽度，主体常被切（默认弃用）
+  blurpad 模糊底——主体完整缩放置中，放大模糊副本垫上下（reels 行业标准）
+  由 critic 自审循环按反馈自动切换/换镜头（run_critic_loop）。
 """
 from __future__ import annotations
 
@@ -23,6 +28,17 @@ from src.library.build_index import E5Embedder, load_index
 from src.perception import common
 
 logger = logging.getLogger(__name__)
+
+
+def crop_vf(strategy: str, w: int = 544, h: int = 960) -> str:
+    """段统一画面链：crop_vf('blurpad') 等。fps=24 统一（帧率混杂教训）。"""
+    if strategy == "blurpad":
+        return (f"split[a][b];"
+                f"[a]scale={w}:{h}:force_original_aspect_ratio=increase,"
+                f"crop={w}:{h},gblur=sigma=24[bg];"
+                f"[b]scale={w}:-2[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=24")
+    return f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=24"
 
 # 轮换需求句：卡点混剪无叙事线，按多样性轮换取材（可被 --style 前缀加权）
 QUERY_POOL = [
@@ -87,8 +103,12 @@ def pick_shots(rows, emb, text_embs, durs, *, used: set, min_len_s: float,
 
 
 def run_beat_cut(cfg: AppConfig, template_id: str, *, force: bool = False,
-                 flash_s: float = 0.08) -> Path:
-    out_dir = cfg.paths.library_dir / "stories" / f"{template_id}_beatcut"
+                 flash_s: float = 0.08, crop: str = "blurpad",
+                 swap_shots: dict[int, int] | None = None,
+                 tag: str = "") -> Path:
+    """swap_shots：{cut_idx: row_idx} 按序号强制换镜头（critic 优化用）；
+    tag：产物目录后缀（v2/v3，供 critic 循环保留各版）。"""
+    out_dir = cfg.paths.library_dir / "stories" / f"{template_id}_beatcut{tag}"
     final = out_dir / "final.mp4"
     if final.exists() and not force:
         logger.info("[beatcut %s] 已有产物，跳过", template_id)
@@ -124,10 +144,12 @@ def run_beat_cut(cfg: AppConfig, template_id: str, *, force: bool = False,
     work.mkdir(parents=True, exist_ok=True)
     a_cfg = cfg.library.get("assemble") or {}
     crf = int(a_cfg.get("crf", 20))
+    swap_shots = swap_shots or {}
     seg_files, audit = [], []
     for i, ((start, end), ri) in enumerate(zip(plan, picked)):
         out = work / f"c{i:03d}.mp4"
         take = end - start
+        ri = swap_shots.get(i, ri)                  # critic 换镜头覆盖
         if ri is None:
             common.run_ffmpeg("ffmpeg", ["-y", "-loglevel", "error", "-f", "lavfi",
                                          "-i", f"color=black:s=544x960:d={take:g}:r=24",
@@ -139,8 +161,7 @@ def run_beat_cut(cfg: AppConfig, template_id: str, *, force: bool = False,
             common.run_ffmpeg("ffmpeg", [
                 "-y", "-loglevel", "error", "-ss", f"{row['start_s']:g}",
                 "-i", row["video"], "-t", f"{take:g}",
-                "-vf", "scale=544:960:force_original_aspect_ratio=increase,"
-                       "crop=544:960,fps=24",
+                "-vf", crop_vf(crop),
                 "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
                 "-pix_fmt", "yuv420p", str(out)])
             audit.append({"cut": i, "start": start, "end": end,
@@ -175,7 +196,8 @@ def run_beat_cut(cfg: AppConfig, template_id: str, *, force: bool = False,
     final.write_bytes(voiced.read_bytes())
     (out_dir / "beatcut.json").write_text(json.dumps({
         "template_id": template_id, "final": str(final), "duration_s": dur,
-        "n_cuts": len(plan), "half_beat": half, "flash_s": flash_s,
+        "n_cuts": len(plan), "half_beat": half, "flash_s": flash_s, "crop": crop,
+        "swapped": swap_shots,
         "placeholder_cuts": sum(1 for a in audit if a.get("placeholder")),
         "cuts": audit}, ensure_ascii=False, indent=1), encoding="utf-8")
     logger.info("[beatcut %s] final %.2fs，%d 刀（%d 占位）→ %s",
@@ -190,12 +212,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="节拍锁定素材库卡点剪辑")
     ap.add_argument("--template-id", required=True)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--crop", choices=["center", "blurpad"], default="blurpad")
     ap.add_argument("--config", default=None)
     args = ap.parse_args(argv)
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="lib_beatcut")
     try:
-        run_beat_cut(cfg, args.template_id, force=args.force)
+        run_beat_cut(cfg, args.template_id, force=args.force, crop=args.crop)
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.exception("beat_cut 失败")
