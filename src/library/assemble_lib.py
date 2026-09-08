@@ -98,13 +98,15 @@ def run_assemble(cfg: AppConfig, template_id: str, *, force: bool = False) -> Pa
     common.run_ffmpeg("ffmpeg", ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
                                  "-i", str(concat_list), "-c", "copy", str(concat_out)])
 
-    # 模板原视频的音频轨（时长天然与时间线对齐）
+    # 模板原视频的音频轨；音轨可能短于画面（猫模板实测 8s/12.9s）→ apad 垫齐而非 -shortest 截断
     src_video = cfg.paths.videos_dir / template_id / "video.mp4"
     voiced = work / "voiced.mp4" if src_video.exists() else None
     if voiced:
+        concat_dur = common.video_duration_s(
+            cfg.perception.get("ffprobe_bin", "ffprobe"), concat_out) or 0
         common.run_ffmpeg("ffmpeg", [
             "-y", "-loglevel", "error", "-i", str(concat_out), "-i", str(src_video),
-            "-map", "0:v", "-map", "1:a?", "-shortest",
+            "-map", "0:v", "-map", "1:a?", "-af", "apad", "-t", f"{concat_dur + 0.5:g}",
             "-c:v", "copy", "-c:a", "aac", "-ar",
             str(int(a_cfg.get("audio_rate", 44100))), str(voiced)])
     base = voiced or concat_out
