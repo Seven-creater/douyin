@@ -95,8 +95,12 @@ def run_assemble(cfg: AppConfig, template_id: str, *, force: bool = False) -> Pa
     concat_list.write_text("".join(f"file '{f.as_posix()}'\n" for f in seg_files),
                            encoding="utf-8")
     concat_out = work / "concat.mp4"
+    # concat 重编码而非 -c copy：-ss 切出的段带非零起始时间戳（mp4 edit list），
+    # copy 模式 DTS 非单调会吞段（首片实测 3 段只拼进 2 段，12.9s 变 8.0s）
     common.run_ffmpeg("ffmpeg", ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-                                 "-i", str(concat_list), "-c", "copy", str(concat_out)])
+                                 "-i", str(concat_list), "-an",
+                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+                                 "-pix_fmt", "yuv420p", str(concat_out)])
 
     # 模板原视频的音频轨；音轨可能短于画面（猫模板实测 8s/12.9s）→ apad 垫齐而非 -shortest 截断
     src_video = cfg.paths.videos_dir / template_id / "video.mp4"
