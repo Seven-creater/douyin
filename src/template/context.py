@@ -12,7 +12,7 @@ _MAX_OMNI_SECTION_CHARS = 400
 _MAX_TEMPLATE_ELEMENTS_CHARS = 600
 _MAX_OCR_EVENTS = 15
 _MAX_ASR_CHARS = 400
-_TITLE_MAX = 60
+_TITLE_MAX = 80
 
 
 def estimate_tokens(text: str) -> int:
@@ -48,6 +48,7 @@ def load_perception_bundle(perception_dir: Path, aweme_id: str, videos_dir: Path
         "transcribe": _read("transcribe"),
         "beats": _read("beats"),
         "omni_full": omni,
+        "context": _read("context"),
     }
 
 
@@ -68,6 +69,20 @@ def build_context(bundle: dict, *, max_chars: int = 6000) -> tuple[str, dict]:
     lines.append(f"[标题] {title or '无'}")
     lines.append(f"[热度] 点赞 {stats_like.get('likes')} / 播放 {stats_like.get('views')}")
     stats["tools_used"].append("metadata")
+
+    # 外部上下文（fetch_context 产物：相关视频/热评）——识别热梗来源的关键证据
+    ext = bundle.get("context") or {}
+    if isinstance(ext, dict):
+        for c in (ext.get("comments") or [])[:10]:
+            txt = _cut(str(c.get("text", "")), 80)
+            if txt:
+                lines.append(f"[热评·观众反应] ♡{c.get('digg_count', '?')} {txt}")
+        for rv in (ext.get("related") or [])[:8]:
+            ttl = _cut(str(rv.get("title", "")), 60)
+            if ttl:
+                lines.append(f"[相关视频·同款/系列] {ttl}（作者{rv.get('author') or '?'} ♡{rv.get('likes') or '?'}）")
+        if ext.get("comments") or ext.get("related"):
+            stats["tools_used"].append("context")
 
     insp = bundle.get("inspect")
     if insp:

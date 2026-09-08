@@ -29,6 +29,13 @@ TEMPLATE_PROMPT_HEADER = """你是一名短视频模板拆解专家。下面给�
 5. 上下文材料里没有依据的内容，对应字段填 null 或字符串 "uncertain"，禁止编造。
 6. speech 字段写概括（ASR 转写无时间戳，按叙事时间线推断落位），不要逐字引用长段原文；
    text 字段必须是 OCR 事件里出现过的字幕文字。
+7. 标题/热评/相关视频标题是判断「为什么火」的首要外部证据：若其中出现具体模仿对象或 IP
+   （游戏/影视/动漫角色、名人、歌曲）或「教学/belike/模仿」等字样，core_meme 与 trend_summary
+   必须点明「模仿谁+出处」（如「模仿《王者荣耀》角色安琪拉的语音台词与动作」），并把被模仿的
+   台词与标志性动作列在 fixed_elements 最前面——模仿关系是必须保留的梗核心，道具/场景是次要的；
+   replaceable_elements 不得包含被模仿的角色/出处本身。
+8. timeline 必须连续覆盖全片：相邻区间相接（不留空隙），最后一段 end 距视频总时长 ≤1s，
+   禁止只覆盖前半段。
 
 【输出 JSON 骨架】（字段名与类型严格一致）
 """ + _TEMPLATE_SKELETON + """
@@ -47,7 +54,8 @@ def build_repair_prompt(context: str, raw_output: str, errors: list[str]) -> str
         "（无围栏、无解释），字段与规则如下。\n\n"
         "【规则摘要】start/end 取自镜头边界；role 只能取 "
         + "/".join(ROLE_ENUM)
-        + "；beat_points 只能取自给定列表；无依据内容标 uncertain 或 null。\n\n"
+        + "；beat_points 只能取自给定列表；无依据内容标 uncertain 或 null；"
+        "timeline 连续覆盖全片；标题/热评出现模仿对象时必须点明出处。\n\n"
         "【上次输出】\n" + raw_output[:3000] + "\n\n"
         "【校验错误】\n- " + "\n- ".join(errors[:20]) + "\n\n"
         "【视频材料】\n" + context

@@ -112,6 +112,16 @@ def validate_template(obj, *, duration_s: float, shot_boundaries: list[float],
                     if isinstance(start, (int, float)) else start
                 if isinstance(start, (int, float)) and abs(nearest - start) > 0.5:
                     res.warnings.append(f"timeline[{i}].start={start} 离最近镜头边界 {nearest} 超 0.5s")
+        # 软：覆盖完整性（2026-09-08 纸箱梗实测：只覆盖前 10s/16.9s → 成品比原片短 1/3）
+        if last_end >= 0 and duration_s - last_end > 1.0:
+            res.warnings.append(
+                f"timeline 尾部未覆盖：最后 end={last_end:g}s，视频 {duration_s:g}s（缺 {duration_s - last_end:.1f}s）")
+        for i in range(1, len(tl)):
+            prev_end, cur = tl[i - 1].get("end"), tl[i]
+            if isinstance(prev_end, (int, float)) and isinstance(cur.get("start"), (int, float)) \
+                    and cur["start"] - prev_end > 0.5:
+                res.warnings.append(
+                    f"timeline 间隔未覆盖：{prev_end:g}s→{cur['start']:g}s（应连续覆盖全片）")
 
     # audio
     audio = obj["audio"]
