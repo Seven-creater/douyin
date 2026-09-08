@@ -29,7 +29,9 @@ def build_seg_cmd(src: Path, dst: Path, *, shot_start: float, shot_dur: float,
     """截取镜头片段；不足段长时末帧冻结补齐。统一 544×960 竖屏重编码。"""
     take = min(shot_dur, need_dur)
     pad = max(0.0, need_dur - shot_dur)
-    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}"
+    # fps=24 统一帧率：素材源帧率不一（B站 23.976/25 混杂），不统一则 concat demuxer
+    # 混帧率时长错乱（首片实测 12.9s 拼成 8s）
+    vf = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},fps=24"
     if pad > 0.05:
         vf += f",tpad=stop_mode=clone:stop_duration={pad:g}"
     return ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{shot_start:g}",
