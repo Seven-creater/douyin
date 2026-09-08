@@ -23,6 +23,16 @@ from src.template.prompts import build_repair_prompt, build_template_prompt, ded
 logger = logging.getLogger(__name__)
 
 
+def _coverage_penalty(timeline: list[dict], duration_s: float) -> float:
+    """覆盖罚分 = 尾部缺失 + 段间空隙总和（秒）。用于修复版与保底版择优。"""
+    if not timeline:
+        return duration_s
+    tail = max(0.0, duration_s - float(timeline[-1].get("end") or 0))
+    gaps = sum(max(0.0, float(timeline[i].get("start") or 0) - float(timeline[i - 1].get("end") or 0))
+               for i in range(1, len(timeline)))
+    return round(tail + gaps, 2)
+
+
 def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=None,
                max_new_tokens: int | None = None) -> Path | None:
     t_cfg = cfg.template or {}
@@ -53,6 +63,7 @@ def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=Non
     result = None
     mode = "fail"
     attempts_meta = []
+    fallback = None  # (template, warnings)：覆盖修复前的可用 json 结果
 
     for attempt in range(1 + max_retries):
         prompt = build_template_prompt(ctx) if attempt == 0 else None
@@ -70,6 +81,13 @@ def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=Non
             "elapsed_s": answer.elapsed_s,
         })
         if m == "json":
+            cov = [w for w in res.warnings if "未覆盖" in w]
+            if cov and attempt < max_retries and fallback is None:
+                # 覆盖不完整（尾部缺失/段间空隙）→ 带着问题清单 repair 一次；首版结果保底
+                fallback = (res.template, res.warnings)
+                attempts_meta[-1]["errors"] = cov
+                logger.warning("[template %s] 覆盖不完整，触发修复重试：%s", aweme_id, cov[:2])
+                continue
             result, mode = res.template, m
             break
         if m == "partial":
@@ -78,6 +96,14 @@ def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=Non
         logger.warning("[template %s] 第 %d 次尝试 mode=%s errors=%s", aweme_id, attempt + 1, m,
                        res.errors[:3])
         # json_invalid → 走 repair 重试
+
+    if fallback is not None:
+        if result is None or mode != "json":
+            result, mode = fallback[0], "json"   # 修复重试失败 → 用首版 json 保底
+        elif any("未覆盖" in w for w in res.warnings) and \
+                _coverage_penalty(result["timeline"], duration_s) >= \
+                _coverage_penalty(fallback[0]["timeline"], duration_s):
+            result, mode = fallback[0], "json"   # 修复版覆盖仍不达标 → 择优保底
 
     total_s = time.time() - t0
     if result is None:
@@ -92,12 +118,14 @@ def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=Non
         return None
 
     usage = attempts_meta[-1]
+    final_warnings = (fallback[1] if (fallback is not None and result is fallback[0])
+                      else res.warnings) if result is not None else []
     output = {
         "template": result,
         "parse_meta": {
             "mode": mode, "attempts": len(attempts_meta),
             "errors": [e for a in attempts_meta for e in a["errors"]][:20],
-            "warnings": [w for w in (res.warnings if result else [])][:20],
+            "warnings": [w for w in final_warnings][:20],
         },
         "usage": {
             "elapsed_s": usage["elapsed_s"], "total_s": round(total_s, 2),
