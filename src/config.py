@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -65,6 +65,7 @@ class PathsCfg:
     logs_dir: Path
     perception_dir: Path
     generation_dir: Path
+    library_dir: Path = Path("data/library")   # 素材库（电影/预告片 + 索引）
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class AppConfig:
     template: dict[str, Any]
     generation: dict[str, Any]
     logging_level: str
+    library: dict[str, Any] = field(default_factory=dict)
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -107,6 +109,7 @@ def load_config(path: Path | None = None) -> AppConfig:
             logs_dir=_abs_path(paths["logs_dir"]),
             perception_dir=_abs_path(paths.get("perception_dir", "data/perception")),
             generation_dir=_abs_path(paths.get("generation_dir", "data/generation")),
+            library_dir=_abs_path(paths.get("library_dir", "data/library")),
         ),
         ranking=dict(raw.get("ranking") or {}),
         download=dict(raw.get("download") or {}),
@@ -114,6 +117,7 @@ def load_config(path: Path | None = None) -> AppConfig:
         template=dict(raw.get("template") or {}),
         generation=dict(raw.get("generation") or {}),
         logging_level=str((raw.get("logging") or {}).get("level", "INFO")).upper(),
+        library=dict(raw.get("library") or {}),
     )
     for p in cfg.paths.__dict__.values():
         p.mkdir(parents=True, exist_ok=True)

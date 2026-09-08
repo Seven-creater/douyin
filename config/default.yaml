@@ -128,3 +128,29 @@ generation:               # Phase 4 MiniMax 生成管线
 
 logging:
   level: INFO
+
+library:                   # 素材库（Spider-Man 预告片/电影 → 可检索镜头库）
+  raw_subdir: raw          # data/library/raw/<来源>/<文件>.mp4
+  shots:                   # B1 镜头切分
+    threshold: 0.3         # ffmpeg scene 阈值（预告片高密度剪切）
+    min_shot_len_s: 0.4
+    max_shots_per_video: 400
+  captions:                # B2 镜头描述（轻量 VLM 批量；用户拍板：VLM转文本做检索，不用CLIP）
+    model_path: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/qwen2-vl
+    visible_gpus: "0"      # 16G 单卡
+    max_new_tokens: 120    # 主体/动作/场景/情绪 结构化短描述
+    prompt_version: shot_caption_v2
+  embed:                    # B3 检索索引（E5 文本嵌入，caption 侧）
+    model_path: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/e5-omni-7B
+    device: cuda:0
+    batch: 16
+  story:                   # C2 模板→故事板
+    max_new_tokens: 2048
+    max_retries: 1
+  retrieve:
+    top_k: 5
+    min_cosine: 0.18       # 低于此判"库内不足"
+    dedupe_window: 2       # 相邻 N 段不复用同一镜头
+  assemble:
+    crf: 20
+    audio_rate: 44100
