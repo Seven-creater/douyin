@@ -151,9 +151,13 @@ class MiniMaxService:
         return ready, warns
 
     def stop_instance(self, port: int) -> None:
-        """按 cmdline 匹配停我们自己拉起的 serve.py（也顺带停 serve.sh 拉起的单实例）。"""
-        subprocess.run(["pkill", "-f", f"serve.py --host 0.0.0.0 --port {port}"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        """按 cmdline 匹配停实例——兼容新旧两种启动方式：
+        旧 serve.py（test/minimax_h3）与新模块 src.generation.minimax_serve。
+        2026-09-08 实测：只匹配旧 pattern 时双图 serve 全部变僵尸，占卡到第二天。"""
+        for pat in (f"serve.py --host 0.0.0.0 --port {port}",
+                    f"src.generation.minimax_serve.*--port {port}"):
+            subprocess.run(["pkill", "-f", pat],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
 
 
 # ---------- 台账 ----------
