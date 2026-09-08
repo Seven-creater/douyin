@@ -148,7 +148,7 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     max_new_tokens: 2048
     max_retries: 1
   editing_analysis:        # Omni 反推卡点/剪辑模板手法
-    max_new_tokens: 3072
+    max_new_tokens: 4096   # 50s 高密度卡点 3072 会截断 JSON（实测）
     max_retries: 1
     prompt_version: editing_v1
   retrieve:

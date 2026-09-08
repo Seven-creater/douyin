@@ -33,9 +33,11 @@ EDITING_PROMPT_HEADER = """你是专业剪辑师。看这条热门短视频（�
 
 【硬性规则】
 1. 只输出一个 JSON 对象，无围栏无解释。
-2. timeline[] 里每个手法事件的 t_s 必须取自证据时刻（节拍点或镜头边界，±0.3s 内），
-   technique 只能取：hard_cut_on_beat / zoom_punch / flash / speed_ramp / match_cut /
-   whip_pan / text_pop / freeze / shake / mask_wipe / beat_drop_pause / other。
+2. timeline[] 最多 20 个最具代表性的手法事件（普通 hard_cut_on_beat 只挑标志性几处，
+   优先收录 zoom_punch/flash/speed_ramp/mask_wipe 等特殊手法），每个 t_s 必须取自
+   证据时刻（节拍点或镜头边界，±0.3s 内），technique 只能取：hard_cut_on_beat /
+   zoom_punch / flash / speed_ramp / match_cut / whip_pan / text_pop / freeze / shake /
+   mask_wipe / beat_drop_pause / other。
 3. audio 讲清：BGM 类型与强度感、踩点方式（每拍切/半拍切/重拍切）、音效（whoosh/riser/砰）、
    人声处理、变速位置。
 4. ffmpeg_hints 写 FFmpeg 命令级要点（如"白帧 0.08s 叠加在切点上""切点取 beat_points"）。
