@@ -37,6 +37,10 @@ class GenerationPlan:
     source_duration_s: float
     audio_brief: str | None             # template.audio.bgm
     units: list[GenerationUnit]
+    # 梗核心透传（2026-09-08 安琪拉教训：timeline[].visual 只含表象，模仿对象在 core_meme/
+    # fixed_elements 里，必须随 plan 流到 rewrite prompt，否则生成又退回道具梗）
+    core_meme: str = ""
+    fixed_elements: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

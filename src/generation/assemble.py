@@ -70,7 +70,9 @@ def load_plan(cfg: AppConfig, template_id: str) -> models.GenerationPlan:
         segments=[models.UnitSegment(**s) for s in u["segments"]],
     ) for u in p["units"]]
     return models.GenerationPlan(template_id=p["template_id"], source_duration_s=p["source_duration_s"],
-                                 audio_brief=p.get("audio_brief"), units=units)
+                                 audio_brief=p.get("audio_brief"), units=units,
+                                 core_meme=p.get("core_meme") or "",
+                                 fixed_elements=list(p.get("fixed_elements") or []))
 
 
 def load_prompts(cfg: AppConfig, template_id: str, variant_id: str) -> list[dict]:

@@ -85,3 +85,17 @@ def test_template_prompt_has_imitation_rules():
 def test_generation_prompts_carry_imitation_core():
     assert "模仿某角色/IP" in REWRITE_PROMPT_HEADER
     assert "不得替换被模仿的角色" in VARIANT_PROPOSAL_PROMPT_HEADER
+
+
+def test_rewrite_prompt_includes_core_meme_and_fixed():
+    from src.generation.models import GenerationPlan
+    from src.generation.prompts import build_rewrite_prompt
+
+    plan = GenerationPlan(
+        template_id="t", source_duration_s=16.9, audio_brief=None, units=[],
+        core_meme="模仿《王者荣耀》角色安琪拉的语音台词与动作",
+        fixed_elements=["模仿安琪拉魔性台词：'知识就是力量'"])
+    variant = type("V", (), {"label": "赛博朋克", "substitutions": {"场景": "霓虹机房"}})()
+    text = build_rewrite_prompt(plan, variant)
+    assert "核心梗（每条 prompt 必须体现）】模仿《王者荣耀》角色安琪拉" in text
+    assert "【固定元素（不可丢失）】" in text and "知识就是力量" in text

@@ -45,9 +45,13 @@ def unit_brief(u: GenerationUnit) -> str:
 def build_rewrite_prompt(plan: GenerationPlan, variant: VariantSpec) -> str:
     briefs = "\n".join(unit_brief(u) for u in plan.units)
     subs = "\n".join(f"  - {k} → {v}" for k, v in variant.substitutions.items())
+    core = f"\n【核心梗（每条 prompt 必须体现）】{plan.core_meme}\n" if plan.core_meme else ""
+    fixed = ("\n【固定元素（不可丢失）】\n" + "\n".join(f"- {f}" for f in plan.fixed_elements) + "\n"
+             if plan.fixed_elements else "")
     return (
         REWRITE_PROMPT_HEADER
         + f"\n【模板 BGM】{plan.audio_brief or '未提供'}\n"
+        + core + fixed
         + f"\n【生成单元】\n{briefs}\n"
         + f"\n【变体：{variant.label}】替换要求：\n{subs}\n"
     )

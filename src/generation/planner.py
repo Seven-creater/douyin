@@ -111,6 +111,8 @@ def plan_units(template: dict, *, template_id: str, plan_cfg: dict) -> models.Ge
         source_duration_s=round(sum(_dur(s) for s in timeline), 3),
         audio_brief=audio.get("bgm"),
         units=units,
+        core_meme=str(template.get("core_meme") or ""),
+        fixed_elements=list(template.get("fixed_elements") or []),
     )
 
 
@@ -120,6 +122,8 @@ def plan_to_output(plan: models.GenerationPlan) -> dict:
             "template_id": plan.template_id,
             "source_duration_s": plan.source_duration_s,
             "audio_brief": plan.audio_brief,
+            "core_meme": plan.core_meme,
+            "fixed_elements": plan.fixed_elements,
             "units": [
                 {
                     "unit_id": u.unit_id, "roles": u.roles,
