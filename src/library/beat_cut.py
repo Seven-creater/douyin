@@ -95,10 +95,10 @@ def run_beat_cut(cfg: AppConfig, template_id: str, *, force: bool = False,
         return final
 
     tdir = cfg.paths.perception_dir / template_id
-    insp = common.read_result_json(tdir / "inspect") or {}
-    duration = float(insp.get("duration_s") or 0)
-    beats_env = common.read_result_json(tdir / "beats") or {}
-    beats = list(beats_env.get("beat_points_s") or [])
+    insp_env = common.read_result_json(tdir / "inspect")
+    beats_env = common.read_result_json(tdir / "beats")
+    duration = float(((insp_env or {}).get("output") or {}).get("duration_s") or 0)
+    beats = list(((beats_env or {}).get("output") or {}).get("beat_points_s") or [])
     if not duration or not beats:
         raise FileNotFoundError(f"缺 inspect/beats 产物（先跑感知基础件）：{template_id}")
 
