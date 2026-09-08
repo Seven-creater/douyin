@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -179,6 +180,40 @@ def test_ensure_instances_caps_to_free_pairs(monkeypatch):
     pairs = [p for _, p in started]
     assert pairs == ["2,3", "4,5", "6,7"] and len(set(pairs)) == 3
     assert any("3" in w for w in warns)                   # 降容告警落账
+
+
+def test_scheduler_chains_anchor(fake_server, tmp_path, monkeypatch):
+    """跨片段一致性：u01 只在 u00 完成后派发，且携带 u00 末帧锚定图。"""
+    port = fake_server.server_address[1]
+    import src.generation.minimax_client as mc
+    from src.perception import common as pcommon
+
+    def fake_ffmpeg(_bin, args):
+        jpg = Path(args[-1])
+        jpg.parent.mkdir(parents=True, exist_ok=True)
+        jpg.write_bytes(b"\xff\xd8fakejpg" * 200)
+
+    monkeypatch.setattr(pcommon, "run_ffmpeg", fake_ffmpeg)
+
+    clips_root = tmp_path / "clips"
+    manifest = GenerationManifest(tmp_path / "manifest.json", clips_root)
+    svc = mc.MiniMaxService({**_fake_svc_cfg(port)})
+    sched = GenerationScheduler([port], svc.http, manifest, svc.cfg, clips_root, 544, 960)
+    tasks = [ClipTask(variant_id=v, unit_id=u, prompt="p", seed=1, num_frames=124,
+                      output_name=f"{v}_u{u}.mp4")
+             for v in ("v1", "v2") for u in (0, 1)]
+    sched.run(svc, tasks)
+
+    reqs = [j["request"] for j in FakeMiniMaxHandler.jobs.values()]
+    u0_reqs = [r for r in reqs if r.get("image") is None]
+    u1_reqs = [r for r in reqs if r.get("image")]
+    assert len(u0_reqs) == 2 and len(u1_reqs) == 2          # 每 u00 无锚、每 u01 有锚
+    for r in u1_reqs:
+        assert r["image"].endswith("anchor_u01.jpg") and "work" in r["image"]
+    # 提交顺序（jobs 即提交序）：首条必是某 u00；每条带锚的都在同变体 u00 之后
+    assert reqs[0].get("image") is None
+    first_anchored_idx = next(i for i, r in enumerate(reqs) if r.get("image"))
+    assert any(r.get("image") is None for r in reqs[:first_anchored_idx])
 
 
 # ---------- assemble 纯函数 ----------

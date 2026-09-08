@@ -76,7 +76,8 @@ def run_generation(cfg: AppConfig, *, template_id: str, n_variants: int, instanc
         return {"stage": "rewrite", "n": len(specs)}
 
     # 4) generate
-    mm_cfg = g_cfg.get("minimax") or {}
+    mm_cfg = dict(g_cfg.get("minimax") or {})
+    mm_cfg.setdefault("serve_cwd", str(cfg.paths.logs_dir.parent))  # 仓库根：-m 启动 fl2va serve 用
     svc = MiniMaxService(mm_cfg)
     plan_cfg = g_cfg.get("plan") or {}
     manifest = GenerationManifest(gdir / "manifest.json", gdir / "variants")

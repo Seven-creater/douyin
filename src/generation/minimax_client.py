@@ -38,11 +38,13 @@ class MiniMaxHTTP:
             return None
 
     def submit(self, base_url: str, *, prompt: str, num_frames: int,
-               width: int, height: int, seed: int, output: str) -> str:
-        r = self._session.post(f"{base_url}/generate", json={
-            "prompt": prompt, "num_frames": num_frames, "height": height,
-            "width": width, "seed": seed, "output": output,
-        }, timeout=self._timeout)
+               width: int, height: int, seed: int, output: str,
+               image: str | None = None) -> str:
+        payload = {"prompt": prompt, "num_frames": num_frames, "height": height,
+                   "width": width, "seed": seed, "output": output}
+        if image:
+            payload["image"] = image   # fl2va 首帧锚定（服务器本地 jpg 路径）
+        r = self._session.post(f"{base_url}/generate", json=payload, timeout=self._timeout)
         r.raise_for_status()
         return r.json()["job_id"]
 
@@ -66,23 +68,24 @@ class MiniMaxService:
         return h if h and h.get("status") in ("ready", "loading") else None
 
     def start_instance(self, port: int, gpu_pair: str) -> bool:
-        """直接运行 serve.py 多实例（serve.sh 是单实例设计：共享 serve.pid/log，
-        第二实例 start 会因 alive() 误判跳过——2026-09-07 实测）。运行非改码。"""
+        """启动我们仓库的 fl2va serve（首帧锚定版，git 部署合规；2026-09-08 起）。
+        cwd 必须是仓库根（-m 模块路径）；serve_cwd 由 run_generation 注入。"""
         import os
 
-        serve_dir = Path(self.serve_sh).parent
+        cwd = self.cfg.get("serve_cwd") or str(Path(self.serve_sh).parent)
         python = self.cfg.get("python", "/data02/usr/wangqihao/miniconda3/envs/h3/bin/python")
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu_pair}
         log_path = Path(self.cfg.get("instance_log_dir", "/tmp")) / f"mm_instance_{port}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_f = open(log_path, "ab")
         proc = subprocess.Popen(
-            [python, "serve.py", "--host", "0.0.0.0", "--port", str(port)],
-            cwd=str(serve_dir), env=env,
+            [python, "-m", "src.generation.minimax_serve",
+             "--host", "0.0.0.0", "--port", str(port)],
+            cwd=str(cwd), env=env,
             stdout=log_f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
-        logger.info("[minimax] serve.py pid=%d port=%d → %s", proc.pid, port, log_path)
+        logger.info("[minimax] fl2va serve pid=%d port=%d → %s", proc.pid, port, log_path)
         return True
 
     def preflight_gpus(self) -> tuple[list[str], list[str]]:
@@ -211,6 +214,8 @@ class ClipTask:
     running_since: float | None = None
     attempts: int = 0
     errors: list[str] = field(default_factory=list)
+    # 跨片段一致性：前序片段末帧（fl2va 首帧锚定），None=本变体首单元/服务不支持
+    first_frame: Path | None = None
 
 
 def expected_job_seconds(num_frames: int, factor: float = 2.0) -> float:
@@ -238,11 +243,56 @@ class GenerationScheduler:
         shutil.copyfile(src, dst)
         return dst.exists() and dst.stat().st_size > 10_240
 
+    def _extract_anchor(self, clip: Path, jpg: Path) -> bool:
+        """抽片段末帧为首帧锚（fl2va 跨片段一致性）。"""
+        jpg.parent.mkdir(parents=True, exist_ok=True)
+        from src.perception import common
+
+        common.run_ffmpeg("ffmpeg", ["-y", "-loglevel", "error", "-sseof", "-0.05",
+                                     "-i", str(clip), "-update", "1", "-frames:v", "1",
+                                     "-q:v", "2", str(jpg)])
+        ok = jpg.exists() and jpg.stat().st_size > 1024
+        if not ok:
+            logger.warning("[scheduler] 锚定帧提取失败：%s", jpg)
+        return ok
+
+    def _prime_anchors(self, pending: list[ClipTask]) -> None:
+        """断点续跑：前序单元产物已存在时，先补齐锚定帧。"""
+        for t in pending:
+            if t.unit_id > 0 and t.first_frame is None \
+                    and self.manifest.is_done(t.variant_id, t.unit_id - 1):
+                jpg = self.clips_root / t.variant_id / "work" / f"anchor_u{t.unit_id:02d}.jpg"
+                if not jpg.exists():
+                    self._extract_anchor(self.manifest.clip_path(t.variant_id, t.unit_id - 1), jpg)
+                if jpg.exists():
+                    t.first_frame = jpg
+
+    def _next_eligible(self, pending: list[ClipTask], busy: dict[int, ClipTask]) -> ClipTask | None:
+        """变体内按 unit 顺序串行（u00 末帧 → u01 首帧锚定）：更小单元未完成时后续不派发。"""
+        blocked = {(t.variant_id, t.unit_id) for t in pending} | \
+                  {(t.variant_id, t.unit_id) for t in busy.values()}
+        for t in pending:
+            if not any(v == t.variant_id and u < t.unit_id for v, u in blocked):
+                return t
+        return None
+
+    def _chain_anchor(self, done: ClipTask, pending: list[ClipTask]) -> None:
+        nxt = min((t for t in pending if t.variant_id == done.variant_id
+                   and t.unit_id > done.unit_id and t.first_frame is None),
+                  default=None, key=lambda t: t.unit_id)
+        if nxt is None:
+            return
+        jpg = self.clips_root / done.variant_id / "work" / f"anchor_u{nxt.unit_id:02d}.jpg"
+        if self._extract_anchor(self.manifest.clip_path(done.variant_id, done.unit_id), jpg):
+            nxt.first_frame = jpg
+            logger.info("[scheduler] %s 锚定 u%02d ← u%02d 末帧", done.variant_id, nxt.unit_id, done.unit_id)
+
     def run(self, svc: MiniMaxService, tasks: list[ClipTask]) -> dict:
         poll_s = float(self.cfg.get("poll_interval_s", 20))
         max_retries = int(self.cfg.get("max_retries", 2))
         pending = [t for t in tasks if not self.manifest.is_done(t.variant_id, t.unit_id)]
         logger.info("[scheduler] %d 任务（跳过 %d 已完成）", len(pending), len(tasks) - len(pending))
+        self._prime_anchors(pending)
         busy: dict[int, ClipTask] = {}
         metrics_path = self.clips_root.parent / "metrics.jsonl"
         t_all = time.time()
@@ -252,7 +302,10 @@ class GenerationScheduler:
             for port in list(self.ports):
                 if port in busy or not pending:
                     continue
-                task = pending.pop(0)
+                task = self._next_eligible(pending, busy)
+                if task is None:
+                    continue
+                pending.remove(task)
                 task.attempts += 1
                 try:
                     base = svc.base_url(port)
@@ -261,12 +314,14 @@ class GenerationScheduler:
                     output = task.output_name.replace(".mp4", f"_a{task.attempts}.mp4")
                     task.job_id = self.http.submit(base, prompt=task.prompt, num_frames=task.num_frames,
                                                    width=self.width, height=self.height,
-                                                   seed=seed, output=output)
+                                                   seed=seed, output=output,
+                                                   image=str(task.first_frame) if task.first_frame else None)
                     task.port = port
                     busy[port] = task
                     self.manifest.record(task.variant_id, task.unit_id, status="submitted",
                                          job_id=task.job_id, port=port, seed=seed,
                                          attempts=task.attempts,
+                                         anchor=str(task.first_frame) if task.first_frame else "",
                                          submitted_at=datetime.now().isoformat(timespec="seconds"))
                     self.manifest.save()
                     logger.info("[scheduler] %s/u%02d → port %d (job %s, attempt %d)",
@@ -300,6 +355,7 @@ class GenerationScheduler:
                                              elapsed_s=elapsed, errors=task.errors)
                         self.manifest.save()
                         logger.info("[scheduler] %s/u%02d 完成 %.0fs", task.variant_id, task.unit_id, elapsed)
+                        self._chain_anchor(task, pending)
                         self._metric(metrics_path, task, "ok", elapsed)
                     else:
                         self._fail(task, RuntimeError("产物缺失或过小"), metrics_path, pending, max_retries)
