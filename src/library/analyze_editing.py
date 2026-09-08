@@ -157,10 +157,12 @@ def run_analysis(cfg: AppConfig, vid: str, *, force: bool = False, runner=None) 
         if obj is not None and result is None:
             result, mode = obj, "partial"      # 保底存档（时间戳告警不拦）
     if result is None:
+        tdir.mkdir(parents=True, exist_ok=True)
         (tdir / "raw_answer.txt").write_text(str(attempts), encoding="utf-8")
         logger.error("[edit %s] 分析失败，raw 已存（重跑即重试）", vid)
         return None
 
+    tdir.mkdir(parents=True, exist_ok=True)   # write_result_json 不建父目录（实测4连崩）
     path = common.write_result_json(tdir, tool="analyze_editing", aweme_id=vid,
                                     params=params, output={
                                         "mode": mode, "attempts": len(attempts),
