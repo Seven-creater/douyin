@@ -81,12 +81,12 @@ def synthesize(cfg: AppConfig, aweme_id: str, *, force: bool = False, runner=Non
             "elapsed_s": answer.elapsed_s,
         })
         if m == "json":
-            cov = [w for w in res.warnings if "未覆盖" in w]
+            cov = [w for w in res.warnings if ("未覆盖" in w or "未分解" in w or "结构分布" in w)]
             if cov and attempt < max_retries and fallback is None:
-                # 覆盖不完整（尾部缺失/段间空隙）→ 带着问题清单 repair 一次；首版结果保底
+                # 覆盖不完整/结构未分解 → 带着问题清单 repair 一次；首版结果保底
                 fallback = (res.template, res.warnings)
                 attempts_meta[-1]["errors"] = cov
-                logger.warning("[template %s] 覆盖不完整，触发修复重试：%s", aweme_id, cov[:2])
+                logger.warning("[template %s] 覆盖/结构问题，触发修复重试：%s", aweme_id, cov[:2])
                 continue
             result, mode = res.template, m
             break

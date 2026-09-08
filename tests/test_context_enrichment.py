@@ -69,10 +69,24 @@ def test_validate_warns_gap():
 
 
 def test_validate_full_coverage_no_warning():
-    tl = [{"start": 0.0, "end": 16.5, "role": "setup", "visual": "v", "speech": None, "text": None}]
+    tl = [
+        {"start": 0.0, "end": 5.0, "role": "setup", "visual": "v", "speech": None, "text": None},
+        {"start": 5.0, "end": 10.0, "role": "twist", "visual": "v", "speech": None, "text": None},
+        {"start": 10.0, "end": 16.5, "role": "ending", "visual": "v", "speech": None, "text": None},
+    ]
     res = validate_template(_valid_template(tl), duration_s=16.9,
-                            shot_boundaries=[0.0], beat_points_known=[])
+                            shot_boundaries=[0.0, 5.0, 10.0], beat_points_known=[])
     assert res.ok and not any("未覆盖" in w for w in res.warnings)
+
+
+def test_validate_warns_single_segment_all_setup():
+    """猫咪梗实测：覆盖规则被取巧——全片一段全 setup，结构丢失要告警。"""
+    tl = [{"start": 0.0, "end": 12.9, "role": "setup", "visual": "v", "speech": None, "text": None}]
+    res = validate_template(_valid_template(tl), duration_s=12.9,
+                            shot_boundaries=[0.0, 12.9], beat_points_known=[])
+    assert res.ok
+    assert any("未分解结构" in w for w in res.warnings)
+    assert any("结构分布" in w for w in res.warnings)
 
 
 # ---------- prompt 硬规则 ----------

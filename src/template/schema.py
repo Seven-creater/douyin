@@ -122,6 +122,15 @@ def validate_template(obj, *, duration_s: float, shot_boundaries: list[float],
                     and cur["start"] - prev_end > 0.5:
                 res.warnings.append(
                     f"timeline 间隔未覆盖：{prev_end:g}s→{cur['start']:g}s（应连续覆盖全片）")
+        # 软：结构分解（2026-09-08 猫咪梗实测：覆盖规则反被取巧——全片并成一段全 setup，
+        # 三段式反转结构丢失 → 生成全无揭晓）
+        roles_used = [s.get("role") for s in tl if isinstance(s, dict)]
+        if duration_s > 6 and len(tl) < 3:
+            res.warnings.append(f"timeline 未分解结构：仅 {len(tl)} 段（>6s 视频应至少 3 段）")
+        if len(roles_used) >= 1 and len(set(roles_used)) == 1 and roles_used[0] in ("setup", "other") \
+                and duration_s > 6:
+            res.warnings.append(
+                f"timeline 全部段为 {roles_used[0]}，无 铺垫/反转/收尾 的结构分布")
 
     # audio
     audio = obj["audio"]
