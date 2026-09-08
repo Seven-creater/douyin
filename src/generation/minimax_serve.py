@@ -80,38 +80,66 @@ def _field(result, name):
 
 
 class Engine:
-    """三段流水线：before_encode+text_encoder→cuda:1，vae_encoder+denoise+decode→cuda:0。"""
+    """双图路由：t2va（纯文本，u00 用）+ fl2va（首帧锚定，u01+ 用）。
+
+    两个 workflow 各自加载组件实例（worker 串行执行，GPU 峰值不变；CPU 侧 auto_cpu_offload
+    双份约 +66GB 内存）。2026-09-08 实测：fl2va 图强制要求 keyframes（text-only 报
+    ValueError: Required input 'keyframes' is missing），所以纯文本必须走 t2va 图。
+    """
 
     def __init__(self):
         self.ready = threading.Event()
         self.error = None
         self.load_s = None
-        self._prep = None
-        self._conditioner = None
-        self._rest = None
+        self._t_cond = None    # t2va 文本条件
+        self._t_rest = None    # t2va 去噪/解码
+        self._prep = None      # fl2va 图像预处理（image→keyframes）
+        self._fl_cond = None   # fl2va 文本+图条件
+        self._fl_rest = None   # fl2va 去噪/解码
 
     def load(self):
         t0 = time.time()
         try:
-            workflow = ModularPipeline.from_pretrained(REPO).blocks.get_workflow("fl2va")
+            blocks = ModularPipeline.from_pretrained(REPO).blocks
+            wf_text = blocks.get_workflow("t2va")
+            wf_fl = blocks.get_workflow("fl2va")
 
-            cond_manager = ComponentsManager()
-            cond_manager.enable_auto_cpu_offload(device="cuda:1")
-            prep_block = workflow.sub_blocks.pop("before_encode")
-            self._prep = prep_block.init_pipeline(REPO, components_manager=cond_manager)
-            cond_block = workflow.sub_blocks.pop("text_encoder")
-            self._conditioner = cond_block.init_pipeline(REPO, components_manager=cond_manager)
-            self._conditioner.update_components(text_encoder=int8_text_encoder())
-            self._conditioner.load_components(dtype=torch.bfloat16)
+            # --- cuda:1：t2va 文本条件 ---
+            cm1 = ComponentsManager()
+            cm1.enable_auto_cpu_offload(device="cuda:1")
+            self._t_cond = wf_text.sub_blocks.pop("text_encoder").init_pipeline(
+                REPO, components_manager=cm1)
+            self._t_cond.update_components(text_encoder=int8_text_encoder())
+            self._t_cond.load_components(dtype=torch.bfloat16)
 
-            manager = ComponentsManager()
-            manager.enable_auto_cpu_offload(device="cuda:0")
-            self._rest = workflow.init_pipeline(REPO, components_manager=manager)
-            self._rest.update_components(transformer=int8_transformer())
-            self._rest.load_components(dtype=torch.bfloat16)
-            self._rest.transformer.requires_grad_(False)
+            # --- cuda:1：fl2va 条件侧（before_encode + text_encoder）---
+            cm2 = ComponentsManager()
+            cm2.enable_auto_cpu_offload(device="cuda:1")
+            self._prep = wf_fl.sub_blocks.pop("before_encode").init_pipeline(
+                REPO, components_manager=cm2)
+            self._fl_cond = wf_fl.sub_blocks.pop("text_encoder").init_pipeline(
+                REPO, components_manager=cm2)
+            self._fl_cond.update_components(text_encoder=int8_text_encoder())
+            self._fl_cond.load_components(dtype=torch.bfloat16)
+
+            # --- cuda:0：t2va 去噪/解码 ---
+            m1 = ComponentsManager()
+            m1.enable_auto_cpu_offload(device="cuda:0")
+            self._t_rest = wf_text.init_pipeline(REPO, components_manager=m1)
+            self._t_rest.update_components(transformer=int8_transformer())
+            self._t_rest.load_components(dtype=torch.bfloat16)
+            self._t_rest.transformer.requires_grad_(False)
+
+            # --- cuda:0：fl2va 去噪/解码（vae_encoder+denoise+decode）---
+            m2 = ComponentsManager()
+            m2.enable_auto_cpu_offload(device="cuda:0")
+            self._fl_rest = wf_fl.init_pipeline(REPO, components_manager=m2)
+            self._fl_rest.update_components(transformer=int8_transformer())
+            self._fl_rest.load_components(dtype=torch.bfloat16)
+            self._fl_rest.transformer.requires_grad_(False)
+
             self.load_s = time.time() - t0
-            print(f"[serve] fl2va model ready in {self.load_s:.0f}s", flush=True)
+            print(f"[serve] dual-graph (t2va+fl2va) ready in {self.load_s:.0f}s", flush=True)
         except Exception as exc:  # noqa: BLE001
             self.error = repr(exc)
             print(f"[serve] LOAD FAILED: {self.error}", flush=True)
@@ -128,18 +156,18 @@ class Engine:
             anchors = _field(prep, "keyframe_anchors")
             out_h = _field(prep, "height") or height
             out_w = _field(prep, "width") or width
-            state = self._conditioner(prompt=prompt, keyframes=keyframes)
+            state = self._fl_cond(prompt=prompt, keyframes=keyframes)
             t_enc = time.time()
-            results = self._rest(
+            results = self._fl_rest(
                 state=state, keyframes=keyframes, keyframe_anchors=anchors,
                 height=out_h, width=out_w,
                 num_frames=num_frames, generator=torch.Generator().manual_seed(seed),
                 output=["videos", "audio", "sampling_rate"],
             )
         else:
-            state = self._conditioner(prompt=prompt)
+            state = self._t_cond(prompt=prompt)
             t_enc = time.time()
-            results = self._rest(
+            results = self._t_rest(
                 state=state, num_frames=num_frames, height=height, width=width,
                 generator=torch.Generator().manual_seed(seed),
                 output=["videos", "audio", "sampling_rate"],
