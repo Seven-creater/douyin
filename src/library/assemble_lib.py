@@ -73,6 +73,19 @@ def run_assemble(cfg: AppConfig, template_id: str, *, force: bool = False) -> Pa
         cmd = build_seg_cmd(Path(row["video"]), out, shot_start=row["start_s"],
                             shot_dur=row["duration_s"], need_dur=dur, crf=crf)
         common.run_ffmpeg("ffmpeg", cmd[1:])
+        # 实长校验：镜头真实素材可能早于标称结束（scene 边界在片尾/静止段的误差），
+        # 不足段长则按实测补冻结帧（2026-09-08 首条成片 8.0s/12.9s 实测）
+        ffprobe = cfg.perception.get("ffprobe_bin", "ffprobe")
+        actual = common.video_duration_s(ffprobe, out)
+        if actual is not None and actual + 0.1 < dur:
+            pad = dur - actual + 0.2
+            common.run_ffmpeg("ffmpeg", [
+                "-y", "-loglevel", "error", "-i", str(out), "-vf",
+                f"tpad=stop_mode=clone:stop_duration={pad:g}",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+                "-pix_fmt", "yuv420p", "-t", f"{dur:g}", str(out)])
+            logger.info("[assemble %s] seg%02d 实长 %.2f 补齐至 %.2f",
+                        template_id, pick["seg_idx"], actual, dur)
         audit.append({**pick, "used": {"video": row["video_stem"],
                                        "shot_idx": row["shot_idx"],
                                        "caption": row.get("caption", "")}})
