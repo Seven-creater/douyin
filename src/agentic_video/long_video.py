@@ -1,7 +1,6 @@
 """Two-pass high-action indexing for long source videos."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -11,6 +10,7 @@ from pathlib import Path
 from src.config import AppConfig, repo_root
 from src.library.index_shots import build_shots, parse_scene_log
 from src.perception import common
+from src.agentic_video.recipe_v2 import sha256_file
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +197,7 @@ def index_selected_windows(cfg: AppConfig, source: str, video: Path, windows: li
     result_path = target / "result.json"
     if result_path.exists() and not force:
         return result_path
+    video_sha256 = sha256_file(video)
     keyframes = target / "kf"
     keyframes.mkdir(parents=True, exist_ok=True)
     records = []
@@ -236,7 +237,7 @@ def index_selected_windows(cfg: AppConfig, source: str, video: Path, windows: li
     return common.write_result_json(
         target, tool="index_high_action_windows", aweme_id=stem,
         params={"source": source, "threshold": threshold, "min_len_s": min_len,
-                "video_sha256": hashlib.sha256(str(video).encode()).hexdigest()},
+                "video_sha256": video_sha256},
         output={"source": source, "video": str(video), "n_windows": len(windows),
                 "n_shots": len(records), "windows": windows, "shots": records})
 
