@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from src.agentic_video.discovery import (CONTENT_CATEGORIES,
                                           SEMANTIC_AUDIT_PROMPT,
                                           build_audition_shortlist,
-                                          metadata_triage, parse_semantic_audit,
+                                          load_rolling_candidates, metadata_triage,
+                                          parse_semantic_audit,
                                           select_balanced)
 
 
@@ -82,3 +84,23 @@ def test_semantic_audit_counts_only_located_evidence_events():
     assert audit["event_count"] == 2
     assert audit["eligible"] is False
     assert "event_count_mismatch" in audit["rejection_reasons"]
+
+
+def test_rolling_candidates_keep_newest_signed_download_url(tmp_path):
+    def payload(url: str) -> dict:
+        return {"data": {"objs": [{
+            "item_id": "123", "item_title": "真实故事", "nick_name": "作者",
+            "item_url": url, "like_cnt": 10, "play_cnt": 100,
+            "item_duration": 30_000, "media_type": 4, "image_cnt": 0,
+        }]}}
+
+    (tmp_path / "2026-09-07_1001.json").write_text(
+        json.dumps(payload("https://cdn/old")), encoding="utf-8")
+    (tmp_path / "2026-09-09_1001.json").write_text(
+        json.dumps(payload("https://cdn/new")), encoding="utf-8")
+    cfg = SimpleNamespace(paths=SimpleNamespace(raw_dir=tmp_path),
+                          wellbyte=SimpleNamespace(request_params={"date_window": 24}))
+    rows, _ = load_rolling_candidates(cfg, end_date="2026-09-09", days=3)
+    assert rows[0]["download_url"] == "https://cdn/new"
+    assert rows[0]["download_url_observed_date"] == "2026-09-09"
+    assert rows[0]["observed_dates"] == ["2026-09-09", "2026-09-07"]

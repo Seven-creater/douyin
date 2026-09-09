@@ -82,6 +82,14 @@ def _popularity_key(row: dict) -> tuple:
     return (-len(lists), best_rank, -int(stats.get("likes") or 0), str(row.get("aweme_id")))
 
 
+def _audition_key(row: dict) -> tuple:
+    """Prefer a fresh signed download URL, then use the normal popularity rank."""
+    dates = [str(value) for value in row.get("observed_dates") or []]
+    latest = max(dates, default="0000-00-00")
+    freshness = -int(latest.replace("-", "")) if latest[:4].isdigit() else 0
+    return (freshness, *_popularity_key(row))
+
+
 def select_balanced(audits: Iterable[dict], *, per_category: int = 4
                     ) -> tuple[list[dict], dict[str, int]]:
     """Apply the hard content gate, then popularity-rank only within each category."""
@@ -109,10 +117,10 @@ def build_audition_shortlist(triaged: list[dict], *, per_category: int,
     for category in CONTENT_CATEGORIES:
         rows = [row for row in triaged
                 if row.get("eligible") and row.get("category_hint") == category]
-        shortlist.extend(sorted(rows, key=_popularity_key)[:max(per_category, 6)])
+        shortlist.extend(sorted(rows, key=_audition_key)[:max(per_category, 6)])
     unknown = [row for row in triaged
                if row.get("eligible") and row.get("category_hint") is None]
-    shortlist.extend(sorted(unknown, key=_popularity_key)[:max(0, unclassified)])
+    shortlist.extend(sorted(unknown, key=_audition_key)[:max(0, unclassified)])
     result, seen = [], set()
     for row in shortlist:
         aweme_id = str(row["aweme_id"])
@@ -231,17 +239,35 @@ def load_rolling_candidates(cfg, *, end_date: str, days: int) -> tuple[list[dict
     end = date_type.fromisoformat(end_date)
     records = []
     dates_used = []
+    freshest_by_id = {}
+    observed_dates: dict[str, set[str]] = {}
     for offset in range(max(1, days)):
         day = (end - timedelta(days=offset)).isoformat()
         paths = sorted(cfg.paths.raw_dir.glob(f"{day}_*.json"))
         if paths:
             dates_used.append(day)
         for path in paths:
-            records.extend(parse_file(path, date_window=int(
-                cfg.wellbyte.request_params.get("date_window", 24))))
+            parsed = parse_file(path, date_window=int(
+                cfg.wellbyte.request_params.get("date_window", 24)))
+            for record in parsed:
+                freshest_by_id.setdefault(record.aweme_id, record)
+                observed_dates.setdefault(record.aweme_id, set()).add(day)
+            records.extend(parsed)
     merged = merge_videos(records)
+    # Ranking aggregates all seven days, while expiring CDN URLs must always
+    # come from the newest observation of a work.
+    for item in merged:
+        fresh = freshest_by_id[item.aweme_id]
+        item.record.download_url = fresh.download_url
+        item.record.raw = fresh.raw
     ranked = rank_videos(merged, top_n=len(merged))
-    rows = [to_jsonl_record(item.merged, final_rank=item.final_rank) for item in ranked]
+    rows = []
+    for item in ranked:
+        row = to_jsonl_record(item.merged, final_rank=item.final_rank)
+        row["observed_dates"] = sorted(observed_dates.get(item.merged.aweme_id, set()),
+                                       reverse=True)
+        row["download_url_observed_date"] = row["observed_dates"][0]
+        rows.append(row)
     return rows, {"dates_used": dates_used, "merged": merged,
                   "merged_by_id": {item.aweme_id: item for item in merged}}
 
@@ -273,11 +299,19 @@ def run_discovery(cfg, *, end_date: str, days: int, per_category: int,
 
     shortlist = build_audition_shortlist(triaged, per_category=per_category)
     download_stats = None
+    stale_missing = []
     if download:
         from src.pipeline.run_downloads import run_download_stage
         merged_by_id = state["merged_by_id"]
+        downloadable = []
+        for row in shortlist:
+            local_video = cfg.paths.videos_dir / row["aweme_id"] / "video.mp4"
+            if local_video.exists() or row.get("download_url_observed_date") == end_date:
+                downloadable.append(row)
+            else:
+                stale_missing.append(row["aweme_id"])
         download_stats = run_download_stage(
-            cfg, [merged_by_id[row["aweme_id"]] for row in shortlist
+            cfg, [merged_by_id[row["aweme_id"]] for row in downloadable
                   if row["aweme_id"] in merged_by_id])
 
     audits = []
@@ -315,7 +349,7 @@ def run_discovery(cfg, *, end_date: str, days: int, per_category: int,
         "end_date": end_date, "days": days, "dates_used": state["dates_used"],
         "candidate_count": len(records), "shortlist_count": len(shortlist),
         "audited_count": len(audits), "selected_count": len(selected), "gaps": gaps,
-        "download": download_stats,
+        "download": download_stats, "stale_missing_skipped": stale_missing,
     }
     (output_dir / "discovery_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
