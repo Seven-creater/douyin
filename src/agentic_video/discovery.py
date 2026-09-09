@@ -267,8 +267,8 @@ def run_discovery(cfg, *, end_date: str, days: int, per_category: int,
                 audits.append(json.loads(path.read_text(encoding="utf-8")))
                 continue
             video = cfg.paths.videos_dir / record["aweme_id"] / "video.mp4"
-            prompt = SEMANTIC_AUDIT_PROMPT.format(
-                context=_audition_context(cfg, record["aweme_id"], record))
+            context = _audition_context(cfg, record["aweme_id"], record)
+            prompt = SEMANTIC_AUDIT_PROMPT.replace("{context}", context)
             answer = runner.watch(video, prompt, max_new_tokens=2048)
             audit = parse_semantic_audit(answer.text, record)
             audit["elapsed_s"] = answer.elapsed_s

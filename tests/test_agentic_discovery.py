@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.agentic_video.discovery import (CONTENT_CATEGORIES,
+                                          SEMANTIC_AUDIT_PROMPT,
                                           build_audition_shortlist,
                                           metadata_triage, select_balanced)
 
@@ -57,3 +58,9 @@ def test_shortlist_keeps_unclassified_titles_for_semantic_audition():
     ]
     shortlisted = build_audition_shortlist(rows, per_category=1, unclassified=1)
     assert {row["aweme_id"] for row in shortlisted} == {"hinted", "unknown"}
+
+
+def test_semantic_audit_prompt_replaces_only_context_placeholder():
+    prompt = SEMANTIC_AUDIT_PROMPT.replace("{context}", "证据")
+    assert "\"category\"" in prompt
+    assert "证据" in prompt
