@@ -1,7 +1,8 @@
 """transcribe_audio 单测（fake funasr 返回，不打模型）。"""
 from __future__ import annotations
 
-from src.perception.transcribe_audio import extract_tags, parse_sensevoice_result
+from src.perception.transcribe_audio import (extract_tags, parse_sensevoice_result,
+                                              transcribe_with_model)
 
 
 def fake_raw():
@@ -59,3 +60,20 @@ def test_withitn_filtered_and_emoji_stripped():
     out = parse_sensevoice_result(raw, postprocess=lambda s: s)  # postprocess 原样回显
     assert out["audio_events"] == ["BGM"]          # WITHITN 被过滤
     assert out["full_text"] == "我就是鸡蛋。"        # 🎼😊 被剥离
+
+
+def test_transcribe_requests_sentence_timestamps(tmp_path):
+    class FakeModel:
+        def generate(self, **kwargs):
+            self.kwargs = kwargs
+            return [{"text": "<|ja|>こんにちは", "sentence_info": [
+                {"start": 100, "end": 900, "text": "こんにちは"},
+            ]}]
+
+    model = FakeModel()
+    output = transcribe_with_model(model, tmp_path / "reference.mp4", language="ja")
+
+    assert model.kwargs["sentence_timestamp"] is True
+    assert output["segments"] == [
+        {"start_ms": 100, "end_ms": 900, "text": "こんにちは"},
+    ]

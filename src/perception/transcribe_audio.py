@@ -83,7 +83,8 @@ def load_transcriber(*, model: str, vad_model: str, vad_max_segment_ms: int, dev
 def transcribe_with_model(model, video_path: Path, *, language: str = "auto") -> dict:
     # merge_vad/merge_length_s/batch_size_s：官方 SenseVoice 示例参数（让 sentence_info 出毫秒分段）
     res = model.generate(input=str(video_path), language=language, use_itn=True,
-                         batch_size_s=60, merge_vad=True, merge_length_s=15)
+                         batch_size_s=60, merge_vad=True, merge_length_s=15,
+                         sentence_timestamp=True)
     post = None
     try:
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
