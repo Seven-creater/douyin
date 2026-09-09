@@ -16,13 +16,24 @@ def _mean(rows: list[dict], key: str) -> float:
     return sum(float(row.get(key, 0)) for row in rows) / max(1, len(rows))
 
 
-def _speech_overlap(segments: list[dict], start: float, end: float) -> float:
-    overlap = 0.0
+def _dialogue_density(segments: list[dict], start: float, end: float) -> float:
+    """Estimate spoken-content density without trusting gapless ASR intervals.
+
+    SenseVoice sentence timestamps can tile the full source timeline, including
+    BGM/no-speech spans represented by punctuation-only text.  Weighting useful
+    characters by temporal overlap keeps those spans from looking like dialogue.
+    """
+    weighted_characters = 0.0
     for segment in segments:
         left = float(segment.get("start_ms") or 0) / 1000
         right = float(segment.get("end_ms") or 0) / 1000
-        overlap += max(0.0, min(end, right) - max(start, left))
-    return min(1.0, overlap / max(1e-6, end - start))
+        overlap = max(0.0, min(end, right) - max(start, left))
+        segment_duration = right - left
+        if overlap <= 0 or segment_duration <= 0:
+            continue
+        useful_characters = sum(char.isalnum() for char in str(segment.get("text") or ""))
+        weighted_characters += useful_characters * overlap / segment_duration
+    return weighted_characters / max(1e-6, end - start)
 
 
 def score_narrative_windows(samples: list[dict], transcript: dict, duration_s: float, *,
@@ -41,7 +52,7 @@ def score_narrative_windows(samples: list[dict], transcript: dict, duration_s: f
                 "cut_density": _mean(rows, "cut_density") or _mean(rows, "cut"),
                 "audio_energy": _mean(rows, "audio_energy"),
                 "audio_onset": _mean(rows, "audio_onset"),
-                "dialogue_raw": _speech_overlap(segments, start, end),
+                "dialogue_raw": _dialogue_density(segments, start, end),
             })
         if end >= duration_s:
             break
