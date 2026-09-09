@@ -77,7 +77,8 @@ def operations_for_interval(recipe: dict, start: float, end: float) -> list[dict
 def segment_filter(operations: list[dict], *, width: int = 720, height: int = 960,
                    duration_s: float) -> str:
     filters = [f"scale={width}:{height}:force_original_aspect_ratio=increase",
-               f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2", "fps=24"]
+               f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2",
+               "setsar=1", "fps=24"]
     for op in operations:
         params = op.get("params") or {}
         if op["type"] == "speed_ramp":
