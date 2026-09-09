@@ -116,7 +116,9 @@ def final_filter(recipe: dict, *, font: Path | None = None) -> str:
                 continue
             y = "h*0.78"
             if op["type"] == "text_layer_animation":
-                y = f"h-min(h*0.22,(t-{start:g})*h*0.8)"
+                # Commas inside an FFmpeg expression must be escaped or the
+                # filter parser treats them as additional filter separators.
+                y = f"h-min(h*0.22\\,(t-{start:g})*h*0.8)"
             font_arg = f":fontfile='{font.as_posix()}'" if font and font.exists() else ""
             filters.append(f"drawtext=text='{text}'{font_arg}:fontsize=52:fontcolor=white:"
                            f"borderw=3:x=(w-text_w)/2:y={y}:enable='between(t,{start:g},{end:g})'")
