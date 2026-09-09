@@ -166,6 +166,22 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     montage_min_cuts: 3
     max_events: 64
     save_debug_frames: true
+  windows:                # D2 窗口级 Omni 编辑操作问答
+    fps: 8.0              # 1.2s 窗 ~10 帧（感知默认 2fps 分辨不了 0.2s 级事件）
+    max_new_tokens: 1024
+    window_pad_s: 0.6
+    merge_gap_s: 0.5
+    max_windows: 48
+    n_control_windows: 3  # 信号谷底控制窗（测漏检率）
+    prompt_version: window_v1
+  recipe:                # D3 Editing Recipe JSON 合成
+    max_new_tokens: 3072
+    max_retries: 1
+    max_context_chars: 8000
+    evidence_tolerance_s: 0.25
+    prompt_version: recipe_v1
+  report:                # D4 基准对比报告
+    beat_tolerance_s: 0.15
   retrieve:
     top_k: 5
     min_cosine: 0.18       # 低于此判"库内不足"
