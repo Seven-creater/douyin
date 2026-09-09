@@ -29,6 +29,10 @@ score 和四个方面均为 0~1。只能建议结构化 Recipe 补丁，不能�
 没有足够证据时 patches 为空。补丁路径只能指向 operations 中的 params/status/confidence/interval，
 或 assets 中的 source_range/uri。不要删除证据。
 
+注意：参考 Recipe 约束的是剪辑结构、节拍和图层关系，不要求复制参考视频中的人物、地点或文字。
+当用户主题要求替换素材时，参考片主体与成片主体不同是预期行为；主题相关性应依据用户主题、
+素材计划和检索到的素材描述判断，不能仅因参考片是城市而成片是鬼灭，或反之，就判定失败。
+
 【Recipe】{recipe}
 【素材计划】{asset_plan}
 【检索结果】{retrieval}
