@@ -70,6 +70,20 @@ def test_parse_window_answer_normalizes_and_rejects():
     assert parse_window_answer('{"no_op_type": 1}', w) is None
 
 
+def test_parse_window_answer_keeps_multiple_layer_operations():
+    w = {"start": 2.4, "end": 3.6}
+    answer = parse_window_answer(json.dumps({"operations": [
+        {"what_changed": "global", "op_type": "hard_cut", "subject": "人",
+         "event_time_original_s": 3.0, "confidence": 0.9, "evidence_quote": "镜头切换"},
+        {"what_changed": "text", "op_type": "text_layer_animation", "subject": "标题",
+         "event_time_original_s": 3.0, "interval_original_s": [2.8, 3.4],
+         "confidence": 0.8, "evidence_quote": "文字从底部滑入"}],
+        "window_summary": "切镜时文字并行滑入"}), w)
+    assert [op["op_type"] for op in answer["operations"]] == [
+        "hard_cut", "text_layer_animation"]
+    assert answer["operations"][1]["interval_original_s"] == [2.8, 3.4]
+
+
 def test_run_decompose_resumes_and_writes_aggregate(tmp_path, monkeypatch):
     """FakeRunner：首跑 2 窗 → 改答案后 force=False 只补缺失窗（信封幂等）。"""
     calls = []

@@ -131,6 +131,25 @@ logging:
 
 library:                   # 素材库（Spider-Man 预告片/电影 → 可检索镜头库）
   raw_subdir: raw          # data/library/raw/<来源>/<文件>.mp4
+  sources:
+    guimie:
+      video: data/raw/guimie/Demon.Slayer.Infinity.Castle.2025.1080p.hevc.cq24.mp4
+  high_action:
+    scan_fps: 2.0
+    scan_width: 160
+    audio_sr: 8000
+    window_s: 45.0
+    stride_s: 15.0
+    max_windows: 24
+    partitions: 4
+    max_overlap: 0.20
+  mask_backend:
+    python: /data02/usr/wangqihao/miniconda3/envs/grounded_sam2/bin/python
+    grounding_model: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/MaskEdit/GroundingDINO/checkpoints
+    sam2_code_root: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/MaskEdit/SAM2.1/code
+    sam2_checkpoint: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/MaskEdit/SAM2.1/checkpoints/sam2.1-hiera-base-plus/sam2.1_hiera_base_plus.pt
+    sam2_model_config: configs/sam2.1/sam2.1_hiera_b+.yaml
+    timeout_s: 1800
   shots:                   # B1 镜头切分
     threshold: 0.3         # ffmpeg scene 阈值（预告片高密度剪切）
     min_shot_len_s: 0.4
@@ -174,7 +193,15 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     max_window_s: 2.5        # 巨窗上限（试点实测链式合并滚出 8s/13s 窗）
     max_windows: 48
     n_control_windows: 3  # 信号谷底控制窗（测漏检率）
-    prompt_version: window_v1
+    prompt_version: window_v2
+  agent:
+    max_initial_windows: 48
+    max_rounds: 2
+    max_refinement_windows: 16
+    confidence_threshold: 0.65
+  critic_v2:
+    max_rounds: 2
+    min_improvement: 0.02
   recipe:                # D3 Editing Recipe JSON 合成
     max_new_tokens: 4096   # 3072 截断 JSON（GLM 版候选多枚举长，同 analyze_editing 教训）
     max_retries: 1

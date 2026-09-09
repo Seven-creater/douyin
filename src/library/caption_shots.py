@@ -21,7 +21,8 @@ from src.perception import common
 logger = logging.getLogger(__name__)
 
 CAPTION_PROMPT = (
-    "用中文描述这个电影画面，按「主体：…；动作：…；场景：…；情绪/氛围：…」格式，"
+    "用中文描述这个电影镜头，按「主体：…；动作：…；场景：…；情绪/氛围：…；"
+    "镜头尺度：…；视觉强度：…」格式，"
     "每项 10 字内。主体写具体（如 彼得帕克/蜘蛛侠战衣/章鱼博士），动作写清在做什么，"
     "不要评价画质，不要猜测画面外内容。"
 )
@@ -66,6 +67,24 @@ class Qwen2VLRunner:
         trimmed = out[:, inputs.input_ids.shape[1]:]
         return self._processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
 
+    def describe_many(self, image_paths: list[Path], max_new_tokens: int = 120) -> str:
+        """Describe beginning/middle/end frames as one temporal shot."""
+        self.load()
+        import torch
+        from PIL import Image
+
+        images = [Image.open(path).convert("RGB") for path in image_paths]
+        content = [{"type": "image"} for _ in images]
+        content.append({"type": "text", "text": CAPTION_PROMPT + "三帧按时间顺序排列。"})
+        messages = [{"role": "user", "content": content}]
+        text = self._processor.apply_chat_template(messages, tokenize=False,
+                                                   add_generation_prompt=True)
+        inputs = self._processor(text=[text], images=images, return_tensors="pt").to("cuda:0")
+        with torch.no_grad():
+            out = self._model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        trimmed = out[:, inputs.input_ids.shape[1]:]
+        return self._processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
+
 
 def caption_video(cfg: AppConfig, shots_result: Path, *, force: bool = False,
                   limit: int | None = None, runner: Qwen2VLRunner | None = None) -> Path:
@@ -89,7 +108,11 @@ def caption_video(cfg: AppConfig, shots_result: Path, *, force: bool = False,
         if limit is not None and n_new >= limit:
             break
         try:
-            cap = runner.describe(Path(s["kf"]), max_new_tokens=max_new)
+            kfs = [Path(path) for path in s.get("kfs") or [s["kf"]]]
+            if len(kfs) > 1 and hasattr(runner, "describe_many"):
+                cap = runner.describe_many(kfs, max_new_tokens=max_new)
+            else:
+                cap = runner.describe(kfs[0], max_new_tokens=max_new)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[caption %s#%d] 失败：%s", s["video_stem"], s["shot_idx"], exc)
             cap = ""

@@ -106,14 +106,20 @@ def load_recipe_inputs(cfg: AppConfig, vid: str) -> dict:
 
     window_confirms = []
     for r in answers:
-        a = r["answer"]
-        t = a.get("event_time_original_s")
-        if a.get("op_type") not in (None, "uncertain") and isinstance(t, (int, float)):
-            window_confirms.append({"t_s": round(float(t), 2),
-                                    "op_type": a["op_type"],
-                                    "idx": r.get("idx"),
-                                    "quote": (a.get("evidence_quote") or "")[:80],
-                                    "subject": a.get("subject") or ""})
+        answer = r["answer"]
+        ops = answer.get("operations") if isinstance(answer, dict) else None
+        if not isinstance(ops, list):
+            ops = [answer]
+        for a in ops:
+            if not isinstance(a, dict):
+                continue
+            t = a.get("event_time_original_s")
+            if a.get("op_type") not in (None, "uncertain") and isinstance(t, (int, float)):
+                window_confirms.append({"t_s": round(float(t), 2),
+                                        "op_type": a["op_type"],
+                                        "idx": r.get("idx"),
+                                        "quote": (a.get("evidence_quote") or "")[:80],
+                                        "subject": a.get("subject") or ""})
     window_confirms.sort(key=lambda w: w["t_s"])
 
     known_ts = sorted({round(float(b), 2) for b in beats}

@@ -12,8 +12,9 @@ import argparse
 import json
 import logging
 import os
-import platform
+import socket
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from typing import Any
 from src.config import AppConfig, load_config
 
 logger = logging.getLogger(__name__)
+
+_HOST_INFO = {"platform": sys.platform.lower(), "node": socket.gethostname()}
 
 
 # ---------- 路径 ----------
@@ -73,7 +76,9 @@ def write_result_json(tool_dir: Path, *, tool: str, aweme_id: str, params: dict,
         "aweme_id": aweme_id,
         "params": params,
         "created_at": _now_iso(),
-        "host": {"platform": platform.system().lower(), "node": platform.node()},
+        # platform.system()/platform.node() can enter a slow WMI query on Windows.
+        # This metadata is process-constant, so resolve it once without WMI.
+        "host": dict(_HOST_INFO),
         "output": output,
     }
     path = Path(tool_dir) / "result.json"

@@ -1,15 +1,18 @@
-# douyin — 自动追热点短视频 Agent
+# douyin — Agentic Video Edit Program Induction
 
-全自动流水线：抖音热点发现 → 下载 → 分析（ASR/BGM/镜头/节奏/文案）→ 抽象热门模板 → 换 IP 素材生成（MiniMax-H3）→ FFmpeg 剪辑 → 批量生成 → 发布。
+目标流水线：抖音热门剪辑 → Agent 主动收集多模态证据 → 多轨 Recipe v2 →
+一句话主题驱动的真实素材检索 → 确定性渲染 → Critic 结构化修订。
 
-立意：**Autonomous Video Agent**（自动捕获热点、解析模板、批量生产），不是比单条视频画质。
+项目核心是 **Video Edit Program Induction**：从渲染后的成片反推出有证据、可校验、
+可重新执行的剪辑程序。成片质量是结果，剪辑理解的可测量性是第一指标。
 
 ## 工作规则（必须遵守）
 
 1. **代码只在本地写/改**（本仓库），push 到 `https://github.com/Seven-creater/douyin.git`
 2. 服务器 `wangqihao@10.1.4.86` 的 `/data02/usr/wangqihao/Demo/research` **只 pull + 运行，禁止改代码**
 3. 服务器直连 GitHub 不通，拉取走 gh-proxy 加速（origin 已配好，直接 `git pull`）
-4. 运行环境：服务器 conda env `h3`；本地 anaconda base（Python 3.13）
+4. Agentic 主链运行环境：服务器 conda env `omni_src`；GroundingDINO+SAM2 由
+   `grounded_sam2` 环境子进程执行；旧 MiniMax 管线仍使用 `h3`
 
 # Phase 1：热点发现与下载（已完成）
 
@@ -76,7 +79,7 @@ logs/collect_trends_<ts>.log                   # 运行日志（密钥自动脱�
 ## 测试
 
 ```bash
-python -m pytest -q            # 50 个单测（全 mock，不打真实 API）
+python -m pytest -q            # 258 个单测（默认不打真实 API/大模型）
 python -m tests.smoke_real_api # 真实 API 冒烟（手动，花 credits）
 ```
 
@@ -98,7 +101,7 @@ Qwen3-Omni-30B thinker + FunASR/RapidOCR/librosa/ffmpeg 工具层，
 感知产物 → 结构化 Trend Template JSON（timeline/role/fixed/replaceable），
 三层防编造防线，12/13 条 json 一次过。详见 `src/template/README.md`。
 
-# Phase 4：MiniMax 批量翻拍生成（已完成）
+# Phase 4：MiniMax 批量翻拍生成（历史分支，已冻结）
 
 ```
 Template JSON → planner（role 感知单元合并）→ variant（LLM 提议 3 套替换）
@@ -114,6 +117,31 @@ python -m src.generation.run_generation --template-id <aweme_id> --variants 3 --
 赛博朋克），2 生成单元 × 3 = 6 片段全部一次成功（124f≈13min、192f≈21min，4 实例并行），
 3 个 final.mp4（544×960 竖屏 H.264+AAC+字幕，10.14s）装配完成；重跑全 skip。
 详见 `src/generation/README.md`。
+
+# Phase 5：Agentic Video 主链
+
+统一入口：
+
+```bash
+# 生成 144 个程序化真值视频；给出预测目录时同时计算准确率
+python -m src.agentic_video.cli benchmark
+
+# 鬼灭长片：稀疏动作扫描 → 最多 24×45s 窗口 → 三关键帧镜头索引
+python -m src.agentic_video.cli index --source guimie
+
+# 只反编译参考视频
+python -m src.agentic_video.cli --gpus 0,1 decompose \
+  --reference data/videos/<id>/video.mp4 --output data/agentic_runs/<run>
+
+# 完整链路
+python -m src.agentic_video.cli --gpus 0,1 run \
+  --reference data/videos/<id>/video.mp4 \
+  --theme "鬼灭高燃战斗" --library guimie --output data/agentic_runs/<run>
+```
+
+固定交付包括 `run_manifest.json`、`reference.recipe.json`、`asset_plan.json`、
+`retrieval_results.json`、`rendered.mp4`、每轮 Critic JSON/Recipe 补丁和 `report.md`。
+不支持的操作会明确写入渲染清单，不会静默降级。
 
 # 服务器资源
 

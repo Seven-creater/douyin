@@ -47,17 +47,22 @@ WINDOW_PROMPT = """你是剪辑手法鉴定专家。下面是原视频的一个�
 {start:g}+n 秒，报时刻请先换算。
 
 【只输出一个 JSON 对象，无围栏无解释】
-{{"what_changed": "global",             # 只能取：global/subject_interior/background/local_region/text
- "op_type": "hard_cut",                 # 只能取：{ops}
- "subject": "画面主体一句话",
- "flash": false,                         # 窗口内是否有闪白/闪黑
- "motion": "none",                       # none/zoom_in/zoom_out/pan/tilt/follow/uncertain
- "direction": null,                      # 运动方向（left/right/up/down，无则 null）
- "evidence_quote": "一句话画面证据（你具体看到了什么）",
- "event_time_original_s": 0.0,
- "confidence": 0.0}}
+{{"operations": [
+  {{"what_changed": "global",            # global/subject_interior/background/local_region/text
+    "op_type": "hard_cut",                # 只能取：{ops}
+    "subject": "画面主体一句话",
+    "flash": false,
+    "motion": "none",                     # none/zoom_in/zoom_out/pan/tilt/follow/uncertain
+    "direction": null,
+    "evidence_quote": "具体可见证据，不能只复述操作名",
+    "event_time_original_s": 0.0,
+    "interval_original_s": [0.0, 0.0],
+    "confidence": 0.0}}
+ ],
+ "window_summary": "这一窗口的图层关系和变化顺序"}}
 
-看不准的取 op_type="uncertain" 且 confidence<0.5，不要编造。"""
+同一时刻若同时发生切镜、文字动画、遮罩或主体内部变化，必须分别列为多个 operations；
+不要把图层操作吞并成 hard_cut。看不准的操作取 op_type="uncertain" 且 confidence<0.5。"""
 
 
 def plan_windows(candidates: list[dict], duration_s: float, *, series: dict | None = None,
@@ -147,25 +152,54 @@ def build_window_prompt(window: dict, duration_s: float) -> str:
 
 
 def parse_window_answer(raw: str, window: dict) -> dict | None:
-    """窗口答案 → 归一化 JSON；解析失败返回 None（保留 raw 由调用方降级）。"""
-    block = extract_json_block(dedupe_json_repetition(raw, first_key='"what_changed"'))
+    """窗口答案 → 归一化 JSON；兼容 v1 单操作与 v2 多操作输出。"""
+    block = extract_json_block(dedupe_json_repetition(raw, first_key='"operations"'))
+    if not block:
+        block = extract_json_block(dedupe_json_repetition(raw, first_key='"what_changed"'))
     if not block:
         return None
     try:
         obj = json.loads(block)
     except ValueError:
         return None
-    if not isinstance(obj, dict) or "op_type" not in obj:
+    if not isinstance(obj, dict):
         return None
-    if obj.get("op_type") not in OP_TYPES:
-        obj["op_type"] = "uncertain"              # 归一越界，不拒收（软任务）
-    if obj.get("what_changed") not in WHAT_CHANGED:
-        obj["what_changed"] = "global"
-    t = obj.get("event_time_original_s")
-    if not isinstance(t, (int, float)) \
-            or not (window["start"] - 0.3 <= t <= window["end"] + 0.3):
-        obj["event_time_original_s"] = None       # 越窗自报时刻 → 弃用（防编造）
-    return obj
+
+    legacy = "op_type" in obj
+    operations = [obj] if legacy else obj.get("operations")
+    if not isinstance(operations, list):
+        return None
+    normalized = []
+    for item in operations[:8]:
+        if not isinstance(item, dict) or "op_type" not in item:
+            continue
+        item = dict(item)
+        if item.get("op_type") not in OP_TYPES:
+            item["op_type"] = "uncertain"          # 归一越界，不拒收（软任务）
+        if item.get("what_changed") not in WHAT_CHANGED:
+            item["what_changed"] = "global"
+        t = item.get("event_time_original_s")
+        if not isinstance(t, (int, float)) \
+                or not (window["start"] - 0.3 <= t <= window["end"] + 0.3):
+            item["event_time_original_s"] = None   # 越窗自报时刻 → 弃用（防编造）
+        interval = item.get("interval_original_s")
+        if not (isinstance(interval, list) and len(interval) == 2
+                and all(isinstance(v, (int, float)) for v in interval)
+                and window["start"] - 0.3 <= interval[0] <= interval[1]
+                <= window["end"] + 0.3):
+            item.pop("interval_original_s", None)
+        confidence = item.get("confidence", 0.0)
+        if not isinstance(confidence, (int, float)):
+            item["confidence"] = 0.0
+        else:
+            item["confidence"] = min(1.0, max(0.0, float(confidence)))
+        normalized.append(item)
+    if not normalized:
+        return None
+    if legacy:
+        return normalized[0]
+    return {"operations": normalized,
+            "window_summary": str(obj.get("window_summary") or "")[:200]}
 
 
 def run_decompose(cfg: AppConfig, vid: str, *, only: list[int] | None = None,
