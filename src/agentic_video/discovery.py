@@ -16,7 +16,7 @@ CATEGORY_LABELS = {
 }
 
 _PURE_EDIT_WORDS = ("卡点技术流", "运镜教学", "转场教学", "纯卡点", "踩点教程",
-                    "剪映教程", "舞蹈挑战", "变装卡点")
+                    "剪映教程", "舞蹈挑战", "变装卡点", "教学", "教程", "挑战", "抽象")
 _AD_WORDS = ("直播间", "下单", "同款链接", "优惠券", "招生", "培训报名")
 _CATEGORY_WORDS = {
     "real_story": ("救助", "拯救", "暖心", "家人", "家庭", "宝宝", "小猫", "小狗",
@@ -229,6 +229,22 @@ def parse_semantic_audit(raw: str, record: dict) -> dict:
     return row
 
 
+def revalidate_semantic_audit(audit: dict, triage: dict) -> dict:
+    """Apply the current deterministic gates to a cached model audition."""
+    row = {**audit}
+    for key in ("duration_s", "category_hint", "reasons"):
+        if key in triage:
+            row[key] = triage[key]
+    row["metadata_eligible"] = bool(triage.get("eligible", True))
+    rejection_reasons = [str(reason) for reason in row.get("rejection_reasons") or []]
+    if not has_temporal_story_coverage(row):
+        rejection_reasons.append("insufficient_temporal_story_coverage")
+    row["rejection_reasons"] = list(dict.fromkeys(rejection_reasons))
+    row["eligible"] = (row["metadata_eligible"]
+                       and passes_content_gate({**row, "eligible": True}))
+    return row
+
+
 def write_jsonl(path: Path, rows: Iterable[dict]) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +386,13 @@ def run_discovery(cfg, *, end_date: str, days: int, per_category: int,
     else:
         for path in sorted(audition_dir.glob("*.json")):
             audits.append(json.loads(path.read_text(encoding="utf-8")))
+    triage_by_id = {str(row["aweme_id"]): row for row in triaged}
+    audits = [revalidate_semantic_audit(
+        audit, triage_by_id.get(str(audit.get("aweme_id")), {"eligible": True}))
+        for audit in audits]
+    for audit in audits:
+        path = audition_dir / f"{audit.get('aweme_id')}.json"
+        path.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
     selected, gaps = select_balanced(audits, per_category=per_category)
     write_jsonl(output_dir / "selected.jsonl", selected)
     write_selection_report(output_dir / "selection_report.md", selected, gaps,

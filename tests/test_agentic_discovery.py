@@ -9,6 +9,7 @@ from src.agentic_video.discovery import (CONTENT_CATEGORIES,
                                           has_temporal_story_coverage,
                                           load_rolling_candidates, metadata_triage,
                                           parse_semantic_audit,
+                                          revalidate_semantic_audit,
                                           select_balanced)
 
 
@@ -32,6 +33,11 @@ def test_metadata_triage_rejects_pure_technique_but_keeps_story_candidates():
     assert rejected["eligible"] is False
     assert "pure_edit_or_tutorial" in rejected["reasons"]
     assert accepted["eligible"] is True
+
+
+def test_metadata_triage_rejects_generic_tutorial_and_abstract_formats():
+    for title in ("安琪拉教学", "剪辑教程", "精神状态抽象", "狗狗接食物挑战"):
+        assert metadata_triage(_row(title, title))["eligible"] is False
 
 
 def test_balanced_selection_never_fills_with_ineligible_rows():
@@ -99,6 +105,22 @@ def test_content_gate_rejects_three_events_confined_to_video_opening():
     assert has_temporal_story_coverage(row) is False
     selected, _ = select_balanced([row], per_category=1)
     assert selected == []
+
+
+def test_cached_audit_is_revalidated_against_current_metadata_gate():
+    triage = metadata_triage(_row("tutorial", "安琪拉教学"))
+    audit = _audit(_row("tutorial", "安琪拉教学"), "growth_story")
+    audit.update({
+        "duration_s": 30,
+        "events": [{"start_s": 0, "end_s": 3},
+                   {"start_s": 10, "end_s": 15},
+                   {"start_s": 24, "end_s": 30}],
+    })
+
+    refreshed = revalidate_semantic_audit(audit, triage)
+
+    assert refreshed["metadata_eligible"] is False
+    assert refreshed["eligible"] is False
 
 
 def test_rolling_candidates_keep_newest_signed_download_url(tmp_path):
