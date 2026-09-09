@@ -224,13 +224,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--crop", choices=["center", "blurpad"], default="blurpad")
     ap.add_argument("--flash-every", type=int, default=2,
                     help="白帧降频：每 N 刀打一次（0=全打）")
+    ap.add_argument("--tag", default="", help="产物目录后缀（如 _v3，保留各版）")
     ap.add_argument("--config", default=None)
     args = ap.parse_args(argv)
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="lib_beatcut")
     try:
         run_beat_cut(cfg, args.template_id, force=args.force, crop=args.crop,
-                     flash_every=args.flash_every)
+                     flash_every=args.flash_every, tag=args.tag)
         return 0
     except Exception as exc:  # noqa: BLE001
         logger.exception("beat_cut 失败")
