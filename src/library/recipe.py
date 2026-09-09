@@ -95,7 +95,11 @@ def load_recipe_inputs(cfg: AppConfig, vid: str) -> dict:
     ocr_events = ((_out("ocr", pdir) or {}).get("text_events") or [])
     sig = _out("signals", edir) or {}
     cands = list(sig.get("candidates") or [])
-    win_agg = _out("windows", edir) or {}
+    win_raw = edir / "windows" / "result.json"        # 汇总文件是裸 JSON（无信封层）
+    win_agg = {}
+    if win_raw.exists():
+        obj = json.loads(win_raw.read_text(encoding="utf-8"))
+        win_agg = obj.get("output") or obj           # 兼容信封/裸两种形态
     answers = [r for r in (win_agg.get("results") or [])
                if r.get("parse") == "json" and r.get("answer")]
 

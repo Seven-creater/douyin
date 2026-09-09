@@ -117,13 +117,14 @@ def _setup_env(tmp_path, answers, meta_extra=None):
                              output={"candidates": sig})
     wd = cfg.paths.library_dir / "editing" / vid / "windows"
     wd.mkdir(parents=True, exist_ok=True)
-    common.write_result_json(wd, tool="decompose", aweme_id=vid, params={},
-                             output={"results": [
-                                 {"idx": 3, "parse": "json", "answer": {
-                                     "op_type": "tracked_mask_fill",
-                                     "event_time_original_s": 2.05,
-                                     "evidence_quote": "人像内部纹理变化",
-                                     "subject": "人"}}]})
+    # 生产形态：decompose 汇总是裸 JSON（无信封 output 层）
+    (wd / "result.json").write_text(json.dumps({
+        "aweme_id": vid, "results": [
+            {"idx": 3, "parse": "json", "answer": {
+                "op_type": "tracked_mask_fill",
+                "event_time_original_s": 2.05,
+                "evidence_quote": "人像内部纹理变化",
+                "subject": "人"}}]}, ensure_ascii=False), encoding="utf-8")
 
     class FakeAns:
         def __init__(self, text):
