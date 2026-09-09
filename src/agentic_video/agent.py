@@ -260,6 +260,19 @@ def build_recipe_from_agent(cfg: AppConfig, vid: str, agent_result: dict,
                     interval = [max(0.0, start), min(duration, max(end, start + 0.001))]
             interval = [round(max(0.0, float(interval[0])), 6),
                         round(min(duration, float(interval[1])), 6)]
+            # Omni occasionally reports a layer operation at a single frame.
+            # Point operations may keep that representation; duration-based
+            # operations need a small evidence-bounded interval to remain
+            # executable instead of making the whole Recipe invalid.
+            if interval[1] <= interval[0] and op_type not in POINT_OP_TYPES:
+                task_start = max(0.0, float(task.get("start", event_t)))
+                task_end = min(duration, float(task.get("end", event_t)))
+                if task_end > task_start:
+                    interval = [round(task_start, 6), round(task_end, 6)]
+                else:
+                    left = max(0.0, event_t - 0.2)
+                    right = min(duration, max(event_t + 0.2, left + 0.001))
+                    interval = [round(left, 6), round(right, 6)]
             key = (op_type, round(event_t, 2), raw.get("what_changed"))
             if key in seen:
                 continue

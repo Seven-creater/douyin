@@ -72,6 +72,38 @@ def test_build_recipe_from_multi_operation_agent_result(tmp_path):
     assert validate_recipe_v2(recipe) == []
 
 
+def test_build_recipe_repairs_zero_duration_layer_operation(tmp_path):
+    cfg = AppConfig(
+        wellbyte={}, ranking={}, download={}, perception={}, template={}, generation={},
+        logging_level="INFO", library={},
+        paths=PathsCfg(raw_dir=tmp_path / "raw", processed_dir=tmp_path / "processed",
+                       videos_dir=tmp_path / "videos", logs_dir=tmp_path / "logs",
+                       perception_dir=tmp_path / "perception",
+                       generation_dir=tmp_path / "generation",
+                       library_dir=tmp_path / "library"))
+    vid = "r2"
+    video = cfg.paths.videos_dir / vid / "video.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    inspect_dir = cfg.paths.perception_dir / vid / "inspect"
+    inspect_dir.mkdir(parents=True)
+    common.write_result_json(inspect_dir, tool="inspect", aweme_id=vid, params={},
+                             output={"duration_s": 4.0, "fps": 24.0})
+    result = {"results": [{
+        "idx": 0, "probe": "omni_window", "task": {"start": 1.0, "end": 1.8},
+        "answer": {"operations": [{
+            "op_type": "text_layer_animation", "event_time_original_s": 1.2,
+            "interval_original_s": [1.2, 1.2], "confidence": 0.8,
+            "what_changed": "text", "evidence_quote": "文字出现",
+        }]},
+    }]}
+
+    recipe = build_recipe_from_agent(cfg, vid, result)
+
+    assert recipe["operations"][0]["interval"] == [1.0, 1.8]
+    assert validate_recipe_v2(recipe) == []
+
+
 def test_budget_defaults_match_plan():
     assert AgentBudget().max_initial_windows == 48
     assert AgentBudget().max_rounds == 2
