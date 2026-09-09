@@ -58,7 +58,8 @@ RECIPE_PROMPT = """你是剪辑程序反编译器。下面给了一条爆款剪�
    type 只能取：{ops}。
 4. change_anchor 只能取节拍点；texture_sequence 只有窗口判读确认 tracked_mask_fill/
    subject_interior 变化时才允许填，否则删掉该键。
-5. 窗口判读为 uncertain 的不要写成操作；证据不足的操作宁可不要（宁缺毋滥）。
+5. 窗口判读为 uncertain 的不要写成操作；证据不足的操作宁可不要（宁缺毋滥）；
+   operations 最多 30 条（挑最具代表性的，普通 hard_cut 只留标志性几处）。
 6. evidence 引用：来自哪个 window_idx（给了编号）、信号签名一句话。
 7. transition_out.type 只能取 {ops} 或删键（段尾无转场）。
 
@@ -339,7 +340,7 @@ def run_recipe(cfg: AppConfig, vid: str, *, force: bool = False,
         runner = OmniRunner(cfg.perception.get("omni") or {})
 
     prompt = RECIPE_PROMPT.format(ops="/".join(OP_TYPES), skeleton=RECIPE_SKELETON) + ctx
-    max_new = int(r_cfg.get("max_new_tokens", 3072))
+    max_new = int(r_cfg.get("max_new_tokens", 4096))
     max_retries = int(r_cfg.get("max_retries", 1))
     result, mode, attempts = None, "fail", []
     for attempt in range(1 + max_retries):
@@ -348,6 +349,9 @@ def run_recipe(cfg: AppConfig, vid: str, *, force: bool = False,
             + "。修正后只返回完整 JSON。\n\n" + prompt)
         ans = runner.ask(p, max_new_tokens=max_new)
         raw = dedupe_json_repetition(ans.text, first_key='"video"')
+        if attempt == 0 or not result:
+            tdir.mkdir(parents=True, exist_ok=True)
+            (tdir / f"raw_answer_{attempt}.txt").write_text(ans.text, encoding="utf-8")
         block = extract_json_block(raw)
         obj = None
         try:

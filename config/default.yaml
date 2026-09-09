@@ -176,7 +176,7 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     n_control_windows: 3  # 信号谷底控制窗（测漏检率）
     prompt_version: window_v1
   recipe:                # D3 Editing Recipe JSON 合成
-    max_new_tokens: 3072
+    max_new_tokens: 4096   # 3072 截断 JSON（GLM 版候选多枚举长，同 analyze_editing 教训）
     max_retries: 1
     max_context_chars: 8000
     evidence_tolerance_s: 0.25
