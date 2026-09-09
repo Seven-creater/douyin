@@ -202,6 +202,7 @@ def run_decompose(cfg: AppConfig, vid: str, *, only: list[int] | None = None,
             continue
         logger.info("[decompose %s] 窗 %d/%d（%g~%gs %s）", vid, w["idx"], len(windows),
                     w["start"], w["end"], "控制" if w["control"] else "候选")
+        wdir.mkdir(parents=True, exist_ok=True)   # cut_clip 要写 clip.mp4（先建目录）
         ans = runner.watch(video, build_window_prompt(w, duration),
                            start_s=w["start"], end_s=w["end"], clip_dir=wdir,
                            max_new_tokens=max_new, duration_s=w["end"] - w["start"])
