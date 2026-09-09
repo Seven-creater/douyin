@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from src.agentic_video.discovery import (CONTENT_CATEGORIES,
                                           SEMANTIC_AUDIT_PROMPT,
                                           build_audition_shortlist,
+                                          has_temporal_story_coverage,
                                           load_rolling_candidates, metadata_triage,
                                           parse_semantic_audit,
                                           select_balanced)
@@ -84,6 +85,20 @@ def test_semantic_audit_counts_only_located_evidence_events():
     assert audit["event_count"] == 2
     assert audit["eligible"] is False
     assert "event_count_mismatch" in audit["rejection_reasons"]
+
+
+def test_content_gate_rejects_three_events_confined_to_video_opening():
+    row = _audit(_row("front-loaded", "暖心故事"), "real_story")
+    row["duration_s"] = 30
+    row["events"] = [
+        {"start_s": 0, "end_s": 1},
+        {"start_s": 1, "end_s": 2},
+        {"start_s": 2, "end_s": 3},
+    ]
+
+    assert has_temporal_story_coverage(row) is False
+    selected, _ = select_balanced([row], per_category=1)
+    assert selected == []
 
 
 def test_rolling_candidates_keep_newest_signed_download_url(tmp_path):

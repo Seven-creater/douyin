@@ -59,6 +59,30 @@ def metadata_triage(record: dict) -> dict:
     }
 
 
+def has_temporal_story_coverage(row: dict) -> bool:
+    """Require located evidence to span a beginning and an actual ending."""
+    try:
+        duration = float(row.get("duration_s") or 0)
+    except (TypeError, ValueError):
+        duration = 0
+    if duration <= 0:
+        return True
+    intervals = []
+    for event in row.get("events") or []:
+        try:
+            start, end = float(event.get("start_s")), float(event.get("end_s"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if end > start:
+            intervals.append((start, end))
+    if not intervals:
+        return False
+    first = min(start for start, _ in intervals)
+    last = max(end for _, end in intervals)
+    return first <= duration * 0.30 and last >= duration * 0.70 \
+        and last - first >= duration * 0.50
+
+
 def passes_content_gate(row: dict) -> bool:
     return bool(
         row.get("eligible", True)
@@ -70,6 +94,7 @@ def passes_content_gate(row: dict) -> bool:
         and float(row.get("story_clarity") or 0) >= 0.70
         and float(row.get("confidence") or 0) >= 0.65
         and row.get("pure_sensory") is False
+        and has_temporal_story_coverage(row)
     )
 
 
@@ -144,6 +169,7 @@ SEMANTIC_AUDIT_PROMPT = """你是短视频内容审查 Agent。请结合视频�
  "pure_sensory":false,"rejection_reasons":[]}
 
 event_count 只计算能定位时间且有材料支持的事件。没有证据时必须填 false/低分，不得根据标题补剧情。
+事件时间必须使用原视频坐标，并覆盖开头、发展和真正结尾；不得把前几秒拆成三个事件冒充完整故事。
 
 【确定性材料】
 {context}
@@ -191,6 +217,9 @@ def parse_semantic_audit(raw: str, record: dict) -> dict:
             count_mismatch = True
             rejection_reasons.append("event_count_invalid")
     row["rejection_reasons"] = list(dict.fromkeys(rejection_reasons))
+    if not has_temporal_story_coverage(row):
+        row["rejection_reasons"] = list(dict.fromkeys(
+            [*row["rejection_reasons"], "insufficient_temporal_story_coverage"]))
     row["eligible"] = (bool(record.get("eligible", True)) and not count_mismatch
                         and passes_content_gate({**row, "eligible": True}))
     if not block:
