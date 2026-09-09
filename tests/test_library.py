@@ -5,12 +5,19 @@ import json
 
 import numpy as np
 
+from src.library.caption_shots import CAPTION_PROMPT
 from src.library.index_shots import build_shots, parse_scene_log
 from src.library.retrieve import rank_segments
 from src.library.story import build_story_prompt, capability_summary, validate_storyboard
 
 
 # ---------- B1 镜头切分 ----------
+
+
+def test_caption_prompt_is_source_agnostic_and_forbids_character_guessing():
+    assert "不得依据 IP 常识" in CAPTION_PROMPT
+    assert "蜘蛛侠" not in CAPTION_PROMPT
+    assert "章鱼博士" not in CAPTION_PROMPT
 
 def test_parse_scene_log_dedup():
     assert parse_scene_log("pts_time:2.0\npts_time:2.0\npts_time:5.5") == [0.0, 2.0, 5.5]
