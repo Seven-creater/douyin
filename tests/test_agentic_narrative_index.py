@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from src.agentic_video.narrative_index import (DEFAULT_QUOTAS,
+                                                build_entity_registry,
+                                                namespace_window_events,
                                                 score_narrative_windows,
                                                 select_narrative_windows)
 
@@ -42,3 +44,25 @@ def test_dialogue_density_ignores_gapless_punctuation_only_segments():
     assert rows[0]["dialogue_raw"] == 0
     assert rows[1]["dialogue_raw"] > 0
     assert rows[1]["dialogue_score"] > rows[0]["dialogue_score"]
+
+
+def test_entity_registry_and_event_ids_are_stable_across_windows():
+    registry = build_entity_registry({
+        "2": {"entity_ids": ["black_hair_swordsman"],
+              "entity_names": ["黑发持刀少年"]},
+        "3": {"entity_ids": ["black_hair_swordsman"],
+              "entity_names": ["持刀少年"]},
+    })
+    parsed = namespace_window_events({
+        "shots": {"2": {"event_id": "event_1"},
+                  "3": {"event_id": "event_1"}},
+        "causal_links": [{"from_event": "event_1", "to_event": "event_1"}],
+    }, 4)
+
+    assert registry == [{
+        "entity_id": "black_hair_swordsman",
+        "visible_names": ["黑发持刀少年", "持刀少年"],
+        "shot_idxs": [2, 3],
+    }]
+    assert parsed["shots"]["2"]["event_id"] == "w004_event_1"
+    assert parsed["causal_links"][0]["from_event"] == "w004_event_1"

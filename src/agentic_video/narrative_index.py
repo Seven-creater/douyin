@@ -186,8 +186,48 @@ WINDOW_ANNOTATION_PROMPT = """你是电影叙事素材标注 Agent。观看 {sta
 "translation_zh":"忠实中文字幕","confidence":0.0}}],"confidence":0.0}}],
 "causal_links":[{{"from_event":"...","to_event":"...","relation":"causes|motivates|enables|prevents|reveals"}}]}}
 不得根据 IP 常识补写镜头外剧情；同一人物跨镜头使用相同 entity_id；没有可靠对白就保留空数组。
+只有当本窗画面特征支持时才能复用已有 entity_id；无法确认就新建可见身份 ID，不得强行合并。
+本窗新事件 ID 必须以 {event_prefix} 开头。
+【已有实体注册表】{registry}
 【镜头材料】{material}
 """
+
+
+def build_entity_registry(shots: dict) -> list[dict]:
+    """Build a compact deterministic identity memory from completed windows."""
+    registry: dict[str, dict] = {}
+    for shot_idx, annotation in sorted(
+            shots.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else 10**9):
+        if not isinstance(annotation, dict):
+            continue
+        ids = [str(value) for value in annotation.get("entity_ids") or []]
+        names = [str(value) for value in annotation.get("entity_names") or []]
+        for idx, entity_id in enumerate(ids):
+            if not entity_id:
+                continue
+            entry = registry.setdefault(entity_id, {
+                "entity_id": entity_id, "visible_names": [], "shot_idxs": []})
+            name = names[idx] if idx < len(names) else ""
+            if name and name not in entry["visible_names"]:
+                entry["visible_names"].append(name)
+            entry["shot_idxs"].append(int(shot_idx) if str(shot_idx).isdigit() else shot_idx)
+    return list(registry.values())
+
+
+def namespace_window_events(parsed: dict, window_idx: int) -> dict:
+    """Prevent unrelated windows from accidentally reusing generic event ids."""
+    prefix = f"w{window_idx:03d}_"
+    mapping = {}
+    for annotation in (parsed.get("shots") or {}).values():
+        event_id = str(annotation.get("event_id") or "event")
+        namespaced = event_id if event_id.startswith(prefix) else prefix + event_id
+        mapping[event_id] = namespaced
+        annotation["event_id"] = namespaced
+    for link in parsed.get("causal_links") or []:
+        for key in ("from_event", "to_event"):
+            if link.get(key) in mapping:
+                link[key] = mapping[link[key]]
+    return parsed
 
 
 def parse_window_annotations(raw: str, *, valid_shot_ids: set[int]) -> dict:
@@ -281,13 +321,17 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
             "dialogue_asr": row.get("dialogue") or [],
         } for row in window_shots]
         prompt = WINDOW_ANNOTATION_PROMPT.format(
-            start=start, end=end, material=json.dumps(material, ensure_ascii=False)[:18000])
+            start=start, end=end, event_prefix=f"w{window_idx:03d}_",
+            registry=json.dumps(build_entity_registry(saved.get("shots") or {}),
+                                ensure_ascii=False)[:8000],
+            material=json.dumps(material, ensure_ascii=False)[:18000])
         clip_dir = result_path.parent / "annotation_clips" / f"{window_idx:03d}"
         clip_dir.mkdir(parents=True, exist_ok=True)
         answer = runner.watch(video, prompt, start_s=start, end_s=end, clip_dir=clip_dir,
                               max_new_tokens=3072, duration_s=end - start)
         parsed = parse_window_annotations(
             answer.text, valid_shot_ids={int(row["shot_idx"]) for row in window_shots})
+        parsed = namespace_window_events(parsed, window_idx)
         saved.setdefault("shots", {}).update(parsed["shots"])
         saved.setdefault("causal_links", []).extend(parsed["causal_links"])
         saved.setdefault("completed_windows", []).append(window_idx)
