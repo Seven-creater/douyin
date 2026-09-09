@@ -89,14 +89,18 @@ def plan_windows(candidates: list[dict], duration_s: float, *, series: dict | No
         w["start"], w["end"] = max(0.0, round(w["start"], 2)), min(duration_s, round(w["end"], 2))
         w["control"] = False
 
-    # 限额：先保每种类型 1 个最高分窗，再按分数补满
+    # 限额：贪心保类型覆盖（优先挑"带来最多未覆盖类型"的窗，平分按置信度——
+    # 多类型合并窗也算数），再按分数补满
     if len(wins) > max_windows:
         by_conf = sorted(wins, key=lambda w: -w["confidence"])
-        keep, seen = [], set()
-        for w in by_conf:
-            if not any(h in seen for h in w["hypotheses"]):
-                keep.append(w)
-                seen.update(w["hypotheses"])
+        all_types = {h for w in wins for h in w["hypotheses"]}
+        remaining, covered, keep = list(by_conf), set(), []
+        while remaining and len(covered) < len(all_types) and len(keep) < max_windows:
+            best = max(remaining, key=lambda w: (len(set(w["hypotheses"]) - covered),
+                                                 w["confidence"]))
+            keep.append(best)
+            remaining.remove(best)
+            covered.update(best["hypotheses"])
         for w in by_conf:
             if len(keep) >= max_windows:
                 break
