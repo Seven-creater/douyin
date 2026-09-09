@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+
 from src.agentic_video.discovery import (CONTENT_CATEGORIES,
                                           SEMANTIC_AUDIT_PROMPT,
                                           build_audition_shortlist,
-                                          metadata_triage, select_balanced)
+                                          metadata_triage, parse_semantic_audit,
+                                          select_balanced)
 
 
 def _row(aweme_id: str, title: str, likes: int = 100) -> dict:
@@ -64,3 +67,18 @@ def test_semantic_audit_prompt_replaces_only_context_placeholder():
     prompt = SEMANTIC_AUDIT_PROMPT.replace("{context}", "证据")
     assert "\"category\"" in prompt
     assert "证据" in prompt
+
+
+def test_semantic_audit_counts_only_located_evidence_events():
+    row = metadata_triage(_row("event-mismatch", "暖心救助"))
+    audit = parse_semantic_audit(json.dumps({
+        "category": "real_story", "event_count": 3,
+        "events": [{"start_s": 0, "end_s": 1, "evidence_sources": ["frame"]},
+                    {"start_s": 2, "end_s": 3, "evidence_sources": ["ocr"]}],
+        "has_goal_or_causality": True, "has_resolution": True,
+        "evidence_coverage": 1.0, "story_clarity": 1.0,
+        "confidence": 1.0, "pure_sensory": False,
+    }), row)
+    assert audit["event_count"] == 2
+    assert audit["eligible"] is False
+    assert "event_count_mismatch" in audit["rejection_reasons"]

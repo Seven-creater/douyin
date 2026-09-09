@@ -155,6 +155,26 @@ def parse_semantic_audit(raw: str, record: dict) -> dict:
     if category not in CONTENT_CATEGORIES:
         category = record.get("category_hint")
     row = {**record, **parsed, "category": category}
+    evidence_events = []
+    for event in parsed.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        try:
+            start_s, end_s = float(event.get("start_s")), float(event.get("end_s"))
+        except (TypeError, ValueError):
+            continue
+        if end_s <= start_s or not event.get("evidence_sources"):
+            continue
+        evidence_events.append({**event, "start_s": start_s, "end_s": end_s})
+    row["events"] = evidence_events
+    reported_count = parsed.get("event_count")
+    row["event_count"] = len(evidence_events)
+    if reported_count is not None:
+        try:
+            if int(reported_count) != len(evidence_events):
+                row.setdefault("rejection_reasons", []).append("event_count_mismatch")
+        except (TypeError, ValueError):
+            row.setdefault("rejection_reasons", []).append("event_count_invalid")
     row["eligible"] = bool(record.get("eligible", True)) and passes_content_gate({
         **row, "eligible": True})
     if not block:
