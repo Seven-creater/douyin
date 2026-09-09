@@ -40,6 +40,21 @@ def test_bpm_from_beats_median_interval():
     assert bpm_from_beats([0.0, 1.0]) is None                   # 样本不足
 
 
+def test_build_context_caps_candidate_lines():
+    """GLM 版实测教训：模型逐条转写全部候选 → 输出 12KB 仍截断。候选行必须限量。"""
+    from src.library.recipe import build_context
+
+    cands = ([{"t_s": i * 0.3, "type_hypotheses": ["hard_cut"], "confidence": 0.8,
+               "signature": {"diff_global": 40}} for i in range(50)]
+             + [{"t_s": 20.0, "type_hypotheses": ["whip_pan"], "confidence": 0.3,
+                 "signature": {}}])
+    ctx = build_context(_meta(candidates=cands), max_chars=100000)
+    n_lines = ctx.count("\n- t=")
+    assert n_lines <= 31                                   # 30 个 hard_cut + 1 个新类型
+    assert "其余 20 个低置信候选已省略" in ctx
+    assert "whip_pan" in ctx                               # 满额后新类型仍放行
+
+
 def test_validate_rejects_fabricated_timestamp_and_enum():
     errs = validate_recipe(_recipe(ops=[
         {"t_s": 7.77, "type": "hard_cut", "confidence": 0.8}]), _meta())
@@ -153,7 +168,7 @@ def test_run_recipe_repairs_then_accepts(tmp_path):
     from src.library.recipe import run_recipe
     p = run_recipe(cfg, vid, force=True, runner=runner)
     env = json.loads(p.read_text(encoding="utf-8"))
-    assert env["output"]["mode"] == "json" and env["output"]["attempts"] == 2  # repair 生效
+    assert env["output"]["mode"] == "json" and len(env["output"]["attempts"]) == 2  # repair 生效
 
 
 def test_run_recipe_falls_back_to_rule_draft(tmp_path):

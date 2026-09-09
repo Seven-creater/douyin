@@ -68,7 +68,7 @@ def pair_flow(prev, cur, downscale: int = 2) -> dict:
     ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
     cy, cx = (h - 1) / 2, (w - 1) / 2
     radial = ((xs - cx) * flow[..., 0] + (ys - cy) * flow[..., 1]) \
-        / (np.hypot(xs - cx, ys - cy) + 5.0)
+        / ((np.hypot(xs - cx, ys - cy) + 5.0) * (mag + 1e-6))   # 除以|flow|→纯方向余弦
     radial_score = float((radial * mag).sum() / (mag.sum() + 1e-6))  # -1..1
     return {"mag_mean": round(mag_mean, 3), "angle_topbin": round(topbin, 3),
             "radial_score": round(radial_score, 3)}

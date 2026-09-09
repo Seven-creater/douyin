@@ -155,10 +155,24 @@ def build_context(meta: dict, *, max_chars: int = 8000) -> str:
     if meta["bounds"]:
         parts.append("[镜头边界] " + ", ".join(f"{b:g}" for b in meta["bounds"][:60]))
     if meta["candidates"]:
+        # 候选行截断：模型会逐条转写全部候选 → 输出超长截断（GLM 版实测 12KB 仍砍断）。
+        # top30 按置信度 + 类型保底；known_ts 清单仍全量（校验锚不变）
+        by_conf = sorted(meta["candidates"], key=lambda c: -c["confidence"])
+        shown, seen_types = [], set()
+        for c in by_conf:
+            new_type = any(h not in seen_types for h in c["type_hypotheses"])
+            if len(shown) >= 30 and not new_type:          # 满额后只放行新类型
+                continue
+            shown.append(c)
+            seen_types.update(c["type_hypotheses"])
+        shown.sort(key=lambda c: c["t_s"])
+        omitted = len(meta["candidates"]) - len(shown)
         lines = [f"- t={c['t_s']:g} [{'/'.join(c['type_hypotheses'])}] conf={c['confidence']} "
                  f"sig={{{', '.join(f'{k}={v}' for k, v in c['signature'].items())}}}"
                  + (f" members={c['members_s']}" if c.get("members_s") else "")
-                 for c in meta["candidates"]]
+                 for c in shown]
+        if omitted > 0:
+            lines.append(f"（其余 {omitted} 个低置信候选已省略，不要为它们编操作）")
         parts.append("[信号候选·t_s 优先取这些]\n" + "\n".join(lines))
     if meta["window_confirms"]:
         lines = [f"- 窗{w['idx']} t={w['t_s']:g} {w['op_type']} 主体「{w['subject'][:20]}」"
