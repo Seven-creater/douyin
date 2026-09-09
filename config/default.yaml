@@ -151,6 +151,21 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     max_new_tokens: 4096   # 50s 高密度卡点 3072 会截断 JSON（实测）
     max_retries: 1
     prompt_version: editing_v1
+  signals:                # D1 剪辑信号确定性检测轨（Edit Decomposer 证据底座）
+    work_fps: 10          # 采样帧率（0.1s 级事件分辨率）
+    scale: 0.5            # 工作分辨率 = 源一半（灰度）
+    grid: {rows: 6, cols: 6}
+    flash_delta: 40.0     # 亮度单帧跳变阈值
+    cut_delta: 28.0       # 全局差分切点阈值
+    cell_delta: 25.0      # 网格单元"活跃"阈值（region_change/mask 族）
+    region_cells_min: 6
+    region_diff_max: 10.0 # region_change 要求全局差分低于此（非切点）
+    whip_mag_min: 4.0
+    freeze_mag_max: 0.15
+    montage_window_s: 1.2
+    montage_min_cuts: 3
+    max_events: 64
+    save_debug_frames: true
   retrieve:
     top_k: 5
     min_cosine: 0.18       # 低于此判"库内不足"
