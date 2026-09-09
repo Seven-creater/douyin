@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
+from src.agentic_video.narrative_agent import build_narrative_material
 from src.agentic_video.narrative import (new_narrative_program,
                                           validate_narrative_program)
 
@@ -103,3 +107,24 @@ def test_utterance_cannot_cross_reference_duration():
         "original": "助ける", "translation_zh": "我要救它",
         "evidence": _evidence(11.0), "confidence": 0.8, "status": "supported"}]
     assert any("outside reference" in e for e in validate_narrative_program(program))
+
+
+def test_narrative_material_reads_curated_context_as_unverified_hypothesis(tmp_path):
+    videos = tmp_path / "videos"
+    perception = tmp_path / "perception"
+    reference = videos / "ref"
+    reference.mkdir(parents=True)
+    (reference / "context.json").write_text(json.dumps({
+        "title": "父亲帮女儿练习用脚写字",
+        "author": "良田",
+        "hashtags": ["父亲", "自信"],
+    }, ensure_ascii=False), encoding="utf-8")
+    cfg = SimpleNamespace(paths=SimpleNamespace(
+        videos_dir=videos, perception_dir=perception))
+
+    material = build_narrative_material(cfg, "ref")
+
+    assert "仅作待验证假设，不是证据" in material
+    assert "父亲帮女儿练习用脚写字" in material
+    assert "外部作者：良田" in material
+    assert "外部话题：父亲,自信" in material

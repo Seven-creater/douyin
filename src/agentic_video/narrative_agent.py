@@ -107,14 +107,25 @@ def _read_output(cfg, vid: str, tool: str) -> dict:
 
 def build_narrative_material(cfg, vid: str, *, start: float | None = None,
                              end: float | None = None) -> str:
-    metadata_path = cfg.paths.videos_dir / vid / "metadata.json"
     metadata = {}
-    if metadata_path.exists():
+    # Manually curated references may carry the richer context.json instead of
+    # the downloader's metadata.json.  Treat both as hypotheses for where to
+    # look; the prompts still forbid using them as visual/narrative evidence.
+    for filename in ("context.json", "metadata.json"):
+        metadata_path = cfg.paths.videos_dir / vid / filename
+        if not metadata_path.exists():
+            continue
         try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            value = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                metadata.update(value)
         except ValueError:
-            metadata = {}
-    rows = [f"标题：{metadata.get('title') or '无'}"]
+            continue
+    rows = [f"外部标题（仅作待验证假设，不是证据）：{metadata.get('title') or '无'}"]
+    if metadata.get("author"):
+        rows.append(f"外部作者：{metadata['author']}")
+    if metadata.get("hashtags"):
+        rows.append("外部话题：" + ",".join(str(value) for value in metadata["hashtags"][:20]))
     shots = _read_output(cfg, vid, "shots")
     boundaries = [float(value) for value in shots.get("boundaries_s") or []]
     if start is not None and end is not None:
