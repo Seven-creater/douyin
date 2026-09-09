@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 
-from src.library.decompose import (OP_TYPES, build_window_prompt, parse_window_answer,
-                                   plan_windows, run_decompose)
+from src.library.decompose import (build_window_prompt, parse_window_answer, plan_windows,
+                                   run_decompose)
 
 
 def _cand(t, hy=("hard_cut",), conf=0.8, sig=None):
@@ -129,6 +129,9 @@ def test_run_decompose_resumes_and_writes_aggregate(tmp_path, monkeypatch):
 
     run_decompose(cfg, vid, no_controls=True, runner=FakeRunner())
     assert len(calls) == 2
+    agg = json.loads((cfg.paths.library_dir / "editing" / vid / "windows" /
+                      "result.json").read_text(encoding="utf-8"))
+    assert agg["n_json"] == 2
     agg = json.loads((cfg.paths.library_dir / "editing" / vid / "windows" /
                       "result.json").read_text(encoding="utf-8"))
     assert agg["n_json"] == 2 and agg["n_windows"] == 2

@@ -242,8 +242,14 @@ def run_decompose(cfg: AppConfig, vid: str, *, only: list[int] | None = None,
         params = {**params_base, "start": w["start"], "end": w["end"]}
         if not force and common.done_or_skip(wdir, params, force=False) is not None:
             env = common.read_result_json(wdir)
+            output = (env or {}).get("output") or {}
+            answer = output.get("answer")
             results.append({"idx": w["idx"], "status": "skip",
-                            "answer": env["output"]["answer"]})
+                            "answer": answer,
+                            # Preserve parse status when rebuilding the aggregate
+                            # during a resumed run; otherwise valid cached JSON is
+                            # incorrectly reported as 0/n_json.
+                            "parse": output.get("parse") or ("json" if answer else "raw")})
             logger.info("[decompose %s] 窗 %d 已有产物，跳过", vid, w["idx"])
             continue
         logger.info("[decompose %s] 窗 %d/%d（%g~%gs %s）", vid, w["idx"], len(windows),
