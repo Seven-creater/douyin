@@ -288,6 +288,10 @@ def _prune_invalid_ops(obj, meta: dict) -> dict | None:
         return None
     pruned = dict(obj)
     pruned["operations"] = kept
+    if not validate_recipe(pruned, meta):
+        # 残余段级问题（覆盖/重叠）→ 段结构用确定性边界重建（ops 才是语义主体）
+        draft = build_rule_draft(meta, (obj.get("video") or {}).get("aweme_id", ""))
+        pruned["segments"] = draft["segments"]
     return pruned if not validate_recipe(pruned, meta) else None
 
 
@@ -371,8 +375,11 @@ def run_recipe(cfg: AppConfig, vid: str, *, force: bool = False,
         result, mode = rule_draft, "rule_fallback"
 
     tdir.mkdir(parents=True, exist_ok=True)   # write_result_json 不建父目录（前车之鉴）
+    if mode == "rule_fallback" and result is not rule_draft:
+        (tdir / "raw_partial.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     path = common.write_result_json(tdir, tool="recipe", aweme_id=vid, params=params,
-                                    output={"mode": mode, "attempts": len(attempts),
+                                    output={"mode": mode, "attempts": attempts,
                                             "n_operations": len(result["operations"]),
                                             "recipe": result})
     logger.info("[recipe %s] mode=%s %d ops → %s", vid, mode,
