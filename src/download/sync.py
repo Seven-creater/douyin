@@ -1,10 +1,10 @@
 """本地 → 服务器视频同步（scp；失败不致命只记录）。
 
 同步策略（对账式，幂等）：
-    远端已有目录 = ssh ls 一次
-    需推送 = (manifest 中 success 且本地文件在) − 远端已有
+    远端已有文件 = ssh find 一次，记录 video.mp4 字节数
+    需推送 = manifest 中 success 且本地文件存在，但远端缺失或大小不同
     逐个推送：单文件超时 1800s、最多 2 次尝试、单文件异常只记录不中断
-这覆盖了"上轮崩溃没推成 / 手工修复的孤儿记录 / 任何历史遗漏"，
+这覆盖了"上轮崩溃没推成 / 半传文件 / 手工修复的孤儿记录"，
 而不只是本轮新下载——服务器最终与本地 manifest 的 success 集合一致。
 """
 from __future__ import annotations
@@ -37,6 +37,13 @@ def compute_missing(local_success_ids: list[str], remote_ids: list[str]) -> list
     return missing
 
 
+def compute_size_mismatches(local_sizes: dict[str, int],
+                            remote_sizes: dict[str, int]) -> list[str]:
+    """Return local ids whose remote video is absent or not byte-identical in size."""
+    return [aweme_id for aweme_id, size in local_sizes.items()
+            if remote_sizes.get(aweme_id) != size]
+
+
 def list_remote_video_dirs(ssh_target: str, remote_videos_dir: str) -> list[str]:
     """远端 data/videos/ 下已有哪些 <aweme_id> 目录。失败返回 []（触发全量补推）。"""
     try:
@@ -51,6 +58,28 @@ def list_remote_video_dirs(ssh_target: str, remote_videos_dir: str) -> list[str]
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.warning("[sync] 列远端目录异常: %s", exc)
         return []
+
+
+def list_remote_video_sizes(ssh_target: str, remote_videos_dir: str) -> dict[str, int]:
+    """List completed-looking remote video files and their byte sizes."""
+    try:
+        command = (f"find {remote_videos_dir} -mindepth 2 -maxdepth 2 "
+                   "-name video.mp4 -printf '%h\\t%s\\n'")
+        code, out = _run(["ssh", *_SSH_OPTS, ssh_target, command], timeout=30)
+        if code != 0:
+            logger.warning("[sync] 列远端文件大小失败（code=%s）：%s", code, out[:200])
+            return {}
+        rows = {}
+        for line in out.splitlines():
+            try:
+                parent, raw_size = line.rsplit("\t", 1)
+                rows[parent.rstrip("/").rsplit("/", 1)[-1]] = int(raw_size)
+            except (ValueError, TypeError):
+                logger.warning("[sync] 无法解析远端文件记录：%s", line[:200])
+        return rows
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("[sync] 列远端文件大小异常: %s", exc)
+        return {}
 
 
 def _push_one_dir(ssh_target: str, remote_videos_dir: str, local_dir: Path) -> str | None:
@@ -85,11 +114,14 @@ def push_videos(
     """对账式推送：缺什么推什么。返回 {"pushed": n, "errors": [...], "checked": n}。"""
     remote_videos = f"{remote_root}/data/videos"
     local_ids = [i for i in manifest_success_ids if (videos_dir / i / "video.mp4").exists()]
-    remote_ids = list_remote_video_dirs(ssh_target, remote_videos)
-    missing = compute_missing(local_ids, remote_ids)
+    local_sizes = {aweme_id: (videos_dir / aweme_id / "video.mp4").stat().st_size
+                   for aweme_id in local_ids}
+    remote_sizes = list_remote_video_sizes(ssh_target, remote_videos)
+    missing = compute_size_mismatches(local_sizes, remote_sizes)
 
     result: dict = {"pushed": 0, "errors": [], "checked": len(local_ids)}
-    logger.info("[sync] 本地成功 %d 条 / 远端已有 %d 条 / 待推 %d 条", len(local_ids), len(remote_ids), len(missing))
+    logger.info("[sync] 本地成功 %d 条 / 远端完整文件 %d 条 / 待推或修复 %d 条",
+                len(local_ids), len(remote_sizes), len(missing))
 
     for aweme_id in missing:
         err = _push_one_dir(ssh_target, remote_videos, videos_dir / aweme_id)

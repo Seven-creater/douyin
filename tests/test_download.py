@@ -162,3 +162,15 @@ def test_compute_missing_basic():
     assert compute_missing(["a", "a"], []) == ["a"]                   # 去重
     assert compute_missing([], ["x"]) == []                           # 本地空则无
     assert compute_missing(["m"], ["manifest.json"]) == ["m"]         # manifest 不算视频目录
+
+
+def test_compute_size_mismatches_repairs_missing_and_partial_remote_files():
+    from src.download.sync import compute_size_mismatches
+
+    local_sizes = {"same": 100, "partial": 200, "directory_only": 300}
+    remote_sizes = {"same": 100, "partial": 120}
+
+    assert compute_size_mismatches(local_sizes, remote_sizes) == [
+        "partial",
+        "directory_only",
+    ]
