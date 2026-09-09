@@ -56,6 +56,8 @@ def test_asset_ranking_filters_source_and_uses_action_fit():
 def test_renderer_filters_compile_requested_effects():
     vf = segment_filter(_recipe()["operations"], duration_s=2.0)
     assert "setpts=PTS/2" in vf and "trim=duration=2" in vf
+    assert "force_original_aspect_ratio=increase" in vf
+    assert "crop=544:960" in vf and ",pad=" not in vf
     recipe = _recipe()
     recipe["operations"].append({
         "id": "flash", "type": "luma_flash", "interval": [1.0, 1.0],
