@@ -439,7 +439,10 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
     root = cfg.paths.perception_dir / vid / "narrative_agent"
     result_path = root / "result.json"
     if result_path.exists() and not force:
-        return json.loads(result_path.read_text(encoding="utf-8"))["program"]
+        program = json.loads(result_path.read_text(encoding="utf-8"))["program"]
+        if output is not None:
+            write_narrative_program(program, Path(output))
+        return program
     inspect = _read_output(cfg, vid, "inspect")
     duration = float(inspect.get("duration_s") or 0)
     fps = float(inspect.get("fps") or 24)

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from src.agentic_video.narrative_agent import (NarrativeBudget,
                                                 parse_narrative_program,
-                                                plan_narrative_windows)
+                                                plan_narrative_windows,
+                                                run_narrative_agent)
+from src.agentic_video.narrative import new_narrative_program
 
 
 def test_narrative_windows_cover_duration_with_budget():
@@ -43,3 +46,20 @@ def test_default_narrative_budget_matches_contract():
     budget = NarrativeBudget()
     assert (budget.max_initial_windows, budget.max_rounds,
             budget.max_refinement_windows) == (24, 2, 12)
+
+
+def test_cached_narrative_is_written_to_requested_output(tmp_path):
+    perception_dir = tmp_path / "perception"
+    result_path = perception_dir / "ref" / "narrative_agent" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    program = new_narrative_program(
+        reference_id="ref", reference_uri="ref.mp4", sha256="a" * 64,
+        duration_s=10, fps=24)
+    result_path.write_text(json.dumps({"program": program}), encoding="utf-8")
+    cfg = SimpleNamespace(paths=SimpleNamespace(perception_dir=perception_dir))
+    output = tmp_path / "delivery" / "reference.narrative.json"
+
+    cached = run_narrative_agent(cfg, "ref", output=output)
+
+    assert cached == program
+    assert json.loads(output.read_text(encoding="utf-8")) == program
