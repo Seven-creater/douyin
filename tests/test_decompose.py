@@ -28,6 +28,14 @@ def test_plan_windows_caps_with_type_coverage():
     assert any("tracked_mask_fill" in w["hypotheses"] for w in wins)  # 低分类型不被挤光
 
 
+def test_plan_windows_caps_chain_merge_duration():
+    """试点实测教训：0.3s 间隔密集候选会链式合并滚出巨窗（0~8s），必须有上限。"""
+    cands = [_cand(1.0 + i * 0.3, conf=0.6) for i in range(20)]     # 1.0~6.7s 每 0.3s 一个
+    wins = plan_windows(cands, 25.0, n_control_windows=0)
+    assert len(wins) >= 2                                   # 不再是一个巨窗
+    assert all(w["end"] - w["start"] <= 2.5 + 0.65 for w in wins)  # ≤上限+边界余量
+
+
 def test_plan_windows_control_windows_at_signal_valleys():
     series = {"t": [round(i * 0.1, 3) for i in range(30)],
               "diff_global": [5.0] * 10 + [0.1] * 10 + [5.0] * 9,   # 1.0~2.0s 谷底

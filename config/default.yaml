@@ -171,6 +171,7 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     max_new_tokens: 1024
     window_pad_s: 0.6
     merge_gap_s: 0.5
+    max_window_s: 2.5        # 巨窗上限（试点实测链式合并滚出 8s/13s 窗）
     max_windows: 48
     n_control_windows: 3  # 信号谷底控制窗（测漏检率）
     prompt_version: window_v1

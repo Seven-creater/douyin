@@ -43,6 +43,8 @@ WINDOW_PROMPT = """你是剪辑手法鉴定专家。下面是原视频的一个�
 【信号特征】{signature}
 【原视频时间】窗口 {start:g}s ~ {end:g}s（全长 {duration:g}s；event_time_original_s
 必须落在此窗口内，按原视频时间报）
+【时间换算】你看到的片段是从原视频 {start:g}s 截取的——片段内第 n 秒 ≈ 原视频
+{start:g}+n 秒，报时刻请先换算。
 
 【只输出一个 JSON 对象，无围栏无解释】
 {{"what_changed": "global",             # 只能取：global/subject_interior/background/local_region/text
@@ -60,12 +62,17 @@ WINDOW_PROMPT = """你是剪辑手法鉴定专家。下面是原视频的一个�
 
 def plan_windows(candidates: list[dict], duration_s: float, *, series: dict | None = None,
                  window_pad_s: float = 0.6, merge_gap_s: float = 0.5, max_windows: int = 48,
-                 n_control_windows: int = 3) -> list[dict]:
-    """信号候选 → 窗口列表（合并/限额/类型覆盖配额/控制窗）。纯函数。"""
+                 n_control_windows: int = 3, max_window_s: float = 2.5) -> list[dict]:
+    """信号候选 → 窗口列表（合并/时长上限/限额/类型覆盖配额/控制窗）。纯函数。
+
+    max_window_s：密集候选链式合并会滚出巨窗（试点实测 0~8s/11~24s），
+    单窗单答丢逐事件粒度 → 超上限即关窗另开。
+    """
     wins: list[dict] = []
     for c in sorted(candidates, key=lambda c: c["t_s"]):
         s, e = c["t_s"] - window_pad_s, c["t_s"] + window_pad_s
-        if wins and s - wins[-1]["end"] < merge_gap_s:
+        if wins and s - wins[-1]["end"] < merge_gap_s \
+                and e - wins[-1]["start"] <= max_window_s:
             w = wins[-1]
             w["end"] = max(w["end"], e)
             for h in c["type_hypotheses"]:
@@ -176,7 +183,8 @@ def run_decompose(cfg: AppConfig, vid: str, *, only: list[int] | None = None,
         window_pad_s=float(d_cfg.get("window_pad_s", 0.6)),
         merge_gap_s=float(d_cfg.get("merge_gap_s", 0.5)),
         max_windows=int(d_cfg.get("max_windows", 48)),
-        n_control_windows=0 if no_controls else int(d_cfg.get("n_control_windows", 3)))
+        n_control_windows=0 if no_controls else int(d_cfg.get("n_control_windows", 3)),
+        max_window_s=float(d_cfg.get("max_window_s", 2.5)))
     todo = [w for w in windows if only is None or w["idx"] in only]
     logger.info("[decompose %s] %d 窗（试点 %s）", vid, len(windows),
                 only if only is not None else "全量")
