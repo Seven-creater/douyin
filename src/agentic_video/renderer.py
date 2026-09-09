@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from copy import deepcopy
 from pathlib import Path
 from typing import Protocol
 
@@ -75,9 +76,12 @@ def operations_for_interval(recipe: dict, start: float, end: float) -> list[dict
 
 
 def segment_filter(operations: list[dict], *, width: int = 720, height: int = 960,
-                   duration_s: float) -> str:
+                   duration_s: float, focus_x: float = 0.5) -> str:
+    focus_x = min(1.0, max(0.0, float(focus_x)))
+    crop_x = (f"(iw-{width})*{focus_x:g}" if abs(focus_x - 0.5) > 1e-6
+              else f"(iw-{width})/2")
     filters = [f"scale={width}:{height}:force_original_aspect_ratio=increase",
-               f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2",
+               f"crop={width}:{height}:{crop_x}:(ih-{height})/2",
                "setsar=1", "fps=24"]
     for op in operations:
         params = op.get("params") or {}
@@ -87,7 +91,7 @@ def segment_filter(operations: list[dict], *, width: int = 720, height: int = 96
         elif op["type"] in {"crop_reframe", "zoom_punch"}:
             scale = min(2.0, max(1.0, float(params.get("scale", 1.2))))
             filters.extend([f"scale=iw*{scale:g}:ih*{scale:g}",
-                            f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2"])
+                            f"crop={width}:{height}:{crop_x}:(ih-{height})/2"])
         elif op["type"] == "color_adjust":
             filters.append("eq=saturation=1.25:contrast=1.08")
         elif op["type"] == "beat_freeze":
@@ -126,6 +130,61 @@ def final_filter(recipe: dict, *, font: Path | None = None) -> str:
     return ",".join(filters) if filters else "null"
 
 
+def _srt_timestamp(seconds: float) -> str:
+    milliseconds = max(0, int(round(seconds * 1000)))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def write_story_subtitles(asset_plan: dict, retrieval: list[dict], output: Path) -> Path:
+    """Map source-time dialogue translations into deterministic output-time SRT."""
+    by_slot = {int(row["slot_idx"]): row for row in retrieval}
+    cues = []
+    for slot in asset_plan.get("slots") or []:
+        picked = (by_slot.get(int(slot["slot_idx"])) or {}).get("picked") or {}
+        source_start = float(picked.get("source_start_s") or 0)
+        target_start = float(slot["start_s"])
+        target_end = float(slot["end_s"])
+        for line in picked.get("dialogue") or []:
+            subtitle = str(line.get("translation_zh") or "").strip()
+            if not subtitle or subtitle == "uncertain":
+                continue
+            start = target_start + max(0.0, float(line.get("start_s") or source_start)
+                                       - source_start)
+            end = target_start + max(0.0, float(line.get("end_s") or source_start)
+                                     - source_start)
+            start, end = max(target_start, start), min(target_end, end)
+            if end - start >= 0.1:
+                cues.append((start, end, subtitle.replace("\r", " ").replace("\n", " ")))
+    output = Path(output)
+    lines = []
+    for idx, (start, end, subtitle) in enumerate(sorted(cues), 1):
+        lines.extend([str(idx), f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}",
+                      subtitle, ""])
+    output.write_text("\n".join(lines), encoding="utf-8")
+    return output
+
+
+def _scaled_recipe(recipe: dict, duration_s: float) -> dict:
+    reference_duration = float(recipe["reference"]["duration_s"])
+    if reference_duration <= 0 or abs(reference_duration - duration_s) < 1e-6:
+        return recipe
+    scaled = deepcopy(recipe)
+    ratio = duration_s / reference_duration
+    scaled["reference"]["duration_s"] = duration_s
+    for operation in scaled.get("operations") or []:
+        operation["interval"] = [round(float(value) * ratio, 6)
+                                 for value in operation["interval"]]
+    return scaled
+
+
+def _subtitle_filter(path: Path) -> str:
+    escaped = path.resolve().as_posix().replace(":", "\\:").replace("'", "\\'")
+    return f"subtitles=filename='{escaped}':charenc=UTF-8"
+
+
 def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: list[dict],
                   output_dir: Path, *, mask_backend: MaskBackend | None = None,
                   force: bool = False) -> Path:
@@ -142,9 +201,14 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
         return final
     work = output_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
-    canvas_cfg = cfg.generation.get("assemble", {})
-    canvas_width = int(canvas_cfg.get("width", 720))
-    canvas_height = int(canvas_cfg.get("height", 960))
+    narrative_mode = bool(asset_plan.get("narrative_program_required"))
+    canvas_cfg = (cfg.library.get("narrative_render") or {}
+                  if narrative_mode else cfg.generation.get("assemble", {}))
+    canvas_width = int(canvas_cfg.get("width", 1920 if narrative_mode else 720))
+    canvas_height = int(canvas_cfg.get("height", 1080 if narrative_mode else 960))
+    render_duration = (max(float(slot["end_s"]) for slot in asset_plan["slots"])
+                       if narrative_mode else float(recipe["reference"]["duration_s"]))
+    execution_recipe = _scaled_recipe(recipe, render_duration) if narrative_mode else recipe
     retrieval_by_slot = {int(row["slot_idx"]): row for row in retrieval}
     segment_paths = []
     commands: list[list[str]] = []
@@ -155,20 +219,43 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
         destination = work / f"segment_{index:04d}.mp4"
         selection = retrieval_by_slot.get(index) or {}
         picked = selection.get("picked")
-        active = operations_for_interval(recipe, float(slot["start_s"]), float(slot["end_s"]))
+        active = operations_for_interval(execution_recipe, float(slot["start_s"]),
+                                         float(slot["end_s"]))
         if picked is None:
             args = ["-y", "-loglevel", "error", "-f", "lavfi", "-i",
-                    f"color=black:s={canvas_width}x{canvas_height}:d={duration:g}:r=24",
-                    "-an", "-c:v",
-                    "libx264", "-pix_fmt", "yuv420p", str(destination)]
+                    f"color=black:s={canvas_width}x{canvas_height}:d={duration:g}:r=24"]
+            if narrative_mode:
+                args.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+                             "-map", "0:v:0", "-map", "1:a:0"])
+            else:
+                args.append("-an")
+            args.extend(["-t", f"{duration:g}", "-c:v", "libx264", "-pix_fmt",
+                         "yuv420p"])
+            if narrative_mode:
+                args.extend(["-c:a", "aac"])
+            args.append(str(destination))
         else:
+            source_duration = max(
+                0.1, float(picked.get("source_end_s",
+                                      picked["source_start_s"] + duration))
+                - float(picked["source_start_s"]))
             args = ["-y", "-loglevel", "error", "-ss", f"{picked['source_start_s']:g}",
-                    "-i", str(picked["video"]), "-t", f"{max(duration, 0.1):g}",
+                    "-t", f"{source_duration:g}", "-i", str(picked["video"]),
                     "-vf", segment_filter(active, width=canvas_width,
-                                           height=canvas_height, duration_s=duration),
-                    "-an", "-c:v",
-                    "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt",
-                    "yuv420p", str(destination)]
+                                           height=canvas_height, duration_s=duration,
+                                           focus_x=float(picked.get("focus_x", 0.5))),
+                    "-t", f"{max(duration, 0.1):g}"]
+            if narrative_mode:
+                args.extend(["-map", "0:v:0", "-map", "0:a?", "-af",
+                             f"apad=pad_dur={duration:g},atrim=duration={duration:g},"
+                             "asetpts=PTS-STARTPTS"])
+            else:
+                args.append("-an")
+            args.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                         "-pix_fmt", "yuv420p"])
+            if narrative_mode:
+                args.extend(["-c:a", "aac", "-ar", "48000", "-ac", "2"])
+            args.append(str(destination))
         common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args,
                           timeout_s=max(300, duration * 20))
         commands.append([cfg.perception.get("ffmpeg_bin", "ffmpeg"), *args])
@@ -178,12 +265,19 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
                            encoding="utf-8")
     concat_video = work / "concat.mp4"
     args = ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i",
-            str(concat_file), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf",
-            "20", "-pix_fmt", "yuv420p", str(concat_video)]
+            str(concat_file)]
+    if not narrative_mode:
+        args.append("-an")
+    args.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                 "-pix_fmt", "yuv420p"])
+    if narrative_mode:
+        args.extend(["-c:a", "aac", "-ar", "48000", "-ac", "2"])
+    args.append(str(concat_video))
     common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args)
     commands.append([cfg.perception.get("ffmpeg_bin", "ffmpeg"), *args])
 
-    mask_operations = [op for op in recipe.get("operations") or [] if op["type"] in MASK_OPS]
+    mask_operations = [op for op in execution_recipe.get("operations") or []
+                       if op["type"] in MASK_OPS]
     masked_video = concat_video
     if mask_operations and mask_backend is not None:
         masked_video = work / "masked.mp4"
@@ -195,12 +289,24 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
                                "reason": "mask backend unavailable"} for op in mask_operations)
 
     reference = Path(recipe["reference"]["uri"])
-    filter_chain = final_filter(recipe, font=Path(cfg.generation.get("assemble", {}).get(
+    filter_chain = final_filter(execution_recipe, font=Path(cfg.generation.get("assemble", {}).get(
         "font", "")))
-    if reference.exists():
+    if narrative_mode:
+        subtitles = write_story_subtitles(asset_plan, retrieval, output_dir / "subtitles.srt")
+        if subtitles.stat().st_size:
+            subtitle_filter = _subtitle_filter(subtitles)
+            filter_chain = (subtitle_filter if filter_chain == "null"
+                            else f"{filter_chain},{subtitle_filter}")
+        args = ["-y", "-loglevel", "error", "-i", str(masked_video),
+                "-vf", filter_chain, "-map", "0:v", "-map", "0:a?",
+                "-t", f"{render_duration:g}", "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", str(final)]
+        common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args)
+        commands.append([cfg.perception.get("ffmpeg_bin", "ffmpeg"), *args])
+    elif reference.exists():
         args = ["-y", "-loglevel", "error", "-i", str(masked_video), "-i", str(reference),
                 "-vf", filter_chain, "-map", "0:v", "-map", "1:a?", "-af", "apad",
-                "-t", f"{float(recipe['reference']['duration_s']):g}", "-c:v", "libx264",
+                "-t", f"{render_duration:g}", "-c:v", "libx264",
                 "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a",
                 "aac", str(final)]
         common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args)

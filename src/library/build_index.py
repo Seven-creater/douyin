@@ -67,12 +67,34 @@ def collect_rows(cfg: AppConfig) -> list[dict]:
         cap_path = r.parent / "captions.json"
         if cap_path.exists():
             caps = json.loads(cap_path.read_text(encoding="utf-8"))
+        annotations = {}
+        causal_predecessors: dict[str, list[str]] = {}
+        annotation_path = r.parent / "narrative_annotations.json"
+        if annotation_path.exists():
+            annotation_payload = json.loads(annotation_path.read_text(encoding="utf-8"))
+            annotations = annotation_payload.get("shots") or {}
+            for link in annotation_payload.get("causal_links") or []:
+                if isinstance(link, dict) and link.get("from_event") and link.get("to_event"):
+                    causal_predecessors.setdefault(str(link["to_event"]), []).append(
+                        str(link["from_event"]))
         for s in env["output"]["shots"]:
             cap = caps.get(str(s["shot_idx"]), "").strip()
             if not cap:
                 skipped += 1
                 cap = FALLBACK_CAPTION
-            rows.append({**s, "caption": cap})
+            annotation = annotations.get(str(s["shot_idx"]), {})
+            row = {**s, **annotation, "caption": cap}
+            row["causal_predecessors"] = causal_predecessors.get(
+                str(row.get("event_id") or ""), [])
+            dialogue_text = " ".join(
+                str(line.get("translation_zh") or line.get("original") or "")
+                for line in row.get("dialogue") or [] if isinstance(line, dict))
+            row["search_text"] = "；".join(value for value in (
+                cap, str(row.get("event_summary") or ""),
+                "人物：" + "、".join(row.get("entity_names") or []),
+                "叙事角色：" + str(row.get("story_role") or ""), dialogue_text,
+            ) if value)
+            rows.append(row)
     if skipped:
         logger.warning("[index] %d 个镜头无描述（用兜底文案，建议补跑 caption_shots）", skipped)
     return rows
@@ -84,7 +106,7 @@ def build(cfg: AppConfig) -> Path:
         raise FileNotFoundError("素材库无镜头（先跑 index_shots）")
     embedder = E5Embedder(cfg.library.get("embed") or {})
 
-    emb = embedder.embed([r["caption"] for r in rows])
+    emb = embedder.embed([r.get("search_text") or r["caption"] for r in rows])
     out_dir = cfg.paths.library_dir / "index"
     out_dir.mkdir(parents=True, exist_ok=True)
     jsonl = out_dir / "shots.jsonl"

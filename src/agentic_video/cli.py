@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from src.config import ensure_utf8_stdio, load_config, repo_root, setup_logging
@@ -17,6 +18,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="CUDA_VISIBLE_DEVICES for Qwen stages, e.g. 0,1")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    discover = sub.add_parser("discover", help="collect and select meaningful popular videos")
+    discover.add_argument("--date", default=None, help="end date YYYY-MM-DD; default today")
+    discover.add_argument("--days", type=int, default=7)
+    discover.add_argument("--per-category", type=int, default=4)
+    discover.add_argument("--output", required=True)
+    discover.add_argument("--refetch", action="store_true")
+    discover.add_argument("--skip-collect", action="store_true")
+    discover.add_argument("--skip-download", action="store_true")
+    discover.add_argument("--skip-audition", action="store_true")
+    discover.add_argument("--force", action="store_true")
+
     benchmark = sub.add_parser("benchmark", help="generate/evaluate controlled truth suite")
     benchmark.add_argument("--suite-dir", default="data/benchmarks/controlled_v1")
     benchmark.add_argument("--predictions", default=None)
@@ -25,18 +37,24 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--fixed-metrics", default=None)
     benchmark.add_argument("--agent-metrics", default=None)
 
-    index = sub.add_parser("index", help="build a high-action long-video index")
+    index = sub.add_parser("index", help="build a long-video narrative or high-action index")
     index.add_argument("--source", default="guimie")
     index.add_argument("--video", default=None)
+    index.add_argument("--profile", choices=("high_action", "narrative"),
+                       default="narrative")
     index.add_argument("--limit", type=int, default=None,
                        help="caption only N new shots for a GPU smoke test")
+    index.add_argument("--limit-windows", type=int, default=None,
+                       help="annotate only N narrative windows for a GPU smoke test")
     index.add_argument("--force", action="store_true")
     index.add_argument("--skip-captions", action="store_true")
     index.add_argument("--skip-embeddings", action="store_true")
+    index.add_argument("--skip-annotations", action="store_true")
 
     decompose = sub.add_parser("decompose", help="reference video to Recipe v2")
     decompose.add_argument("--reference", required=True)
     decompose.add_argument("--output", required=True)
+    decompose.add_argument("--mode", choices=("edit", "narrative", "both"), default="both")
     decompose.add_argument("--force", action="store_true")
 
     render = sub.add_parser("render", help="Recipe v2 plus theme to rendered video")
@@ -44,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--theme", required=True)
     render.add_argument("--library", default="guimie")
     render.add_argument("--output", required=True)
+    render.add_argument("--narrative-program", default=None)
+    render.add_argument("--story-plan", default=None)
+    render.add_argument("--target-duration", type=float, default=60.0)
     render.add_argument("--force", action="store_true")
     render.add_argument("--no-mask-backend", action="store_true")
 
@@ -52,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--theme", required=True)
     run.add_argument("--library", default="guimie")
     run.add_argument("--output", required=True)
+    run.add_argument("--target-duration", type=float, default=60.0)
     run.add_argument("--force", action="store_true")
     run.add_argument("--no-mask-backend", action="store_true")
     return parser
@@ -81,31 +103,68 @@ def _benchmark(args) -> dict:
     return result
 
 
+def _discover(args, cfg) -> dict:
+    from src.agentic_video.discovery import run_discovery
+
+    end_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    return run_discovery(
+        cfg, end_date=end_date, days=args.days, per_category=args.per_category,
+        output_dir=Path(args.output), refetch=args.refetch,
+        collect=not args.skip_collect, download=not args.skip_download,
+        audition=not args.skip_audition, force=args.force)
+
+
 def _index(args, cfg) -> dict:
     from src.agentic_video.long_video import run_high_action_index
     from src.library.build_index import build
     from src.library.caption_shots import Qwen2VLRunner, caption_video
 
-    result_path = run_high_action_index(
-        cfg, args.source, video=Path(args.video) if args.video else None, force=args.force)
+    if args.profile == "narrative":
+        from src.agentic_video.narrative_index import run_narrative_index
+        result_path = run_narrative_index(
+            cfg, args.source, video=Path(args.video) if args.video else None,
+            force=args.force)
+    else:
+        result_path = run_high_action_index(
+            cfg, args.source, video=Path(args.video) if args.video else None,
+            force=args.force)
     if not args.skip_captions:
         runner = Qwen2VLRunner(cfg.library.get("captions") or {})
         caption_video(cfg, result_path, force=args.force, limit=args.limit, runner=runner)
+    annotations = None
+    if args.profile == "narrative" and not args.skip_annotations:
+        from src.agentic_video.narrative_index import run_narrative_annotations
+        annotations = run_narrative_annotations(
+            cfg, result_path, force=args.force, limit_windows=args.limit_windows)
     index_path = None
     if not args.skip_embeddings:
         index_path = build(cfg)
     env = json.loads(result_path.read_text(encoding="utf-8"))
     return {"shots": str(result_path), "n_shots": env["output"]["n_shots"],
+            "profile": args.profile,
+            "annotations": str(annotations) if annotations else None,
             "index": str(index_path) if index_path else None}
 
 
 def _decompose(args, cfg) -> dict:
-    from src.agentic_video.pipeline import run_decomposition
+    from src.agentic_video.pipeline import (run_decomposition,
+                                             run_narrative_decomposition)
 
-    recipe, vid = run_decomposition(cfg, Path(args.reference), Path(args.output),
-                                    force=args.force)
-    return {"reference_id": vid, "recipe": str(Path(args.output) / "reference.recipe.json"),
-            "operations": len(recipe["operations"])}
+    recipe = narrative = None
+    vid = ""
+    if args.mode in {"edit", "both"}:
+        recipe, vid = run_decomposition(cfg, Path(args.reference), Path(args.output),
+                                        force=args.force)
+    if args.mode in {"narrative", "both"}:
+        narrative, vid = run_narrative_decomposition(
+            cfg, Path(args.reference), Path(args.output), force=args.force)
+    return {
+        "reference_id": vid, "mode": args.mode,
+        "recipe": str(Path(args.output) / "reference.recipe.json") if recipe else None,
+        "operations": len(recipe["operations"]) if recipe else None,
+        "narrative": str(Path(args.output) / "reference.narrative.json") if narrative else None,
+        "events": len(narrative["events"]) if narrative else None,
+    }
 
 
 def _render(args, cfg) -> dict:
@@ -113,15 +172,25 @@ def _render(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_rendering
 
     recipe = json.loads(Path(args.recipe).read_text(encoding="utf-8"))
+    narrative_path = (Path(args.narrative_program) if args.narrative_program else
+                      Path(args.recipe).with_name("reference.narrative.json"))
+    narrative = (json.loads(narrative_path.read_text(encoding="utf-8"))
+                 if narrative_path.exists() else None)
+    story_plan = (json.loads(Path(args.story_plan).read_text(encoding="utf-8"))
+                  if args.story_plan else None)
     output = Path(args.output)
     manifest = RunManifest(output / "run_manifest.json", command="render",
                            input_path=Path(args.recipe),
-                           config={"theme": args.theme, "library": args.library},
+                           config={"theme": args.theme, "library": args.library,
+                                   "narrative": bool(narrative),
+                                   "target_duration": args.target_duration},
                            repo_root=repo_root())
     manifest.stage("render", "running")
     plan, retrieval, final = run_rendering(
         cfg, recipe, theme=args.theme, library=args.library, output_dir=output,
-        force=args.force, use_mask_backend=not args.no_mask_backend)
+        force=args.force, use_mask_backend=not args.no_mask_backend,
+        narrative=narrative, story_plan=story_plan,
+        target_duration_s=args.target_duration)
     manifest.stage("render", "complete", output=str(final))
     return {"output": str(final), "slots": len(plan["slots"]),
             "missing": sum(bool(row.get("missing")) for row in retrieval)}
@@ -132,7 +201,8 @@ def _run(args, cfg) -> dict:
 
     final = run_full(cfg, Path(args.reference), theme=args.theme, library=args.library,
                      output_dir=Path(args.output), force=args.force,
-                     use_mask_backend=not args.no_mask_backend)
+                     use_mask_backend=not args.no_mask_backend,
+                     target_duration_s=args.target_duration)
     return {"output": str(final), "report": str(Path(args.output) / "report.md")}
 
 
@@ -145,7 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         set_visible_gpus(args.gpus)
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="agentic_video")
-    handlers = {"benchmark": _benchmark, "index": _index, "decompose": _decompose,
+    handlers = {"discover": _discover, "benchmark": _benchmark,
+                "index": _index, "decompose": _decompose,
                 "render": _render, "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \

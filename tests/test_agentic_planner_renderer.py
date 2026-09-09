@@ -10,7 +10,8 @@ from src.agentic_video.recipe_v2 import new_recipe
 from pathlib import Path
 
 from src.agentic_video.renderer import (GroundedSamSubprocessBackend, final_filter,
-                                        render_recipe, segment_filter)
+                                        render_recipe, segment_filter,
+                                        write_story_subtitles)
 from src.config import AppConfig, PathsCfg
 
 
@@ -58,6 +59,11 @@ def test_renderer_filters_compile_requested_effects():
     assert "setpts=PTS/2" in vf and "trim=duration=2" in vf
     assert "force_original_aspect_ratio=increase" in vf
     assert "crop=720:960" in vf and "setsar=1" in vf and ",pad=" not in vf
+
+
+def test_segment_filter_can_follow_model_subject_anchor():
+    vf = segment_filter([], width=1920, height=1080, duration_s=2.0, focus_x=0.2)
+    assert "crop=1920:1080:(iw-1920)*0.2" in vf
     recipe = _recipe()
     recipe["operations"].append({
         "id": "flash", "type": "luma_flash", "interval": [1.0, 1.0],
@@ -129,3 +135,16 @@ def test_renderer_resolves_relative_output_for_concat(tmp_path, monkeypatch):
     output = render_recipe(cfg, recipe, plan, retrieval, Path("relative-out"))
     assert output == (tmp_path / "relative-out" / "rendered.mp4").resolve()
     assert output.stat().st_size > 1000
+
+
+def test_story_subtitles_map_source_dialogue_to_target_time(tmp_path):
+    plan = {"slots": [{"slot_idx": 0, "start_s": 10.0, "end_s": 15.0}]}
+    retrieval = [{"slot_idx": 0, "picked": {
+        "source_start_s": 100.0, "source_end_s": 105.0,
+        "dialogue": [{"start_s": 101.0, "end_s": 103.0,
+                      "translation_zh": "我要保护你"}],
+    }}]
+    path = write_story_subtitles(plan, retrieval, tmp_path / "story.srt")
+    text = path.read_text(encoding="utf-8")
+    assert "00:00:11,000 --> 00:00:13,000" in text
+    assert "我要保护你" in text

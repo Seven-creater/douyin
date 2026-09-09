@@ -118,7 +118,7 @@ python -m src.generation.run_generation --template-id <aweme_id> --variants 3 --
 3 个 final.mp4（544×960 竖屏 H.264+AAC+字幕，10.14s）装配完成；重跑全 skip。
 详见 `src/generation/README.md`。
 
-# Phase 5：Agentic Video 主链
+# Phase 5：Agentic Narrative Video Editor
 
 统一入口：
 
@@ -126,22 +126,29 @@ python -m src.generation.run_generation --template-id <aweme_id> --variants 3 --
 # 生成 144 个程序化真值视频；给出预测目录时同时计算准确率
 python -m src.agentic_video.cli benchmark
 
-# 鬼灭长片：稀疏动作扫描 → 最多 24×45s 窗口 → 三关键帧镜头索引
-python -m src.agentic_video.cli index --source guimie
+# 获取有内容的热门参考（最近 7 天，三类各最多 4 条）
+python -m src.agentic_video.cli discover \
+  --days 7 --per-category 4 --output data/reference_pool/2026-09-09
+
+# 鬼灭长片：低成本扫描 → 对白/动作/情绪/收束配额 → 叙事窗口索引
+python -m src.agentic_video.cli index --source guimie --profile narrative
 
 # 只反编译参考视频
 python -m src.agentic_video.cli --gpus 0,1 decompose \
-  --reference data/videos/<id>/video.mp4 --output data/agentic_runs/<run>
+  --reference data/videos/<id>/video.mp4 --mode both --output data/agentic_runs/<run>
 
 # 完整链路
 python -m src.agentic_video.cli --gpus 0,1 run \
   --reference data/videos/<id>/video.mp4 \
-  --theme "鬼灭高燃战斗" --library guimie --output data/agentic_runs/<run>
+  --theme "鬼灭：守护与牺牲" --library guimie --output data/agentic_runs/<run>
 ```
 
-固定交付包括 `run_manifest.json`、`reference.recipe.json`、`asset_plan.json`、
-`retrieval_results.json`、`rendered.mp4`、每轮 Critic JSON/Recipe 补丁和 `report.md`。
-不支持的操作会明确写入渲染清单，不会静默降级。
+固定交付包括 `run_manifest.json`、`reference.narrative.json`、
+`reference.recipe.json`、`story_plan.json`、`asset_plan.json`、
+`retrieval_results.json`、`rendered.mp4`、双 Critic JSON/补丁和 `report.md`。
+Narrative Program 负责人物、事件、因果和情绪；Recipe v2 只负责可执行剪辑操作。
+素材不足、人物切换无法解释、对白会被截断或不支持的操作都会显式标记，不能静默拿随机镜头填充。
+首版成片固定为 45–75 秒、1920×1080，保留日语原声并叠加有时间依据的中文字幕。
 
 # 服务器资源
 

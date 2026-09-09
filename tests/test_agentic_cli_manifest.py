@@ -6,9 +6,13 @@ from src.agentic_video.cli import build_parser, main
 from src.agentic_video.manifest import RunManifest, json_hash
 
 
-def test_cli_exposes_five_required_subcommands():
+def test_cli_exposes_required_subcommands():
     parser = build_parser()
-    for command in ("benchmark", "index", "decompose", "render", "run"):
+    for command in ("discover", "benchmark", "index", "decompose", "render", "run"):
+        if command == "discover":
+            args = parser.parse_args([command, "--output", "o"])
+            assert args.command == command
+            continue
         if command == "benchmark":
             args = parser.parse_args([command, "--no-render"])
         elif command == "index":

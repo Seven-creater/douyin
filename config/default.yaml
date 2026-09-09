@@ -143,6 +143,22 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     max_windows: 24
     partitions: 4
     max_overlap: 0.20
+  narrative_index:          # 全片低成本扫描 → 对白/动作/情绪/前后文四类窗口
+    scan_fps: 2.0
+    scan_width: 160
+    audio_sr: 8000
+    window_s: 45.0
+    stride_s: 15.0
+    partitions: 6
+    max_overlap: 0.35
+    quotas:
+      dialogue: 12
+      action: 8
+      emotion: 8
+      context: 8
+  narrative_render:
+    width: 1920
+    height: 1080
   mask_backend:
     python: /data02/usr/wangqihao/miniconda3/envs/grounded_sam2/bin/python
     grounding_model: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/MaskEdit/GroundingDINO/checkpoints
@@ -199,6 +215,11 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
     max_rounds: 2
     max_refinement_windows: 16
     confidence_threshold: 0.65
+  narrative_agent:
+    max_initial_windows: 24
+    max_rounds: 2
+    max_refinement_windows: 12
+    target_window_s: 12.0
   critic_v2:
     max_rounds: 2
     min_improvement: 0.02

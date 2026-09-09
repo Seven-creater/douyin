@@ -188,11 +188,11 @@ def _window_boundaries(video: Path, start_s: float, duration_s: float, *,
 
 
 def index_selected_windows(cfg: AppConfig, source: str, video: Path, windows: list[dict], *,
-                           force: bool = False) -> Path:
+                           force: bool = False, profile: str = "high_action") -> Path:
     shot_cfg = cfg.library.get("shots") or {}
     threshold = float(shot_cfg.get("threshold", 0.3))
     min_len = float(shot_cfg.get("min_shot_len_s", 0.4))
-    stem = f"{source}__high_action"
+    stem = f"{source}__{profile}"
     target = cfg.paths.library_dir / "shots" / stem
     result_path = target / "result.json"
     if result_path.exists() and not force:
@@ -233,10 +233,15 @@ def index_selected_windows(cfg: AppConfig, source: str, video: Path, windows: li
                 "motion_score": window["motion_norm"],
                 "cut_density": window["cut_density_norm"],
                 "audio_energy": window["audio_energy_norm"],
+                "audio_onset": window.get("audio_onset_norm", 0.0),
+                "selection_type": window.get("selection_type", profile),
+                "dialogue_score": window.get("dialogue_score", 0.0),
+                "emotion_score": window.get("emotion_score", 0.0),
+                "context_score": window.get("context_score", 0.0),
             })
     return common.write_result_json(
-        target, tool="index_high_action_windows", aweme_id=stem,
-        params={"source": source, "threshold": threshold, "min_len_s": min_len,
+        target, tool=f"index_{profile}_windows", aweme_id=stem,
+        params={"source": source, "profile": profile, "threshold": threshold, "min_len_s": min_len,
                 "video_sha256": video_sha256},
         output={"source": source, "video": str(video), "n_windows": len(windows),
                 "n_shots": len(records), "windows": windows, "shots": records})
