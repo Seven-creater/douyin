@@ -164,3 +164,19 @@ def test_run_recipe_falls_back_to_rule_draft(tmp_path):
     env = json.loads(p.read_text(encoding="utf-8"))
     assert env["output"]["mode"] == "rule_fallback"
     assert env["output"]["n_operations"] == 2                      # 候选直填
+
+
+def test_run_recipe_prunes_op_level_errors(tmp_path):
+    """op 级剪枝：1 个编造时刻的操作被剪掉，剩余干净操作接受（不整包回退）。"""
+    mixed = json.dumps(_recipe(ops=[
+        {"t_s": 2.0, "type": "tracked_mask_fill", "confidence": 0.8,
+         "evidence": {"source": "window", "window_idx": 3}},
+        {"t_s": 5.0, "type": "hard_cut", "confidence": 0.8},
+        {"t_s": 7.77, "type": "hard_cut", "confidence": 0.8}]),   # 编造时刻
+        ensure_ascii=False)
+    cfg, vid, runner = _setup_env(tmp_path, [mixed, mixed])
+    from src.library.recipe import run_recipe
+    p = run_recipe(cfg, vid, force=True, runner=runner)
+    env = json.loads(p.read_text(encoding="utf-8"))
+    assert env["output"]["mode"] == "pruned"
+    assert env["output"]["n_operations"] == 2                      # 坏 op 被剪，好 op 保留

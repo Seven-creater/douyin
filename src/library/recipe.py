@@ -273,6 +273,24 @@ def validate_recipe(obj, meta: dict, *, tol_s: float = 0.25,
     return errors
 
 
+def _prune_invalid_ops(obj, meta: dict) -> dict | None:
+    """op 级剪枝：逐个 op 单独校验，剔除带错的（编造时刻/越界枚举/无确认 texture）。
+    剩余 ≥ 一半且整体校验干净才接受——否则宁可回退规则底稿（服务器首跑教训：
+    GLM 版 63-op 底稿全是光流噪声，1 个残留错误整包回退不公平也不可用）。"""
+    ops = [o for o in (obj.get("operations") or []) if isinstance(o, dict)]
+    kept = []
+    for o in ops:
+        single = dict(obj)
+        single["operations"] = [o]
+        if not validate_recipe(single, meta):
+            kept.append(o)
+    if not ops or len(kept) < max(1, len(ops) // 2):
+        return None
+    pruned = dict(obj)
+    pruned["operations"] = kept
+    return pruned if not validate_recipe(pruned, meta) else None
+
+
 def recipe_penalty(obj, meta: dict) -> float:
     """回退比较：未锚定操作数×10 + 覆盖缺口秒。"""
     if not isinstance(obj, dict):
@@ -339,8 +357,14 @@ def run_recipe(cfg: AppConfig, vid: str, *, force: bool = False,
             result, mode = obj, "json"
             break
         if obj is not None and result is None:
-            result, mode = obj, "partial"     # 保底存档（供人工检视）
-    if result is None or (mode != "json" and recipe_penalty(result, meta)
+            result, mode = obj, "partial"     # 保底存档（供剪枝/回退裁决）
+    if mode == "partial":
+        pruned = _prune_invalid_ops(result, meta)
+        if pruned is not None:
+            result, mode = pruned, "pruned"   # op 级剪枝接受（保留过半）
+            logger.info("[recipe %s] 剪枝接受：%d ops", vid, len(pruned["operations"]))
+    if result is None or (mode not in ("json", "pruned")
+                          and recipe_penalty(result, meta)
                           >= recipe_penalty(rule_draft, meta)):
         if result is not None:
             logger.warning("[recipe %s] LLM 输出 penalty ≥ 规则底稿 → 回退底稿", vid)
