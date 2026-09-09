@@ -1,9 +1,13 @@
-"""critic 单测：问题清单解析归一 / 动作映射（换策略阈值+定位切序号）。"""
+"""critic 单测：问题清单解析归一 / 动作映射（换策略阈值+定位切序号）/ 画幅告知与 junk 过滤。"""
 from __future__ import annotations
 
 import numpy as np
 
-from src.library.critic import ASPECTS, derive_actions, parse_critique
+from src.library.critic import ASPECTS, CRITIC_PROMPT, apply_swaps, derive_actions, parse_critique
+
+
+def test_prompt_declares_expected_canvas():
+    assert "模糊垫边" in CRITIC_PROMPT and "544×960" in CRITIC_PROMPT  # 勿把行业标准形态当错误
 
 
 def test_parse_critique_normalizes_bad_aspect():
@@ -56,3 +60,17 @@ def test_apply_swaps_picks_unused_row(tmp_path):
     assert swaps == {0: 1}                                 # row0 已被原版用过？不——used 为空则取最相似 row1? 排序:cos[1]=1.0>row0
     swaps2 = apply_swaps(rows, emb, FakeEmb(), [(0, 1.0)], issues, used={1})
     assert swaps2 == {0: 0}
+
+
+def test_apply_swaps_skips_junk_rows():
+    rows = [{"duration_s": 1.0, "caption": "花絮：主创访谈片段"},
+            {"duration_s": 1.0, "caption": "蜘蛛侠摆荡"}]
+    emb = np.array([[1.0, 0.0], [0.8, 0.2]], "float32")
+
+    class FakeEmb:
+        def embed(self, texts):
+            return np.array([[1.0, 0.0]] * len(texts), "float32")
+
+    issues = [{"aspect": "relevance", "t_s": 0.5, "severity": "high"}]
+    swaps = apply_swaps(rows, emb, FakeEmb(), [(0, 1.0)], issues, used=set())
+    assert swaps == {0: 1}                              # 相似度更高的访谈行被跳过

@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_CAPTION = "电影画面"
 
+# 访谈/花絮类镜头黑名单（critic 首跑实测：预告合集混入对镜头说话的低运动画面，
+# 卡点混剪需要高运动镜头；在 pick/swap 侧跳过，不动索引本体）
+JUNK_KEYWORDS = ("访谈", "采访", "花絮", "幕后", "制作特辑", "对镜头说", "面向镜头",
+                 "记者", "发布会", "首映礼")
+
+
+def is_junk_caption(text: str) -> bool:
+    return any(k in (text or "") for k in JUNK_KEYWORDS)
+
 
 class E5Embedder:
     """E5-Omni-7B 文本嵌入（caption 与 query 同一侧，cosine 可比）。"""

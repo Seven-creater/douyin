@@ -46,7 +46,11 @@ CRITIC_PROMPT = """你是苛刻的短视频剪辑审片人。看这条用素材�
  "good_points": ["做得好的地方"]}
 
 审片要点：主体完整性（人物被裁？）、画面比例观感、画面里的文字/字幕是否残缺怪异、
-切换是否踩点、素材与音乐氛围是否搭、白帧转场是否自然。不要客套，问题越多越有价值。"""
+切换是否踩点、素材与音乐氛围是否搭、白帧转场是否自然。不要客套，问题越多越有价值。
+
+【目标形态（勿当错误上报）】成片是抖音竖屏 544×960；横屏源素材采用"模糊垫边"是预期
+正确形态（上下模糊放大垫边+中间完整横屏画面带），不是画幅错误。只有当主体被裁掉关键
+部位、画面拉伸变形、或清晰画面带严重偏离中心时才报 aspect/crop_weird 问题。"""
 
 
 def parse_critique(raw: str) -> dict | None:
@@ -107,16 +111,19 @@ def apply_swaps(rows, emb, embedder, plan, critique_issues, used: set) -> dict[i
     """对被点名的切重新检索换镜头（排除已用与原镜头，查询按批评意见偏移）。"""
     import numpy as np
 
+    from src.library.beat_cut import QUERY_POOL
+    from src.library.build_index import is_junk_caption
+
     swaps: dict[int, int] = {}
     for idx, (s, e) in plan_idx_iter(plan, critique_issues):
         t_mid = (s + e) / 2
         # 查询句：取第 idx+1 个池句偏移（避开原句的相似邻域）
-        from src.library.beat_cut import QUERY_POOL
         q = QUERY_POOL[(idx + 3) % len(QUERY_POOL)]
         qv = embedder.embed([q])[0]
         cos = (emb @ qv.reshape(-1)).ravel()
         for ri in np.argsort(-cos)[:60]:
-            if int(ri) in used or rows[ri]["duration_s"] < 0.45:
+            if int(ri) in used or rows[ri]["duration_s"] < 0.45 \
+                    or is_junk_caption(rows[ri].get("caption", "")):
                 continue
             swaps[idx] = int(ri)
             used.add(int(ri))
