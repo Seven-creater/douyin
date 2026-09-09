@@ -35,7 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--no-render", action="store_true")
     benchmark.add_argument("--force", action="store_true")
     benchmark.add_argument("--fixed-metrics", default=None)
+    benchmark.add_argument("--signal-metrics", default=None,
+                            help="optional signal-guided (non-agent) metrics JSON")
     benchmark.add_argument("--agent-metrics", default=None)
+    benchmark.add_argument("--fault-suite", default=None,
+                            help="directory for the 60-case injected-fault suite")
+    benchmark.add_argument("--fault-count", type=int, default=60)
+    benchmark.add_argument("--fault-critiques", default=None,
+                            help="directory containing <case_id>.critic.json outputs")
+    benchmark.add_argument("--clean-critiques", default=None,
+                            help="optional clean-case critic JSON directory for false positives")
 
     index = sub.add_parser("index", help="build a long-video narrative or high-action index")
     index.add_argument("--source", default="guimie")
@@ -80,13 +89,43 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _benchmark(args) -> dict:
-    from src.agentic_video.benchmark import (compare_ablation, evaluate_suite,
-                                             generate_suite)
+    from src.agentic_video.benchmark import (compare_ablation,
+                                             compare_ablation_variants,
+                                             evaluate_suite, generate_suite)
+    from src.agentic_video.critic_v2 import (build_fault_suite, score_fault_critiques,
+                                              write_fault_suite)
 
     suite_dir = repo_root() / args.suite_dir if not Path(args.suite_dir).is_absolute() \
         else Path(args.suite_dir)
     manifest = generate_suite(suite_dir, render=not args.no_render, overwrite=args.force)
     result = {"manifest": str(manifest), "cases": 144}
+    fault_dir = (Path(args.fault_suite) if args.fault_suite else suite_dir / "critic_faults")
+    if not fault_dir.is_absolute():
+        fault_dir = repo_root() / fault_dir
+    faults = build_fault_suite(
+        [json.loads(Path(row["truth"]).read_text(encoding="utf-8"))
+         for row in (json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
+                     if line)],
+        count=args.fault_count)
+    fault_manifest = write_fault_suite(faults, fault_dir)
+    result["fault_manifest"] = str(fault_manifest)
+    result["fault_cases"] = len(faults)
+    if args.fault_critiques:
+        critiques_dir = Path(args.fault_critiques)
+        critiques = [json.loads((critiques_dir / f"{row['case_id']}.critic.json")
+                                .read_text(encoding="utf-8")) for row in faults]
+        clean_rows = []
+        if args.clean_critiques:
+            clean_rows = [json.loads(path.read_text(encoding="utf-8"))
+                          for path in sorted(Path(args.clean_critiques).glob("*.json"))]
+        clean_false_positives = sum(bool(row.get("issues") or row.get("patches"))
+                                    for row in clean_rows)
+        fault_score = score_fault_critiques(
+            faults, critiques, clean_false_positives=clean_false_positives,
+            clean_count=len(clean_rows))
+        (fault_dir / "score.json").write_text(
+            json.dumps(fault_score, ensure_ascii=False, indent=2), encoding="utf-8")
+        result["fault_score"] = fault_score
     if args.predictions:
         metrics = evaluate_suite(suite_dir, Path(args.predictions))
         metrics_path = suite_dir / "metrics.json"
@@ -96,7 +135,10 @@ def _benchmark(args) -> dict:
     if args.fixed_metrics and args.agent_metrics:
         fixed = json.loads(Path(args.fixed_metrics).read_text(encoding="utf-8"))
         agent = json.loads(Path(args.agent_metrics).read_text(encoding="utf-8"))
-        ablation = compare_ablation(fixed, agent)
+        signal = (json.loads(Path(args.signal_metrics).read_text(encoding="utf-8"))
+                  if args.signal_metrics else None)
+        ablation = (compare_ablation_variants(fixed, signal, agent)
+                    if signal is not None else compare_ablation(fixed, agent))
         (suite_dir / "ablation.json").write_text(
             json.dumps(ablation, ensure_ascii=False, indent=2), encoding="utf-8")
         result["ablation"] = ablation

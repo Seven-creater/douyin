@@ -50,7 +50,16 @@ def test_bounded_stopping_rules():
 
 def test_fault_suite_and_threshold_score():
     faults = build_fault_suite(build_suite_specs(), count=60)
-    critiques = [{"issues": [{"operation_id": row["operation_id"]}]} for row in faults]
+    critiques = []
+    for row in faults:
+        parts = row["fault_path"].strip("/").split("/")
+        value = row["truth"]
+        for part in parts:
+            value = value[int(part)] if isinstance(value, list) else value[part]
+        critiques.append({"issues": [{"operation_id": row["operation_id"]}],
+                          "patches": [{"op": "replace", "path": row["fault_path"],
+                                       "value": value}]})
     score = score_fault_critiques(faults, critiques, clean_false_positives=1, clean_count=60)
     assert len(faults) == 60
+    assert score["repaired"] == 60
     assert score["passes_thresholds"] is True

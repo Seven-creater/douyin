@@ -96,6 +96,8 @@ def _write_decomposition_report(path: Path, narrative: dict) -> Path:
             uncertain += row.get("status") == "uncertain"
             evidence += len(row.get("evidence") or [])
     lines = [f"# Narrative Decomposition · {narrative['reference']['id']}", "",
+             f"- 状态：{narrative.get('status')}，顶层证据："
+             f"{len(narrative.get('evidence') or [])}",
              f"- 主题：{narrative['intent'].get('topic')}",
              f"- 表达：{narrative['intent'].get('message')}",
              f"- 实体：{len(narrative.get('entities') or [])}",

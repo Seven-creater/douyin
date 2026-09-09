@@ -64,7 +64,17 @@ def valid_program() -> dict:
 
 
 def test_valid_narrative_program():
-    assert validate_narrative_program(valid_program()) == []
+    program = valid_program()
+    assert program["status"] == "uncertain"
+    assert program["evidence"] == []
+    assert validate_narrative_program(program) == []
+
+
+def test_supported_program_requires_top_level_evidence():
+    program = valid_program()
+    program["status"] = "supported"
+    assert any("narrative program requires evidence" in error
+               for error in validate_narrative_program(program))
 
 
 def test_supported_claims_require_evidence_and_known_entities():

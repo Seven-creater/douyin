@@ -166,11 +166,17 @@ def parse_narrative_critique(raw: str) -> dict | None:
 
 
 def run_narrative_critic(video, narrative: dict, story_plan: dict, *, runner) -> dict:
-    prompt = NARRATIVE_CRITIC_PROMPT.format(
-        questions="；".join(f"{idx}. {question}"
-                           for idx, question in enumerate(COMPREHENSION_QUESTIONS)),
-        narrative=json.dumps(narrative, ensure_ascii=False)[:12000],
-        story_plan=json.dumps(story_plan, ensure_ascii=False)[:10000])
+    # The prompt contains a literal JSON example.  Replace the three named
+    # fields directly so JSON braces can never be interpreted as format keys.
+    prompt = NARRATIVE_CRITIC_PROMPT
+    replacements = {
+        "{questions}": "；".join(f"{idx}. {question}"
+                                for idx, question in enumerate(COMPREHENSION_QUESTIONS)),
+        "{narrative}": json.dumps(narrative, ensure_ascii=False)[:12000],
+        "{story_plan}": json.dumps(story_plan, ensure_ascii=False)[:10000],
+    }
+    for placeholder, value in replacements.items():
+        prompt = prompt.replace(placeholder, value)
     answer = runner.watch(video, prompt, max_new_tokens=2048)
     result = parse_narrative_critique(answer.text)
     if result is None:

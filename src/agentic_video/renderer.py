@@ -185,6 +185,12 @@ def _subtitle_filter(path: Path) -> str:
     return f"subtitles=filename='{escaped}':charenc=UTF-8"
 
 
+def _has_audio_stream(ffprobe_bin: str, video: Path) -> bool:
+    probe = common.run_ffprobe_json(ffprobe_bin, video)
+    return any(stream.get("codec_type") == "audio"
+               for stream in probe.get("streams") or [])
+
+
 def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: list[dict],
                   output_dir: Path, *, mask_backend: MaskBackend | None = None,
                   force: bool = False) -> Path:
@@ -213,6 +219,7 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     segment_paths = []
     commands: list[list[str]] = []
     runtime_status = []
+    audio_streams: dict[str, bool] = {}
     for slot in asset_plan["slots"]:
         index = int(slot["slot_idx"])
         duration = float(slot["need_duration_s"])
@@ -235,18 +242,29 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
                 args.extend(["-c:a", "aac"])
             args.append(str(destination))
         else:
+            source_video = Path(picked["video"])
             source_duration = max(
                 0.1, float(picked.get("source_end_s",
                                       picked["source_start_s"] + duration))
                 - float(picked["source_start_s"]))
             args = ["-y", "-loglevel", "error", "-ss", f"{picked['source_start_s']:g}",
-                    "-t", f"{source_duration:g}", "-i", str(picked["video"]),
-                    "-vf", segment_filter(active, width=canvas_width,
+                    "-t", f"{source_duration:g}", "-i", str(source_video)]
+            source_has_audio = False
+            if narrative_mode:
+                cache_key = str(source_video.resolve())
+                if cache_key not in audio_streams:
+                    audio_streams[cache_key] = _has_audio_stream(
+                        cfg.perception.get("ffprobe_bin", "ffprobe"), source_video)
+                source_has_audio = audio_streams[cache_key]
+                if not source_has_audio:
+                    args.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+            args.extend(["-vf", segment_filter(active, width=canvas_width,
                                            height=canvas_height, duration_s=duration,
                                            focus_x=float(picked.get("focus_x", 0.5))),
-                    "-t", f"{max(duration, 0.1):g}"]
+                         "-t", f"{max(duration, 0.1):g}"])
             if narrative_mode:
-                args.extend(["-map", "0:v:0", "-map", "0:a?", "-af",
+                args.extend(["-map", "0:v:0", "-map",
+                             "0:a:0" if source_has_audio else "1:a:0", "-af",
                              f"apad=pad_dur={duration:g},atrim=duration={duration:g},"
                              "asetpts=PTS-STARTPTS"])
             else:

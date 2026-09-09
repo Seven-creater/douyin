@@ -175,9 +175,13 @@ def run_structured_critic(video: Path, recipe: dict, asset_plan: dict,
 
 def build_fault_suite(recipes: list[dict], *, count: int = 60) -> list[dict]:
     """Create deterministic, machine-labeled faults for critic evaluation."""
+    if count < 0:
+        raise ValueError("count must be non-negative")
     faults = []
-    kinds = ("interval_shift", "missing_evidence", "bad_confidence", "bad_status")
+    kinds = ("interval_shift", "parameter_change", "low_confidence", "uncertain_status")
     candidates = [recipe for recipe in recipes if recipe.get("operations")]
+    if count and not candidates:
+        raise ValueError("at least one recipe with operations is required")
     for index in range(count):
         truth = candidates[index % len(candidates)]
         faulty = copy.deepcopy(truth)
@@ -187,31 +191,89 @@ def build_fault_suite(recipes: list[dict], *, count: int = 60) -> list[dict]:
         if kind == "interval_shift":
             duration = float(faulty["reference"]["duration_s"])
             start, end = op["interval"]
-            shift = min(0.4, max(0.05, duration - end))
+            shift = min(0.4, max(0.05, duration * 0.05))
+            shift = shift if end + shift <= duration else -shift
             op["interval"] = [round(start + shift, 4), round(end + shift, 4)]
-        elif kind == "missing_evidence":
-            op["evidence"] = []
-        elif kind == "bad_confidence":
-            op["confidence"] = 1.5
+            fault_path = f"/operations/{op_index}/interval"
+        elif kind == "parameter_change":
+            key = sorted(op["params"])[0]
+            value = op["params"][key]
+            if isinstance(value, bool):
+                op["params"][key] = not value
+            elif isinstance(value, (int, float)):
+                op["params"][key] = value + 0.25
+            elif isinstance(value, list):
+                op["params"][key] = list(reversed(value))
+                if op["params"][key] == value and value:
+                    op["params"][key][0] = (float(value[0]) + 0.1
+                                             if isinstance(value[0], (int, float))
+                                             else str(value[0]) + "_fault")
+            else:
+                op["params"][key] = str(value) + "_fault"
+            fault_path = f"/operations/{op_index}/params/{key}"
+        elif kind == "low_confidence":
+            op["confidence"] = 0.1
+            fault_path = f"/operations/{op_index}/confidence"
         else:
-            op["status"] = "silently_degraded"
+            op["status"] = "uncertain"
+            fault_path = f"/operations/{op_index}/status"
+        if validate_recipe_v2(faulty):
+            raise AssertionError(f"generated invalid fault: {kind}")
         faults.append({"case_id": f"fault_{index:03d}", "kind": kind,
-                       "operation_id": op["id"], "truth": truth, "faulty": faulty})
+                       "operation_id": op["id"], "fault_path": fault_path,
+                       "truth": truth, "faulty": faulty})
     return faults
+
+
+def write_fault_suite(faults: list[dict], output_dir: Path) -> Path:
+    """Persist a replayable fault manifest without validating the intentionally
+    corrupted recipes.  Each case keeps both the clean truth and faulty input,
+    making model-critic runs resumable and auditable.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for fault in faults:
+        case_id = str(fault["case_id"])
+        case_dir = output_dir / case_id
+        case_dir.mkdir(parents=True, exist_ok=True)
+        truth_path = case_dir / "truth.recipe.json"
+        faulty_path = case_dir / "faulty.recipe.json"
+        truth_path.write_text(json.dumps(fault["truth"], ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+        faulty_path.write_text(json.dumps(fault["faulty"], ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+        rows.append({"case_id": case_id, "kind": fault["kind"],
+                     "operation_id": fault["operation_id"],
+                     "fault_path": fault["fault_path"],
+                     "truth": str(truth_path), "faulty": str(faulty_path)})
+    manifest = output_dir / "manifest.jsonl"
+    manifest.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                        encoding="utf-8")
+    return manifest
 
 
 def score_fault_critiques(faults: list[dict], critiques: list[dict], *,
                           clean_false_positives: int = 0, clean_count: int = 0) -> dict:
     if len(faults) != len(critiques):
         raise ValueError("fault/critique counts differ")
-    detected = 0
+    detected = repaired = 0
     for fault, critique in zip(faults, critiques):
         if any(issue.get("operation_id") == fault["operation_id"]
                for issue in critique.get("issues") or [] if isinstance(issue, dict)):
             detected += 1
+        patched, _audit = apply_recipe_patches(
+            fault["faulty"], [row for row in critique.get("patches") or []
+                              if isinstance(row, dict)])
+        if patched == fault["truth"]:
+            repaired += 1
     detection_rate = detected / max(1, len(faults))
+    repair_rate = repaired / max(1, len(faults))
     false_positive_rate = clean_false_positives / max(1, clean_count)
     return {"fault_count": len(faults), "detected": detected,
             "detection_rate": round(detection_rate, 4),
+            "repaired": repaired, "repair_rate": round(repair_rate, 4),
+            "clean_count": clean_count,
             "clean_false_positive_rate": round(false_positive_rate, 4),
-            "passes_thresholds": detection_rate >= 0.70 and false_positive_rate <= 0.05}
+            "passes_thresholds": detection_rate >= 0.70 and repair_rate >= 0.70
+            and clean_count > 0 and false_positive_rate <= 0.05}

@@ -39,12 +39,23 @@ def plan_narrative_windows(duration_s: float, *, max_windows: int = 24,
                            target_window_s: float = 12.0) -> list[NarrativeWindow]:
     if duration_s <= 0 or max_windows <= 0:
         return []
-    count = min(max_windows, max(1, math.ceil(duration_s / max(1.0, target_window_s))))
-    width = duration_s / count
-    return [NarrativeWindow(idx=idx, start=round(idx * width, 3),
-                            end=round(duration_s if idx == count - 1
-                                      else (idx + 1) * width, 3))
-            for idx in range(count)]
+    target = max(1.0, float(target_window_s))
+    count = min(max_windows, max(1, math.ceil(duration_s / target)))
+    if duration_s <= count * target:
+        width = duration_s / count
+        starts = [idx * width for idx in range(count)]
+        ends = [duration_s if idx == count - 1 else (idx + 1) * width
+                for idx in range(count)]
+    else:
+        # A long film cannot be covered under the bounded model-call budget.
+        # Keep each observation small enough for Omni and distribute those
+        # observations across the full source, including both endpoints.
+        width = min(target, duration_s)
+        step = (duration_s - width) / max(1, count - 1)
+        starts = [idx * step for idx in range(count)]
+        ends = [min(duration_s, start + width) for start in starts]
+    return [NarrativeWindow(idx=idx, start=round(start, 3), end=round(end, 3))
+            for idx, (start, end) in enumerate(zip(starts, ends))]
 
 
 WINDOW_PROMPT = """你是视频内容取证 Agent。请观看原视频 {start:g}~{end:g} 秒，只报告这段中
@@ -62,7 +73,8 @@ WINDOW_PROMPT = """你是视频内容取证 Agent。请观看原视频 {start:g}
 SYNTHESIS_PROMPT = """你是 Narrative Program 归纳 Agent。根据分窗观察和确定性材料生成一份
 可验证的叙事程序。禁止根据标题或常识补写没有证据的剧情。只输出一个 JSON 对象，不要围栏。
 
-顶层字段固定为 intent/entities/events/causal_links/arc/utterances/emotion_curve/uncertainties。
+顶层字段固定为 intent/entities/events/causal_links/arc/utterances/emotion_curve/evidence/status/uncertainties。
+顶层 evidence/status 由程序根据各项证据重新汇总，模型不得用它掩盖无证据断言。
 intent={{"topic":"...","message":"...","content_type":"real_story|screen_story|growth_story|uncertain",
 "evidence":[],"confidence":0.0,"status":"supported|uncertain|unsupported"}}
 entity={{"id":"entity_000","kind":"person|animal|object|place|group|unknown","name_or_role":"...",
@@ -181,6 +193,41 @@ def _claim(row: dict, duration: float) -> dict:
     if status == "supported" and not evidence:
         status = "uncertain"
     return {**row, "evidence": evidence, "confidence": confidence, "status": status}
+
+
+def _summarize_program(program: dict) -> None:
+    """Derive the envelope evidence and status from normalized claims."""
+    aggregated = []
+    seen = set()
+    sections = [("intent", [program.get("intent")])]
+    sections.extend((name, program.get(name) or []) for name in
+                    ("entities", "events", "causal_links", "utterances",
+                     "emotion_curve"))
+    for section, rows in sections:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            claim_id = (row.get("id") or row.get("action") or row.get("emotion")
+                        or row.get("topic") or section)
+            for item in row.get("evidence") or []:
+                key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                aggregated.append({**item, "claim_type": section,
+                                   "claim_id": str(claim_id)})
+    program["evidence"] = aggregated
+    events = program.get("events") or []
+    supported_events = [row for row in events if row.get("status") == "supported"]
+    roles = {row.get("role") for row in program.get("arc") or []}
+    if not aggregated or not events:
+        program["status"] = "unsupported"
+    elif (program.get("intent", {}).get("status") == "supported"
+          and len(supported_events) >= 3
+          and {"conflict", "climax", "resolution"}.issubset(roles)):
+        program["status"] = "supported"
+    else:
+        program["status"] = "uncertain"
 
 
 def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
@@ -317,6 +364,7 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
     if not block:
         program["uncertainties"].append("narrative_program_parse_failed")
     program["provenance"]["tool_calls"] = list(tool_calls)
+    _summarize_program(program)
     return program
 
 

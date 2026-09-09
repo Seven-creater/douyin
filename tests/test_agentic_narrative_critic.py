@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from src.agentic_video.narrative_critic import (apply_story_patches,
                                                  preflight_story_faults,
+                                                 run_narrative_critic,
                                                  score_comprehension_answers,
                                                  validate_story_patch)
 from src.agentic_video.story_planner import build_story_plan
@@ -56,3 +57,16 @@ def test_preflight_story_faults_covers_causal_and_execution_failures():
     assert {fault["type"] for fault in faults} >= {
         "entity_switch", "missing_resolution", "missing_cause",
         "subtitle_timing", "dialogue_cut"}
+
+
+def test_narrative_critic_prompt_keeps_literal_json_braces():
+    class Runner:
+        def watch(self, _video, prompt, **_kwargs):
+            assert '"theme_relevance":0.0' in prompt
+            assert "{questions}" not in prompt
+            return type("Answer", (), {"text": '{"answers":[],"patches":[]}',
+                                        "elapsed_s": 0.1})()
+
+    critique = run_narrative_critic("rendered.mp4", valid_program(), _plan(),
+                                    runner=Runner())
+    assert critique["comprehension"]["total"] == 5

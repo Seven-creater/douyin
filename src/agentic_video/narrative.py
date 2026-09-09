@@ -37,6 +37,8 @@ def new_narrative_program(*, reference_id: str, reference_uri: str, sha256: str,
         "arc": [],
         "utterances": [],
         "emotion_curve": [],
+        "evidence": [],
+        "status": "uncertain",
         "uncertainties": [],
         "provenance": {
             "model": model, "prompt_version": prompt_version,
@@ -108,6 +110,28 @@ def validate_narrative_program(program: Any) -> list[str]:
         digest = reference.get("sha256")
         if not isinstance(digest, str) or (digest and len(digest) != 64):
             errors.append("reference.sha256 must be empty or a 64-char digest")
+
+    program_status = program.get("status")
+    if program_status not in STATUSES:
+        errors.append("status invalid")
+    program_evidence = program.get("evidence")
+    if not isinstance(program_evidence, list):
+        errors.append("evidence must be a list")
+    else:
+        if program_status == "supported" and not program_evidence:
+            errors.append("supported narrative program requires evidence")
+        for idx, item in enumerate(program_evidence):
+            prefix = f"evidence[{idx}]"
+            if not isinstance(item, dict) or not str(item.get("source") or "").strip():
+                errors.append(f"{prefix}.source missing")
+                continue
+            if "interval" in item:
+                _validate_interval(item["interval"], duration, f"{prefix}.interval",
+                                   errors, point_ok=True)
+            confidence = item.get("confidence")
+            if confidence is not None and (not _number(confidence)
+                                           or not 0 <= confidence <= 1):
+                errors.append(f"{prefix}.confidence outside [0,1]")
 
     intent = program.get("intent")
     if not isinstance(intent, dict):

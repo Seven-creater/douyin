@@ -13,6 +13,7 @@ from src.agentic_video.renderer import (GroundedSamSubprocessBackend, final_filt
                                         render_recipe, segment_filter,
                                         write_story_subtitles)
 from src.config import AppConfig, PathsCfg
+from src.perception import common
 
 
 def _recipe():
@@ -64,6 +65,9 @@ def test_renderer_filters_compile_requested_effects():
 def test_segment_filter_can_follow_model_subject_anchor():
     vf = segment_filter([], width=1920, height=1080, duration_s=2.0, focus_x=0.2)
     assert "crop=1920:1080:(iw-1920)*0.2" in vf
+
+
+def test_final_filter_compiles_point_flash():
     recipe = _recipe()
     recipe["operations"].append({
         "id": "flash", "type": "luma_flash", "interval": [1.0, 1.0],
@@ -148,3 +152,34 @@ def test_story_subtitles_map_source_dialogue_to_target_time(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "00:00:11,000 --> 00:00:13,000" in text
     assert "我要保护你" in text
+
+
+def test_narrative_renderer_adds_silence_when_source_has_no_audio(tmp_path):
+    recipe = _recipe()
+    source_recipe = new_recipe(reference_id="source", reference_uri="source.mp4", sha256="",
+                               duration_s=4.0, fps=12.0)
+    source = render_controlled_video(source_recipe, tmp_path / "silent.mp4",
+                                     width=160, height=90)
+    recipe["reference"]["uri"] = str(source)
+    cfg = AppConfig(
+        wellbyte={}, ranking={}, download={}, template={}, generation={}, logging_level="INFO",
+        perception={"ffmpeg_bin": "ffmpeg", "ffprobe_bin": "ffprobe"},
+        library={"narrative_render": {"width": 320, "height": 180}},
+        paths=PathsCfg(raw_dir=tmp_path / "r", processed_dir=tmp_path / "p",
+                       videos_dir=tmp_path / "v", logs_dir=tmp_path / "l",
+                       perception_dir=tmp_path / "per", generation_dir=tmp_path / "g",
+                       library_dir=tmp_path / "lib"))
+    plan = {"plan_version": "narrative-1.0", "theme": "守护", "library": "guimie",
+            "reference_id": "r", "narrative_program_required": True,
+            "slots": [{"slot_idx": 0, "start_s": 0.0, "end_s": 2.0,
+                       "need_duration_s": 2.0, "operation_types": []}]}
+    retrieval = [{"slot_idx": 0, "missing": "", "picked": {
+        "source_start_s": 0.0, "source_end_s": 2.0, "video": str(source),
+        "video_stem": "silent", "shot_idx": 0, "dialogue": []}}]
+    try:
+        output = render_recipe(cfg, recipe, plan, retrieval, tmp_path / "narrative",
+                               force=True)
+        probe = common.run_ffprobe_json("ffprobe", output)
+    except FileNotFoundError:
+        pytest.skip("ffmpeg unavailable")
+    assert any(stream.get("codec_type") == "audio" for stream in probe["streams"])

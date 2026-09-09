@@ -26,6 +26,8 @@ def write_run_report(output: Path, *, recipe: dict, asset_plan: dict,
     if narrative:
         lines.extend([
             "## Narrative Program", "",
+            f"- 状态：{narrative.get('status')}，顶层证据 "
+            f"{len(narrative.get('evidence') or [])} 条",
             f"- 内容主题：{narrative.get('intent', {}).get('topic')}",
             f"- 核心表达：{narrative.get('intent', {}).get('message')}",
             f"- 实体/事件/因果：{len(narrative.get('entities') or [])}/"

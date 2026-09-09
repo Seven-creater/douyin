@@ -353,3 +353,21 @@ def compare_ablation(fixed: dict, agent: dict) -> dict:
     passed = layer_gain >= 0.10 or (similar_accuracy and call_reduction >= 0.20)
     return {"layer_f1_gain": round(layer_gain, 4),
             "model_call_reduction": round(call_reduction, 4), "passes_agent_gate": passed}
+
+
+def compare_ablation_variants(fixed: dict, signal_guided: dict | None,
+                              agent: dict) -> dict:
+    """Compare the three required perception variants in one auditable record.
+
+    ``fixed`` is the fixed-window baseline, ``signal_guided`` is the
+    signal-guided/no-agent baseline, and ``agent`` is the bounded active agent.
+    The agent gate is measured against the fixed baseline as specified by the
+    protocol; the middle variant is reported for diagnosis even when omitted.
+    """
+    result = {"fixed_window": fixed, "agent": agent,
+              "agent_vs_fixed": compare_ablation(fixed, agent)}
+    if signal_guided is not None:
+        result["signal_guided"] = signal_guided
+        result["signal_guided_vs_fixed"] = compare_ablation(fixed, signal_guided)
+        result["agent_vs_signal_guided"] = compare_ablation(signal_guided, agent)
+    return result

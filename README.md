@@ -79,7 +79,7 @@ logs/collect_trends_<ts>.log                   # 运行日志（密钥自动脱�
 ## 测试
 
 ```bash
-python -m pytest -q            # 258 个单测（默认不打真实 API/大模型）
+python -m pytest -q            # 默认不打真实 API/大模型
 python -m tests.smoke_real_api # 真实 API 冒烟（手动，花 credits）
 ```
 
@@ -125,6 +125,10 @@ python -m src.generation.run_generation --template-id <aweme_id> --variants 3 --
 ```bash
 # 生成 144 个程序化真值视频；给出预测目录时同时计算准确率
 python -m src.agentic_video.cli benchmark
+
+# 三路消融结果可同时汇总；命令还会生成 60 条可执行故障及修复评测清单
+python -m src.agentic_video.cli benchmark \
+  --fixed-metrics fixed.json --signal-metrics signal.json --agent-metrics agent.json
 
 # 获取有内容的热门参考（最近 7 天，三类各最多 4 条）
 python -m src.agentic_video.cli discover \

@@ -120,6 +120,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "video": str((picked or {}).get("video") or ""),
             "video_stem": str((picked or {}).get("video_stem") or ""),
             "shot_idx": (picked or {}).get("shot_idx"),
+            "shot_indices": list((picked or {}).get("shot_indices") or []),
             "start_s": source_start, "end_s": source_end,
             "event_id": str((picked or {}).get("event_id") or ""),
             "causal_predecessors": list((picked or {}).get("causal_predecessors") or []),
@@ -173,6 +174,61 @@ def _arc_query(narrative: dict, segment: dict, theme: str) -> str:
     return "；".join(part for part in parts if part and part != "uncertain")
 
 
+def merge_event_candidates(rows: list[dict]) -> list[dict]:
+    """Merge adjacent shot rows that the narrative index assigned to one event.
+
+    Rendering a single midpoint shot for an entire story role creates long held
+    frames.  Event ranges preserve the original multi-shot action/dialogue and
+    remain traceable to every constituent shot.
+    """
+    grouped: dict[tuple, list[dict]] = {}
+    for row in rows:
+        event_id = str(row.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        key = (str(row.get("video") or ""), str(row.get("video_stem") or ""),
+               row.get("window_idx"), event_id, row.get("story_role"))
+        grouped.setdefault(key, []).append(row)
+    merged = []
+    for (_video, _stem, _window, event_id, role), members in grouped.items():
+        ordered = sorted(members, key=lambda row: float(row.get("source_start_s", 0)))
+        first = deepcopy(ordered[0])
+        start = min(float(row.get("source_start_s", 0)) for row in ordered)
+        end = max(float(row.get("source_end_s", 0)) for row in ordered)
+        dialogue = []
+        seen_dialogue = set()
+        for row in ordered:
+            for line in row.get("dialogue") or []:
+                key = (line.get("start_s"), line.get("end_s"), line.get("original"),
+                       line.get("translation_zh"))
+                if key not in seen_dialogue:
+                    seen_dialogue.add(key)
+                    dialogue.append(deepcopy(line))
+        captions = list(dict.fromkeys(str(row.get("event_summary")
+                                            or row.get("caption") or "").strip()
+                                      for row in ordered
+                                      if str(row.get("event_summary")
+                                             or row.get("caption") or "").strip()))
+        first.update({
+            "event_id": event_id, "story_role": role,
+            "source_start_s": start, "source_end_s": end,
+            "duration_s": end - start,
+            "shot_idx": ordered[0].get("shot_idx"),
+            "shot_indices": [row.get("shot_idx") for row in ordered],
+            "caption": "；".join(captions),
+            "entity_ids": sorted({str(value) for row in ordered
+                                  for value in row.get("entity_ids") or []}),
+            "causal_predecessors": sorted({str(value) for row in ordered
+                                           for value in row.get("causal_predecessors") or []}),
+            "dialogue": sorted(dialogue, key=lambda line: float(line.get("start_s", 0))),
+            "focus_x": sum(float(row.get("focus_x", 0.5)) for row in ordered)
+            / len(ordered),
+            "semantic_score": max(float(row.get("semantic_score", 0)) for row in ordered),
+        })
+        merged.append(first)
+    return merged
+
+
 def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: str,
                                 target_duration_s: float = 60.0,
                                 top_k: int = 12) -> tuple[dict, list[list[dict]]]:
@@ -217,6 +273,12 @@ def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: st
                 "source_end_s": float(row.get("end_s") or row.get("source_end_s") or 0),
                 "query": query,
             })
+        group = merge_event_candidates(group)
+        for row in group:
+            duration_fit = min(1.0, float(row.get("duration_s", 0))
+                               / max(1.0, target_duration_s / max(1, len(arc))))
+            row["semantic_score"] = round(float(row["semantic_score"])
+                                           + 0.08 * duration_fit, 6)
         group.sort(key=lambda row: (-row["semantic_score"], row["row_idx"]))
         candidate_groups.append([row for row in group
                                  if row["semantic_score"] >= min_score][:top_k])
@@ -230,10 +292,27 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
     errors = validate_story_plan(story_plan)
     if errors:
         raise ValueError("invalid Story Plan: " + "; ".join(errors))
+    # Recipe intervals live in the reference video's timebase.  A narrative
+    # render normally targets 45--75 seconds, so map those intervals before
+    # deciding which edit operations are active in each output slot.  Keep the
+    # caller's Recipe untouched; the scaled copy is only an execution view.
+    execution_recipe = deepcopy(recipe)
+    reference_duration = float((recipe.get("reference") or {}).get("duration_s") or 0)
+    target_duration = float(story_plan.get("target_duration_s") or 0)
+    if reference_duration > 0 and target_duration > 0 \
+            and abs(reference_duration - target_duration) > 1e-6:
+        ratio = target_duration / reference_duration
+        execution_recipe.setdefault("reference", {})["duration_s"] = target_duration
+        for operation in execution_recipe.get("operations") or []:
+            interval = operation.get("interval")
+            if isinstance(interval, list) and len(interval) == 2:
+                operation["interval"] = [round(float(value) * ratio, 6)
+                                           for value in interval]
+
     slots, retrieval = [], []
     for item in story_plan["slots"]:
         start, end = map(float, item["target_interval"])
-        active = [op for op in recipe.get("operations") or []
+        active = [op for op in execution_recipe.get("operations") or []
                   if float(op["interval"][0]) <= end and float(op["interval"][1]) >= start]
         source = item["source"]
         slots.append({
@@ -249,6 +328,7 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
                 "row_idx": item["slot_idx"], "video": source["video"],
                 "video_stem": source.get("video_stem") or Path(source["video"]).stem,
                 "shot_idx": source.get("shot_idx"),
+                "shot_indices": source.get("shot_indices") or [],
                 "source_start_s": float(source["start_s"]),
                 "source_end_s": float(source["end_s"]),
                 "duration_s": float(source["end_s"]) - float(source["start_s"]),

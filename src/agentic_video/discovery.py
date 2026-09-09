@@ -155,6 +155,10 @@ def parse_semantic_audit(raw: str, record: dict) -> dict:
     if category not in CONTENT_CATEGORIES:
         category = record.get("category_hint")
     row = {**record, **parsed, "category": category}
+    # Preserve model-provided rejection reasons, but never allow an audit
+    # inconsistency to pass the content gate.  The reported event count is a
+    # claim; the evidence-backed list below is the only count we trust.
+    rejection_reasons = [str(reason) for reason in (row.get("rejection_reasons") or [])]
     evidence_events = []
     for event in parsed.get("events") or []:
         if not isinstance(event, dict):
@@ -169,16 +173,22 @@ def parse_semantic_audit(raw: str, record: dict) -> dict:
     row["events"] = evidence_events
     reported_count = parsed.get("event_count")
     row["event_count"] = len(evidence_events)
+    count_mismatch = False
     if reported_count is not None:
         try:
             if int(reported_count) != len(evidence_events):
-                row.setdefault("rejection_reasons", []).append("event_count_mismatch")
+                count_mismatch = True
+                rejection_reasons.append("event_count_mismatch")
         except (TypeError, ValueError):
-            row.setdefault("rejection_reasons", []).append("event_count_invalid")
-    row["eligible"] = bool(record.get("eligible", True)) and passes_content_gate({
-        **row, "eligible": True})
+            count_mismatch = True
+            rejection_reasons.append("event_count_invalid")
+    row["rejection_reasons"] = list(dict.fromkeys(rejection_reasons))
+    row["eligible"] = (bool(record.get("eligible", True)) and not count_mismatch
+                        and passes_content_gate({**row, "eligible": True}))
     if not block:
-        row.setdefault("rejection_reasons", []).append("semantic_audit_parse_failed")
+        row["rejection_reasons"] = list(dict.fromkeys(
+            [*row["rejection_reasons"], "semantic_audit_parse_failed"]))
+        row["eligible"] = False
     return row
 
 
