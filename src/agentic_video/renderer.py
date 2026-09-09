@@ -74,7 +74,7 @@ def operations_for_interval(recipe: dict, start: float, end: float) -> list[dict
             if op["interval"][0] <= end and op["interval"][1] >= start]
 
 
-def segment_filter(operations: list[dict], *, width: int = 544, height: int = 960,
+def segment_filter(operations: list[dict], *, width: int = 720, height: int = 960,
                    duration_s: float) -> str:
     filters = [f"scale={width}:{height}:force_original_aspect_ratio=increase",
                f"crop={width}:{height}:(iw-{width})/2:(ih-{height})/2", "fps=24"]
@@ -141,6 +141,9 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
         return final
     work = output_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
+    canvas_cfg = cfg.generation.get("assemble", {})
+    canvas_width = int(canvas_cfg.get("width", 720))
+    canvas_height = int(canvas_cfg.get("height", 960))
     retrieval_by_slot = {int(row["slot_idx"]): row for row in retrieval}
     segment_paths = []
     commands: list[list[str]] = []
@@ -154,12 +157,15 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
         active = operations_for_interval(recipe, float(slot["start_s"]), float(slot["end_s"]))
         if picked is None:
             args = ["-y", "-loglevel", "error", "-f", "lavfi", "-i",
-                    f"color=black:s=544x960:d={duration:g}:r=24", "-an", "-c:v",
+                    f"color=black:s={canvas_width}x{canvas_height}:d={duration:g}:r=24",
+                    "-an", "-c:v",
                     "libx264", "-pix_fmt", "yuv420p", str(destination)]
         else:
             args = ["-y", "-loglevel", "error", "-ss", f"{picked['source_start_s']:g}",
                     "-i", str(picked["video"]), "-t", f"{max(duration, 0.1):g}",
-                    "-vf", segment_filter(active, duration_s=duration), "-an", "-c:v",
+                    "-vf", segment_filter(active, width=canvas_width,
+                                           height=canvas_height, duration_s=duration),
+                    "-an", "-c:v",
                     "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt",
                     "yuv420p", str(destination)]
         common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args,

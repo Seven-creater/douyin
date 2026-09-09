@@ -107,7 +107,7 @@ generation:               # Phase 4 MiniMax 生成管线
     max_retries: 2            # 每片段重提次数（seed+1 换文件名）
   plan:
     fps: 24
-    width: 544                # 竖屏 9:16（G1 闸门验证，失败回退 960×544+rotate）
+    width: 720                # 3:4 全屏画布；横屏素材等比放大后居中裁切
     height: 960
     min_unit_s: 5.2
     max_unit_s: 10.0
