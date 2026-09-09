@@ -129,7 +129,10 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     errors = validate_recipe_v2(recipe)
     if errors:
         raise ValueError("invalid Recipe v2: " + "; ".join(errors))
-    output_dir = Path(output_dir)
+    # FFmpeg's concat demuxer resolves entries relative to concat.txt.  Always
+    # materialize the run directory before writing segment paths so a relative
+    # CLI output such as ``data/runs/demo`` cannot be prefixed twice.
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     final = output_dir / "rendered.mp4"
     if final.exists() and not force:

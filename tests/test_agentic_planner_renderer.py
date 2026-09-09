@@ -102,3 +102,28 @@ def test_renderer_executes_a_small_deterministic_video(tmp_path):
     assert output.stat().st_size > 1000
     manifest = (tmp_path / "out" / "render_manifest.json").read_text(encoding="utf-8")
     assert '"deterministic": true' in manifest
+
+
+def test_renderer_resolves_relative_output_for_concat(tmp_path, monkeypatch):
+    recipe = _recipe()
+    source_recipe = new_recipe(reference_id="source", reference_uri="source.mp4", sha256="",
+                               duration_s=4.0, fps=12.0)
+    source = render_controlled_video(source_recipe, tmp_path / "source.mp4",
+                                     width=160, height=90)
+    recipe["reference"]["uri"] = str(source)
+    cfg = AppConfig(
+        wellbyte={}, ranking={}, download={}, template={}, generation={}, logging_level="INFO",
+        perception={"ffmpeg_bin": "ffmpeg", "ffprobe_bin": "ffprobe"}, library={},
+        paths=PathsCfg(raw_dir=tmp_path / "r", processed_dir=tmp_path / "p",
+                       videos_dir=tmp_path / "v", logs_dir=tmp_path / "l",
+                       perception_dir=tmp_path / "per", generation_dir=tmp_path / "g",
+                       library_dir=tmp_path / "lib"))
+    plan = build_asset_plan(recipe, "战斗", library="guimie")
+    retrieval = [{"slot_idx": slot["slot_idx"], "missing": "", "picked": {
+        "source_start_s": 0.0, "video": str(source), "video_stem": "source",
+        "shot_idx": 0, "caption": "动作", "duration_s": 4.0,
+    }} for slot in plan["slots"]]
+    monkeypatch.chdir(tmp_path)
+    output = render_recipe(cfg, recipe, plan, retrieval, Path("relative-out"))
+    assert output == (tmp_path / "relative-out" / "rendered.mp4").resolve()
+    assert output.stat().st_size > 1000
