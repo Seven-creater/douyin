@@ -328,17 +328,19 @@ def run_signals(cfg: AppConfig, vid: str, *, force: bool = False) -> Path | None
 
     work_fps = float(s_cfg.get("work_fps", 10))
     scale = float(s_cfg.get("scale", 0.5))
-    w = max(2, int(src_w * scale) // 2 * 2)
-    h = max(2, int(src_h * scale) // 2 * 2)
+    grid = s_cfg.get("grid") or {}
+    g_cols = int(grid.get("cols", 6))
+    g_rows = int(grid.get("rows", 6))
+    # 网格 reshape 需整除：宽按 cols、高按 rows 取整（竖屏 272 宽这类不整除会崩）
+    w = max(g_cols, int(src_w * scale) // g_cols * g_cols)
+    h = max(g_rows, int(src_h * scale) // g_rows * g_rows)
     frames = decode_gray_frames(cfg.perception.get("ffmpeg_bin", "ffmpeg"), video,
                                 fps=work_fps, width=w, height=h)
     if len(frames) < 3:
         raise RuntimeError(f"解码帧数过少: {len(frames)}")
     logger.info("[signals %s] %d 帧 @%dx%d", vid, len(frames), w, h)
 
-    grid = s_cfg.get("grid") or {}
-    series = compute_series(frames, grid_rows=int(grid.get("rows", 6)),
-                            grid_cols=int(grid.get("cols", 6)))
+    series = compute_series(frames, grid_rows=g_rows, grid_cols=g_cols)
     fps_actual = (len(frames) - 1) / duration if duration else work_fps
     series["t"] = [round(i / fps_actual, 3) for i in range(len(frames))]
 
