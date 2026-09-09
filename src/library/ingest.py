@@ -44,9 +44,11 @@ def run_ingest(cfg, file: Path, vid: str, *, kind: str, ref: str | None = None,
         "origin_path": str(file)}, ensure_ascii=False, indent=1), encoding="utf-8")
     if push:
         from src.download.sync import _push_one_dir
+        from src.pipeline.run_downloads import _load_sync_cfg
 
-        sync_cfg = cfg.download or {}
-        err = _push_one_dir(sync_cfg.get("ssh_target", ""), f"{sync_cfg.get('remote_root', '')}/data/videos", dst_dir)
+        sync_cfg = _load_sync_cfg()
+        err = _push_one_dir(sync_cfg["ssh_target"],
+                            f"{sync_cfg['remote_root']}/data/videos", dst_dir)
         logger.info("[ingest %s] 推送 %s", vid, "失败" if err else "成功")
     common.emit_status_line("ok", vid=vid, kind=kind)
     return dst
