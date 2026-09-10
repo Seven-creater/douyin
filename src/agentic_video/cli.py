@@ -261,6 +261,19 @@ def _validated_gpu_spec(spec: str) -> str:
     return ",".join(parts)
 
 
+def _preload_torch_before_cv2() -> None:
+    """服务器实证（2026-09-10）：cv2 先于 torch 导入的进程里，Qwen3-Omni
+    四卡加载必现 SIGSEGV（原生 OpenMP 运行时冲突，core dumped、无 Python 栈，
+    cv2→加载 二分复现 2/2，torch→cv2→加载 2/2 通过）。本仓库 signals 等模块
+    import cv2，而 run/分解又在同进程加载 VLM——进 handler 前先占住 torch
+    的原生运行时即可化解；本地无 torch 时静默跳过。
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     ensure_utf8_stdio()
     parser = build_parser()
@@ -268,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.gpus:
         from src.perception.omni_runner import set_visible_gpus
         set_visible_gpus(_validated_gpu_spec(args.gpus))
+    _preload_torch_before_cv2()
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="agentic_video")
     handlers = {"discover": _discover, "benchmark": _benchmark,

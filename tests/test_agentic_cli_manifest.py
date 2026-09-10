@@ -62,3 +62,18 @@ def test_gpu_spec_requires_two_or_four_distinct_cards():
     for bad in ("0", "0,1,2", "0,1,2,3,5", "0,0", "a,b"):
         with pytest.raises(SystemExit):
             _validated_gpu_spec(bad)
+
+
+def test_cli_module_does_not_import_cv2():
+    """cv2 必须晚于 torch 进程（2026-09-10 服务器段错误）：cli 模块自身不得
+    在 import 时拉起 cv2，否则 main() 的 torch 预载失去排序控制权。"""
+    import os
+    import subprocess
+    import sys
+
+    code = "import sys; import src.agentic_video.cli; print('cv2' in sys.modules)"
+    env = {**os.environ, "PYTHONPATH": os.getcwd()}
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                            text=True, env=env, cwd=os.getcwd())
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "False"
