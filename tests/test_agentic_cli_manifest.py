@@ -47,3 +47,18 @@ def test_benchmark_cli_can_generate_specs_without_rendering(tmp_path):
     rows = (tmp_path / "suite" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(rows) == 144
     assert json.loads(rows[0])["kind"] == "single"
+
+
+def test_gpu_spec_requires_two_or_four_distinct_cards():
+    """M4：只允许 2/4 张不重复数字卡号——旧实现任意串直通 CUDA_VISIBLE_DEVICES。"""
+    import pytest
+
+    from src.agentic_video.cli import _validated_gpu_spec
+
+    assert _validated_gpu_spec("0,1") == "0,1"
+    assert _validated_gpu_spec("0,1,2,3") == "0,1,2,3"
+    assert _validated_gpu_spec(" 0, 1 ") == "0,1"          # 容忍空白/尾逗号（归一）
+    assert _validated_gpu_spec("0,1,") == "0,1"
+    for bad in ("0", "0,1,2", "0,1,2,3,5", "0,0", "a,b"):
+        with pytest.raises(SystemExit):
+            _validated_gpu_spec(bad)

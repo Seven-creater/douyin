@@ -248,13 +248,26 @@ def _run(args, cfg) -> dict:
     return {"output": str(final), "report": str(Path(args.output) / "report.md")}
 
 
+def _validated_gpu_spec(spec: str) -> str:
+    """Omni 推理的卡数约束（M4）：只允许 2 或 4 张不重复数字卡号。
+
+    旧实现对任意串（1 卡、3 卡、尾逗号 typo）都直通 CUDA_VISIBLE_DEVICES，
+    静默以错卡数降级或加载崩溃——按用户约定在这里快速失败。"""
+    parts = [p.strip() for p in str(spec).split(",") if p.strip() != ""]
+    if (len(parts) not in (2, 4) or not all(p.isdigit() for p in parts)
+            or len(set(parts)) != len(parts)):
+        raise SystemExit(f"--gpus 只允许 2 或 4 张不重复的数字卡号"
+                         f"（如 0,1 或 0,1,2,3），得到：{spec!r}")
+    return ",".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
     ensure_utf8_stdio()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.gpus:
         from src.perception.omni_runner import set_visible_gpus
-        set_visible_gpus(args.gpus)
+        set_visible_gpus(_validated_gpu_spec(args.gpus))
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="agentic_video")
     handlers = {"discover": _discover, "benchmark": _benchmark,
