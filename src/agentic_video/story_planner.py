@@ -6,8 +6,11 @@ import json
 from pathlib import Path
 
 from src.agentic_video.narrative import ARC_ROLES, validate_narrative_program
+from src.agentic_video import zones
 
 STORY_PLAN_VERSION = "1.0"
+MIN_STORY_SLOTS = 3
+_EXPAND_ROLES = ("conflict", "climax", "resolution")
 
 
 def _transition_score(left: dict, right: dict) -> float:
@@ -74,6 +77,40 @@ def _candidates_for_arc(segment: dict, source_rows: list[dict]) -> list[dict]:
                                            float(row.get("source_start_s", 0))))[:12]
 
 
+def _expand_thin_arc(narrative: dict, *,
+                     min_slots: int = MIN_STORY_SLOTS) -> tuple[dict, list[str]]:
+    """参考片叙事弧过薄时补足槽位，禁止单槽撑满整条成片。
+
+    2026-09-10 首跑：参考程序 arc=[hook]（旧缓存、仅 2 事件），60 秒目标
+    全灌进 1 个槽，成片从头到尾一个窗口、零剪辑。补位段按冲突→高潮→结局
+    取已有时序事件的分段引用；检索侧的兼容角色池会自然把素材分流到不同
+    镜头，段上带 synthesized 标记供报告溯源。
+    """
+    arc = list(narrative.get("arc") or [])
+    if len(arc) >= min_slots:
+        return narrative, []
+    events = sorted(narrative.get("events") or [],
+                    key=lambda row: float((row.get("interval") or [0.0, 0.0])[0]))
+    if not events:
+        return narrative, []
+    roles = [role for role in _EXPAND_ROLES
+             if role not in {segment["role"] for segment in arc}][:min_slots - len(arc)]
+    if not roles:
+        return narrative, []
+    event_ids = [row["id"] for row in events]
+    expanded = deepcopy(narrative)
+    for idx, role in enumerate(roles):
+        lo = idx * len(event_ids) // len(roles)
+        hi = ((idx + 1) * len(event_ids) // len(roles)
+              if idx < len(roles) - 1 else len(event_ids))
+        expanded["arc"].append({"role": role, "event_ids": event_ids[lo:hi],
+                                "synthesized": True})
+    order = {role: idx for idx, role in enumerate(ARC_ROLES)}
+    expanded["arc"].sort(key=lambda segment: order[segment["role"]])
+    expanded["arc_expanded"] = {"reason": "thin_reference_arc", "added_roles": roles}
+    return expanded, roles
+
+
 def build_story_plan(narrative: dict, source_rows: list[dict], *, theme: str,
                      library: str, target_duration_s: float = 60.0) -> dict:
     errors = validate_narrative_program(narrative)
@@ -81,10 +118,14 @@ def build_story_plan(narrative: dict, source_rows: list[dict], *, theme: str,
         raise ValueError("invalid Narrative Program: " + "; ".join(errors))
     if not 45 <= target_duration_s <= 75:
         raise ValueError("target_duration_s must be within 45..75")
+    narrative, added_roles = _expand_thin_arc(narrative)
     arc = narrative.get("arc") or []
     candidate_groups = [_candidates_for_arc(segment, source_rows) for segment in arc]
-    return _assemble_story_plan(narrative, candidate_groups, theme=theme, library=library,
+    plan = _assemble_story_plan(narrative, candidate_groups, theme=theme, library=library,
                                 target_duration_s=target_duration_s)
+    if added_roles:
+        plan["arc_expanded"] = {"reason": "thin_reference_arc", "added_roles": added_roles}
+    return plan
 
 
 def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
@@ -238,12 +279,18 @@ def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: st
         raise ValueError("invalid Narrative Program: " + "; ".join(errors))
     from src.library.build_index import E5Embedder, load_index
 
+    narrative, added_roles = _expand_thin_arc(narrative)
     rows, embeddings = load_index(cfg)
-    allowed = [(idx, row) for idx, row in enumerate(rows)
-               if row.get("source") == library
-               or str(row.get("video_stem") or "").startswith(f"{library}__")]
-    if not allowed:
+    scoped = [(idx, row) for idx, row in enumerate(rows)
+              if row.get("source") == library
+              or str(row.get("video_stem") or "").startswith(f"{library}__")]
+    if not scoped:
         raise ValueError(f"index has no rows for source {library!r}")
+    # 片头/片尾职员表区不进叙事检索池（2026-09-10 首跑选中 ED 段的教训）
+    excluded = zones.excluded_row_indices([row for _idx, row in scoped], cfg)
+    allowed = [pair for pair_idx, pair in enumerate(scoped) if pair_idx not in excluded]
+    if not allowed:
+        raise ValueError(f"source {library!r} has no rows outside the credits zone")
     arc = narrative.get("arc") or []
     queries = [_arc_query(narrative, segment, theme) for segment in arc]
     query_embeddings = E5Embedder(cfg.library.get("embed") or {}).embed(queries)
@@ -284,6 +331,11 @@ def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: st
                                  if row["semantic_score"] >= min_score][:top_k])
     plan = _assemble_story_plan(narrative, candidate_groups, theme=theme, library=library,
                                 target_duration_s=target_duration_s)
+    if excluded:
+        plan["zone_filter"] = {"excluded_rows": len(excluded),
+                               "config": zones.zone_config(cfg)}
+    if added_roles:
+        plan["arc_expanded"] = {"reason": "thin_reference_arc", "added_roles": added_roles}
     return plan, candidate_groups
 
 
