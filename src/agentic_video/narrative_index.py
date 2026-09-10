@@ -411,7 +411,9 @@ age_appearance / location / era / interaction 提取结构化 facet。只输出 
   evidence_interval=支撑它最直接的可见证据区间（如挡刀动作那两秒）。
 - 每条 facet 必须绑定到具体实体（interaction 绑实体对）；location/era 可无实体。
 - 只报告可见内容，不得根据 IP 常识补写；不确定的维度整条不输出。
-- 实体必须优先来自【实体注册表】；画面中出现注册表外人物才新建 ID（visible_ 前缀）。
+- 实体必须优先来自【实体注册表】（含可见名，按名字对应 ID）；画面中出现注册表外
+  人物才新建 ID（visible_ 前缀）。interaction 的 a_entity_id 和 b_entity_id
+  必须是两个**不同**的实体——同实体对抗/自指不是交互，直接不输出。
 【实体注册表】{registry}
 """
 
@@ -528,11 +530,24 @@ def run_type_facets(cfg, source: str, *, windows: list[int] | None = None,
 
     annotations_path = result_path.parent / "narrative_annotations.json"
     known_entities: set[str] = set()
+    registry_rows: dict[str, dict] = {}
     if annotations_path.exists():
         annotations = json.loads(annotations_path.read_text(encoding="utf-8"))
         for annotation in (annotations.get("shots") or {}).values():
-            known_entities.update(str(value) for value in annotation.get("entity_ids") or [])
-    registry = [{"entity_id": entity_id} for entity_id in sorted(known_entities)][:60]
+            if not isinstance(annotation, dict):
+                continue
+            ids = [str(value) for value in annotation.get("entity_ids") or []]
+            names = [str(value) for value in annotation.get("entity_names") or []]
+            known_entities.update(ids)
+            for idx, entity_id in enumerate(ids):
+                row = registry_rows.setdefault(
+                    entity_id, {"entity_id": entity_id, "visible_names": []})
+                name = names[idx] if idx < len(names) else ""
+                if name and name not in row["visible_names"]:
+                    row["visible_names"].append(name)
+    # 注册表带可见名（2026-09-10 全量实测：光杆 ID 导致模型 interaction 双方
+    # 都填同一实体，自指交互全部被丢——30 窗 0 条交互边）
+    registry = list(registry_rows.values())[:60]
 
     by_window: dict[int, list[dict]] = {}
     for shot in shots:
@@ -547,7 +562,10 @@ def run_type_facets(cfg, source: str, *, windows: list[int] | None = None,
             "schema": "type_facets_v1", "video_sha": video_sha,
             "window": [start, end], "dimensions": LIBRARY_FACET_DIMENSIONS,
             "prompt_version": FACET_PROMPT_VERSION,
-            "prompt_sha": _stable_hash(FACET_PROMPT), **omni_sig})
+            "prompt_sha": _stable_hash(FACET_PROMPT),
+            # 注册表内容进键（V1 评审规则：缓存键须含实体注册表版本——
+            # 注册表变了旧观察不得复用）
+            "registry_sha": _stable_hash(registry), **omni_sig})
         cached = saved["completed"].get(str(window_idx))
         if cached == key and not force:
             continue
