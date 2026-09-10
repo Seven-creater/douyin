@@ -18,6 +18,7 @@
 | 2026-09-09 | [critic 自审循环首跑](2026-09-09_critic自审循环首跑.md) | Omni审片→动作映射→重渲闭环跑通；帧级复核证明 critic 也有误报（letterbox 当裁切）；score 不可作收敛判据 |
 | 2026-09-09 | [ModelScope大文件断点续传上传](2026-09-09_ModelScope大文件断点续传上传.md) | 官方 upload 无断点 → OSS STS+multipart 自研续传；并发救不了上行带宽 → NVENC 12min 压 3.63GB 再传 |
 | 2026-09-09 | [Edit Decomposer 基准首跑](2026-09-09_EditDecomposer基准首跑.md) | D1-D4 全链路+两片对比；裁决：这关没过——GLM 全是切被证实，参考片 mask/文字层手法全漏检（窗口单答粒度）；截断四连修与 push 静默失败教训 |
+| 2026-09-10 | [接管审查 agentic_video 全量](2026-09-10_接管审查_agentic_video全量.md) | 另一会话 25 提交接管审查：e2e 已跑通+text_layer 被识别；critic 0.0 分系幻觉（帧级验证）；6 高危（对白坐标未换算/drawtext 转义/缓存失明/特效越槽/非原子写/t=0 钉扎） |
 
 ## 写作规矩
 
