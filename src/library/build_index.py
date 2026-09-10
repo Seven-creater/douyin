@@ -92,6 +92,58 @@ class E5Embedder:
         return vecs.astype("float32")
 
 
+def _shot_facets(shot: dict, facets: list[dict]) -> dict:
+    """把窗口 facet 映射到镜头：按 apply_interval 与镜头区间的实质重叠（≥50%
+    镜头时长）——窗口级印象不复制给整窗镜头；仅收 supported 状态的 facet。"""
+    start, end = float(shot["start_s"]), float(shot["end_s"])
+    duration = max(1e-6, end - start)
+    out = {"locations": [], "interactions": [], "age_appearances": [], "era": None}
+    for facet in facets or []:
+        if facet.get("status") != "supported":
+            continue
+        interval = facet.get("apply_interval") or [0, 0]
+        span = max(1e-6, float(interval[1]) - float(interval[0]))
+        overlap = min(end, float(interval[1])) - max(start, float(interval[0]))
+        # 双向实质重叠：镜头大半在 facet 适用区内，或 facet 大半落在本镜头内
+        # （保护动作这类点状交互证据常短于半镜头，但确实发生在本镜头）
+        if overlap < 0.5 * duration and overlap < 0.8 * span:
+            continue
+        dimension = facet.get("dimension")
+        if dimension == "location":
+            out["locations"].append(str(facet.get("value") or ""))
+        elif dimension == "era":
+            out["era"] = str(facet.get("value") or "") or None
+        elif dimension == "age_appearance":
+            out["age_appearances"].append({
+                "entity_id": str(facet.get("entity_id") or ""),
+                "age_range": str(facet.get("value") or "")})
+        elif dimension == "interaction":
+            out["interactions"].append({
+                "a_entity_id": str(facet.get("a_entity_id") or ""),
+                "b_entity_id": str(facet.get("b_entity_id") or ""),
+                "relation": str(facet.get("relation") or "")})
+    out["locations"] = [v for v in dict.fromkeys(out["locations"]) if v]
+    out["age_appearances"] = [row for row in out["age_appearances"] if row["age_range"]]
+    out["interactions"] = [row for row in out["interactions"]
+                           if row["a_entity_id"] and row["b_entity_id"]]
+    return out
+
+
+def _facet_search_terms(facets: dict) -> list[str]:
+    terms = []
+    if facets.get("locations"):
+        terms.append("地点：" + "、".join(facets["locations"][:3]))
+    if facets.get("era"):
+        terms.append("时代：" + facets["era"])
+    if facets.get("age_appearances"):
+        terms.append("年龄：" + "、".join(sorted({row["age_range"]
+                        for row in facets["age_appearances"]}))[:24])
+    if facets.get("interactions"):
+        terms.append("关系：" + "、".join(sorted({row["relation"]
+                        for row in facets["interactions"]}))[:24])
+    return terms
+
+
 def collect_rows(cfg: AppConfig) -> list[dict]:
     """shots/*/result.json + captions.json → 镜头行（无 caption 的镜头跳过并告警）。"""
     rows, skipped = [], 0
@@ -111,6 +163,16 @@ def collect_rows(cfg: AppConfig) -> list[dict]:
                 if isinstance(link, dict) and link.get("from_event") and link.get("to_event"):
                     causal_predecessors.setdefault(str(link["to_event"]), []).append(
                         str(link["from_event"]))
+        # 类型维度 facet（P1b，加性）：无 type_facets.json 时零影响
+        window_facets: dict[int, list[dict]] = {}
+        facets_path = r.parent / "type_facets.json"
+        if facets_path.exists():
+            try:
+                facets_payload = json.loads(facets_path.read_text(encoding="utf-8"))
+                window_facets = {int(key): (row or {}).get("facets") or []
+                                 for key, row in (facets_payload.get("windows") or {}).items()}
+            except ValueError:
+                window_facets = {}
         for s in env["output"]["shots"]:
             cap = caps.get(str(s["shot_idx"]), "").strip()
             if not cap:
@@ -122,13 +184,20 @@ def collect_rows(cfg: AppConfig) -> list[dict]:
                                              annotation.get("dialogue") or [])
             row["causal_predecessors"] = causal_predecessors.get(
                 str(row.get("event_id") or ""), [])
+            facets = _shot_facets(s, window_facets.get(int(s["window_idx"])) or [])
+            if window_facets:
+                row["facets"] = facets
+            emotion = str(row.get("emotion") or "")
             dialogue_text = " ".join(
                 str(line.get("translation_zh") or line.get("original") or "")
                 for line in row.get("dialogue") or [] if isinstance(line, dict))
             row["search_text"] = "；".join(value for value in (
                 cap, str(row.get("event_summary") or ""),
                 "人物：" + "、".join(row.get("entity_names") or []),
-                "叙事角色：" + str(row.get("story_role") or ""), dialogue_text,
+                "叙事角色：" + str(row.get("story_role") or ""),
+                # emotion 落进可检索文本（P1：不再只标注不消费；uncertain 不入）
+                ("情绪：" + emotion) if emotion and emotion != "uncertain" else "",
+                *_facet_search_terms(facets), dialogue_text,
             ) if value)
             rows.append(row)
     if skipped:
