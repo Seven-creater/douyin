@@ -556,6 +556,7 @@ def run_type_facets(cfg, source: str, *, windows: list[int] | None = None,
                               max_new_tokens=2048, duration_s=end - start)
         parsed = parse_type_facets(answer.text, window_start=start, window_end=end,
                                    known_entities=known_entities)
+        parsed["raw_head"] = str(getattr(answer, "text", ""))[:400]   # 审计/排障
         parsed["cache_key"] = key
         saved["windows"][str(window_idx)] = parsed
         saved["completed"][str(window_idx)] = key
