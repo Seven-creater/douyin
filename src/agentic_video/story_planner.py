@@ -537,6 +537,55 @@ def merge_event_candidates(rows: list[dict]) -> list[dict]:
     return merged
 
 
+COMPATIBLE_ROLES = {
+    "hook": {"hook", "context", "conflict"},
+    "context": {"context", "hook"},
+    "conflict": {"conflict"},
+    "choice": {"choice", "conflict", "climax"},
+    "climax": {"climax", "conflict"},
+    "consequence": {"consequence", "resolution", "context"},
+    "resolution": {"resolution", "consequence"},
+}
+
+
+def score_slot_candidates(cfg, rows, embeddings, *, query, query_embedding, role,
+                          library, slot_budget_s, top_k=12,
+                          used_rows=None) -> list[dict]:
+    """单槽候选打分（从 build_story_plan_from_index 抽出，初次规划与 P3 重搜共用）。
+
+    返回按 semantic_score 降序的合并事件候选；used_rows 中的行（其它槽已选）
+    被排除，重搜不会换汤不换药地撞回同一段素材。
+    """
+    scoped = [(idx, row) for idx, row in enumerate(rows)
+              if row.get("source") == library
+              or str(row.get("video_stem") or "").startswith(f"{library}__")]
+    excluded = zones.excluded_row_indices([row for _idx, row in scoped], cfg)
+    allowed = [pair for pair_idx, pair in enumerate(scoped) if pair_idx not in excluded]
+    cosine = (embeddings @ query_embedding.reshape(-1)).ravel()
+    compatible = COMPATIBLE_ROLES.get(role, {role})
+    min_score = float((cfg.library.get("retrieve") or {}).get("min_cosine", 0.18))
+    used = set(used_rows or ())
+    group = []
+    for row_idx, row in allowed:
+        if row.get("story_role") not in compatible or row_idx in used:
+            continue
+        role_bonus = 0.15 if row.get("story_role") == role else 0.0
+        dialogue_bonus = min(0.08, 0.02 * len(row.get("dialogue") or []))
+        score = float(cosine[row_idx]) + role_bonus + dialogue_bonus
+        group.append({
+            **row, "row_idx": row_idx, "semantic_score": round(score, 6),
+            "source_start_s": float(row.get("start_s") or row.get("source_start_s") or 0),
+            "source_end_s": float(row.get("end_s") or row.get("source_end_s") or 0),
+            "query": query,
+        })
+    group = merge_event_candidates(group)
+    for row in group:
+        duration_fit = min(1.0, float(row.get("duration_s", 0)) / max(1.0, slot_budget_s))
+        row["semantic_score"] = round(float(row["semantic_score"]) + 0.08 * duration_fit, 6)
+    group.sort(key=lambda row: (-row["semantic_score"], row.get("row_idx", 0)))
+    return [row for row in group if row["semantic_score"] >= min_score][:top_k]
+
+
 def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: str,
                                 target_duration_s: float = 60.0,
                                 top_k: int = 12) -> tuple[dict, list[list[dict]]]:
@@ -548,64 +597,146 @@ def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: st
 
     narrative, added_roles = _expand_thin_arc(narrative)
     rows, embeddings = load_index(cfg)
-    scoped = [(idx, row) for idx, row in enumerate(rows)
-              if row.get("source") == library
-              or str(row.get("video_stem") or "").startswith(f"{library}__")]
-    if not scoped:
-        raise ValueError(f"index has no rows for source {library!r}")
-    # 片头/片尾职员表区不进叙事检索池（2026-09-10 首跑选中 ED 段的教训）
-    excluded = zones.excluded_row_indices([row for _idx, row in scoped], cfg)
-    allowed = [pair for pair_idx, pair in enumerate(scoped) if pair_idx not in excluded]
-    if not allowed:
-        raise ValueError(f"source {library!r} has no rows outside the credits zone")
     arc = narrative.get("arc") or []
     specs = _build_specs(narrative)
     queries = [_arc_query(narrative, segment, theme, spec=spec)
                for segment, spec in zip(arc, specs)]
     query_embeddings = E5Embedder(cfg.library.get("embed") or {}).embed(queries)
-    candidate_groups = []
-    compatible_roles = {
-        "hook": {"hook", "context", "conflict"},
-        "context": {"context", "hook"},
-        "conflict": {"conflict"},
-        "choice": {"choice", "conflict", "climax"},
-        "climax": {"climax", "conflict"},
-        "consequence": {"consequence", "resolution", "context"},
-        "resolution": {"resolution", "consequence"},
-    }
-    min_score = float((cfg.library.get("retrieve") or {}).get("min_cosine", 0.18))
-    for segment, query, query_embedding in zip(arc, queries, query_embeddings):
-        cosine = (embeddings @ query_embedding.reshape(-1)).ravel()
-        group = []
-        for row_idx, row in allowed:
-            if row.get("story_role") not in compatible_roles[segment["role"]]:
-                continue
-            role_bonus = 0.15 if row.get("story_role") == segment["role"] else 0.0
-            dialogue_bonus = min(0.08, 0.02 * len(row.get("dialogue") or []))
-            score = float(cosine[row_idx]) + role_bonus + dialogue_bonus
-            group.append({
-                **row, "row_idx": row_idx, "semantic_score": round(score, 6),
-                "source_start_s": float(row.get("start_s") or row.get("source_start_s") or 0),
-                "source_end_s": float(row.get("end_s") or row.get("source_end_s") or 0),
-                "query": query,
-            })
-        group = merge_event_candidates(group)
-        for row in group:
-            duration_fit = min(1.0, float(row.get("duration_s", 0))
-                               / max(1.0, target_duration_s / max(1, len(arc))))
-            row["semantic_score"] = round(float(row["semantic_score"])
-                                           + 0.08 * duration_fit, 6)
-        group.sort(key=lambda row: (-row["semantic_score"], row["row_idx"]))
-        candidate_groups.append([row for row in group
-                                 if row["semantic_score"] >= min_score][:top_k])
+    slot_budget = target_duration_s / max(1, len(arc))
+    candidate_groups = [
+        score_slot_candidates(cfg, rows, embeddings, query=query,
+                              query_embedding=query_embedding, role=segment["role"],
+                              library=library, slot_budget_s=slot_budget, top_k=top_k)
+        for segment, query, query_embedding in zip(arc, queries, query_embeddings)]
     plan = _assemble_story_plan(narrative, candidate_groups, theme=theme, library=library,
                                 target_duration_s=target_duration_s)
-    if excluded:
-        plan["zone_filter"] = {"excluded_rows": len(excluded),
-                               "config": zones.zone_config(cfg)}
+    plan["retrieval_meta"] = {"rows_total": len(rows), "top_k": top_k,
+                              "slot_budget_s": round(slot_budget, 3)}
     if added_roles:
         plan["arc_expanded"] = {"reason": "thin_reference_arc", "added_roles": added_roles}
     return plan, candidate_groups
+
+
+def _overlaps(left: dict, right: dict, *, pad_s: float = 0.0) -> bool:
+    """同视频 + 时间区间重叠。兼容两种键名：索引/候选行用 source_start_s，
+    槽 source 与已拒绝清单用 start_s。"""
+    def _bounds(row: dict) -> tuple[float, float]:
+        return (float(row.get("source_start_s", row.get("start_s", 0)) or 0),
+                float(row.get("source_end_s", row.get("end_s", 0)) or 0))
+    left_start, left_end = _bounds(left)
+    right_start, right_end = _bounds(right)
+    return (str(left.get("video") or "") == str(right.get("video") or "")
+            and min(left_end, right_end) + pad_s > max(left_start, right_start) - pad_s)
+
+
+def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
+                   narrative: dict | None = None, candidate_pool: list[dict] | None = None,
+                   need_hint: str | None = None, rejected: list[dict] | None = None,
+                   top_k: int = 12) -> dict:
+    """分层重搜（V1 P3）：换旧候选不叫重搜。
+
+    层1 = 候选池里未检查且未被其它槽占用的项；层2 = 按 need_hint 改写查询，
+    重新编码并对完整现有索引重搜（「复用索引」不等于「零 E5 调用」）。
+    已拒绝候选按 源视频+区间重叠 去重，不再换回同一段失败素材。替换后整计划
+    必须仍过 validate_story_plan，否则回退并报 failed——绝不放宽约束凑满。
+    """
+    slot = story_plan["slots"][slot_idx]
+    spec = slot.get("need_spec") or {}
+    role = slot["role"]
+    reason = str(need_hint or spec.get("need") or "slot failed verification")
+    others = [other["source"] for idx, other in enumerate(story_plan["slots"])
+              if idx != slot_idx and other.get("status") in {"supported", "uncertain"}
+              and other.get("source", {}).get("video")]
+    rejected = list(rejected or [])
+    # 硬连续约束在重搜里同样生效：depends_on 槽的替换件必须与被依赖槽实体相交
+    depends_on = spec.get("depends_on")
+    anchor_entities = set()
+    if depends_on is not None and 0 <= int(depends_on) < len(story_plan["slots"]):
+        anchor_entities = set(story_plan["slots"][int(depends_on)]
+                              .get("source", {}).get("entity_ids") or [])
+
+    def _eligible(row: dict) -> bool:
+        if not str(row.get("video") or ""):
+            return False
+        if anchor_entities and not (anchor_entities & set(row.get("entity_ids") or [])):
+            return False
+        blocked = others + rejected
+        return not any(_overlaps(row, item, pad_s=1.0) for item in blocked)
+
+    attempts = []
+    # 层1：候选池（story_candidates.json）里未检查的有效选项
+    best_pool = next((row for row in sorted(candidate_pool or [],
+                                            key=lambda row: -float(row.get("semantic_score", 0)))
+                      if _eligible(row)), None)
+    if best_pool is not None:
+        attempts.append({"level": 1, "picked": best_pool})
+    else:
+        # 层2：改写查询全库重搜（查询文本变了要重新编码；「复用索引」≠「零 E5 调用」）。
+        # 索引不可用（缺失/损坏）时显式失败——绝不因此放宽约束或崩掉整轮。
+        from src.library.build_index import E5Embedder, load_index
+        try:
+            rows, embeddings = load_index(cfg)
+        except Exception:                                     # noqa: BLE001 - 显式失败优于崩溃
+            return {"slot_idx": slot_idx, "status": "failed",
+                    "reason": "level2 index unavailable",
+                    "levels_tried": [1]}
+        query = "；".join(part for part in [theme, f"叙事需求：{reason}",
+                                            f"叙事角色：{role}"] if part)
+        query_embedding = E5Embedder(cfg.library.get("embed") or {}).embed([query])[0]
+        budget = float(slot["target_interval"][1]) - float(slot["target_interval"][0])
+        fresh = score_slot_candidates(cfg, rows, embeddings, query=query,
+                                      query_embedding=query_embedding, role=role,
+                                      library=story_plan["library"],
+                                      slot_budget_s=budget, top_k=top_k)
+        pick = next((row for row in fresh if _eligible(row)), None)
+        if pick is not None:
+            attempts.append({"level": 2, "picked": pick})
+    if not attempts:
+        return {"slot_idx": slot_idx, "status": "failed",
+                "reason": "no eligible candidate in pool or index", "levels_tried": [1, 2]}
+
+    picked = attempts[0]["picked"]
+    trial = deepcopy(story_plan)
+    trial_slot = trial["slots"][slot_idx]
+    source_start = float(picked.get("source_start_s", 0))
+    source_end = float(picked.get("source_end_s", 0))
+    budget = float(trial_slot["target_interval"][1]) - float(trial_slot["target_interval"][0])
+    trimmed = False
+    if source_end - source_start > budget + 1e-6:
+        source_end = source_start + budget
+        trimmed = True
+    trial_slot["source"] = {
+        "video": str(picked.get("video") or ""), "video_stem": str(picked.get("video_stem") or ""),
+        "shot_idx": picked.get("shot_idx"), "shot_indices": list(picked.get("shot_indices") or []),
+        "start_s": source_start, "end_s": source_end,
+        "event_id": str(picked.get("event_id") or ""), "caption": str(picked.get("caption") or ""),
+        "causal_predecessors": list(picked.get("causal_predecessors") or []),
+        "entity_ids": list(picked.get("entity_ids") or []),
+        "focus_x": min(1.0, max(0.0, float(picked.get("focus_x", 0.5)))),
+        "dialogue": [line for line in (picked.get("dialogue") or [])
+                     if float(line.get("start_s", source_start)) >= source_start - 1e-6
+                     and float(line.get("end_s", source_end)) <= source_end + 1e-6],
+    }
+    errors = validate_story_plan(trial)
+    if errors:
+        return {"slot_idx": slot_idx, "status": "failed",
+                "reason": "candidate breaks plan: " + "; ".join(errors[:3]),
+                "levels_tried": [attempts[0]["level"]]}
+    previous = trial["slots"][slot_idx - 1] if slot_idx else None
+    if previous and previous.get("source", {}).get("entity_ids") \
+            and set(previous["source"]["entity_ids"]) & set(trial_slot["source"]["entity_ids"]):
+        trial_slot["transition_reason"] = "entity_continuity"
+        trial_slot["status"] = "supported"
+    else:
+        trial_slot["transition_reason"] = "unexplained" if slot_idx else "opening"
+        trial_slot["status"] = "uncertain" if slot_idx else "supported"
+    trial_slot["reason"] = f"re_searched:{reason[:60]}"
+    trial_slot["source_interval_trimmed"] = trimmed
+    story_plan.clear()
+    story_plan.update(trial)
+    return {"slot_idx": slot_idx, "status": "replaced", "level": attempts[0]["level"],
+            "video": trial_slot["source"]["video"],
+            "start_s": trial_slot["source"]["start_s"]}
 
 
 def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, list[dict]]:

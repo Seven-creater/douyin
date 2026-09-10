@@ -248,10 +248,64 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
     history = []
     edit_critiques = []
     narrative_critiques = []
+    re_search_log = []
     critic_cfg = cfg.library.get("critic_v2") or {}
     max_rounds = int(critic_cfg.get("max_rounds", 2))
     min_improvement = float(critic_cfg.get("min_improvement", 0.02))
+    # P3 分层重搜的候选池（初次规划的完整候选组）与已拒绝清单
+    candidate_pool: dict[int, list[dict]] = {}
+    pool_path = output_dir / "story_candidates.json"
+    if pool_path.exists():
+        try:
+            candidate_pool = {idx: group for idx, group
+                              in enumerate(json.loads(pool_path.read_text(encoding="utf-8")))}
+        except (ValueError, OSError):
+            candidate_pool = {}
+    rejected_sources: list[dict] = []
+
+    def _re_render(round_dir_name: str):
+        nonlocal asset_plan, retrieval, current_video
+        round_dir = output_dir / round_dir_name
+        asset_plan, retrieval, current_video = run_rendering(
+            cfg, current_recipe, theme=theme, library=library, output_dir=round_dir,
+            force=True, use_mask_backend=use_mask_backend, narrative=narrative,
+            story_plan=current_story, target_duration_s=target_duration_s,
+            runner=runner)
+        shutil.copy2(current_video, output_dir / "rendered.mp4")
+        for name in ("story_plan.json", "asset_plan.json", "retrieval_results.json",
+                     "render_manifest.json", "subtitles.srt"):
+            source = round_dir / name
+            if source.exists():
+                shutil.copy2(source, output_dir / name)
+        write_recipe(current_recipe, output_dir / "reference.recipe.json")
+        _release_gpu_cache()
+
+    last_round_modified = False
     for round_idx in range(1, max_rounds + 1):
+        # ① 槽级验证：看实际进片区间，must_have 逐条核对（每轮一次验证 pass）。
+        # 失败槽进分层重搜（层1候选池→层2改写查询全库），换掉的旧素材进已拒绝
+        # 清单——重搜不是换一轮旧候选。
+        from src.agentic_video.verify_slots import verify_slots
+        from src.agentic_video.story_planner import re_search_slot
+
+        verification = verify_slots(cfg, current_story, runner=runner)
+        (output_dir / f"verification_round_{round_idx}.json").write_text(
+            json.dumps(verification, ensure_ascii=False, indent=2), encoding="utf-8")
+        round_reports = []
+        for failed_idx in verification["failed_slots"]:
+            old_source = current_story["slots"][failed_idx].get("source") or {}
+            if old_source.get("video"):
+                rejected_sources.append({
+                    "video": old_source.get("video"),
+                    "start_s": old_source.get("start_s"), "end_s": old_source.get("end_s"),
+                    "reason": "verification_failed"})
+            round_reports.append(re_search_slot(
+                cfg, current_story, failed_idx, theme=theme,
+                candidate_pool=candidate_pool.get(failed_idx),
+                rejected=rejected_sources))
+        if any(row.get("status") == "replaced" for row in round_reports):
+            _re_render(f"verify_render_{round_idx}")          # 重搜生效先重渲再给 critic 看
+
         narrative_critique = run_narrative_critic(
             current_video, narrative, current_story, runner=runner)
         edit_critique = run_structured_critic(
@@ -266,6 +320,22 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
             current_recipe, edit_critique.get("patches") or [])
         patched_story, story_audit = apply_story_patches(
             current_story, narrative_critique.get("patches") or [])
+        # ② critic 重搜指令通道：断点描述 + 改写需求 → 分层重搜（critic 不自己编素材）
+        for directive in narrative_critique.get("re_search") or []:
+            slot_idx = int(directive["slot_idx"])
+            if not 0 <= slot_idx < len(patched_story["slots"]):
+                continue
+            old_source = patched_story["slots"][slot_idx].get("source") or {}
+            if old_source.get("video"):
+                rejected_sources.append({
+                    "video": old_source.get("video"),
+                    "start_s": old_source.get("start_s"), "end_s": old_source.get("end_s"),
+                    "reason": f"critic: {directive.get('reason') or ''}"[:80]})
+            round_reports.append(re_search_slot(
+                cfg, patched_story, slot_idx, theme=theme,
+                candidate_pool=candidate_pool.get(slot_idx),
+                need_hint=directive.get("need_hint"), rejected=rejected_sources))
+        re_search_log.extend({"round": round_idx, **row} for row in round_reports)
         (output_dir / f"recipe_patch_round_{round_idx}.json").write_text(
             json.dumps({"patches": edit_critique.get("patches") or [],
                         "audit": recipe_audit},
@@ -282,34 +352,26 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                         "state_hash": json_hash({"recipe": current_recipe,
                                                  "story": current_story})})
         any_applied = (any(row["status"] == "applied" for row in recipe_audit)
-                       or any(row["status"] == "applied" for row in story_audit))
+                       or any(row["status"] == "applied" for row in story_audit)
+                       or any(row.get("status") == "replaced" for row in round_reports))
         if not any_applied:
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="no_applicable_patch")
+            last_round_modified = False
             break
         if any(row["state_hash"] == next_hash for row in history):
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="state_repeated")
+            last_round_modified = False
             break
         if len(history) >= 2 and history[-1]["score"] - history[-2]["score"] < min_improvement:
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="insufficient_improvement")
+            last_round_modified = False
             break
         current_recipe, current_story = patched_recipe, patched_story
-        round_dir = output_dir / f"critic_render_{round_idx}"
-        asset_plan, retrieval, current_video = run_rendering(
-            cfg, current_recipe, theme=theme, library=library, output_dir=round_dir,
-            force=True, use_mask_backend=use_mask_backend, narrative=narrative,
-            story_plan=current_story, target_duration_s=target_duration_s,
-            runner=runner)
-        shutil.copy2(current_video, output_dir / "rendered.mp4")
-        for name in ("story_plan.json", "asset_plan.json", "retrieval_results.json",
-                     "render_manifest.json", "subtitles.srt"):
-            source = round_dir / name
-            if source.exists():
-                shutil.copy2(source, output_dir / name)
-        write_recipe(current_recipe, output_dir / "reference.recipe.json")
-        _release_gpu_cache()
+        _re_render(f"critic_render_{round_idx}")
+        last_round_modified = True
         if round_idx >= max_rounds:
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="max_rounds")
@@ -317,6 +379,30 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
     else:
         manifest.stage("critics", "complete", rounds=max_rounds,
                        stop_reason="max_rounds")
+        last_round_modified = max_rounds > 0
+
+    # ③ 终版必再审（V1 P3 红线）：最后一轮发生过修改时，重渲后的版本从未被审过。
+    # 只读终审（不再修改）——观众五问 + 槽级验证落在 final_review.json，
+    # 作为 P4 的机器指标；有界循环只保证停下来，不保证停在正确结果上。
+    final_review = None
+    if last_round_modified:
+        from src.agentic_video.verify_slots import verify_slots as _verify
+
+        final_review = {
+            "verification": _verify(cfg, current_story, runner=runner),
+            "narrative_critic": run_narrative_critic(
+                current_video, narrative, current_story, runner=runner),
+        }
+        (output_dir / "final_review.json").write_text(
+            json.dumps(final_review, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest.stage("final_review", "complete",
+                       comprehension_pass=bool(
+                           (final_review["narrative_critic"].get("comprehension") or {}
+                            ).get("passes")),
+                       failed_slots=final_review["verification"]["failed_slots"])
+    if re_search_log:
+        (output_dir / "re_search_log.json").write_text(
+            json.dumps(re_search_log, ensure_ascii=False, indent=2), encoding="utf-8")
 
     render_path = output_dir / "render_manifest.json"
     render_manifest = (json.loads(render_path.read_text(encoding="utf-8"))

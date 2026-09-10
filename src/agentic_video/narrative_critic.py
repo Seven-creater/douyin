@@ -134,10 +134,13 @@ NARRATIVE_CRITIC_PROMPT = """你是可审计的 Narrative Critic。请只观看�
  "issues":[{"type":"entity_switch|causal_order|missing_resolution|subtitle_timing|dialogue_cut",
             "slot_idx":0,"evidence":"具体可见现象"}],
  "patches":[{"op":"replace","path":"/slots/0/source","value":{},"reason":"证据关系"}],
+ "re_search":[{"slot_idx":0,"reason":"该槽画面不支持其叙事需求（具体断点）","need_hint":"改写后的检索需求"}],
  "verdict":"一句话结论"}
 
 五个问题依次为：{questions}
 只允许替换已有槽的 source/status/reason/target_interval。不能创造事件、对白或素材。
+若某槽画面不支持其叙事需求且你无法直接给出替代素材，用 re_search 指令描述断点与
+改写后的检索需求——不要自己编造 source。
 
 【Narrative Program】{narrative}
 【Story Plan】{story_plan}
@@ -162,6 +165,14 @@ def parse_narrative_critique(raw: str) -> dict | None:
     value["comprehension"] = score_comprehension_answers(value["answers"])
     value["patches"] = [patch for patch in value.get("patches") or []
                         if isinstance(patch, dict)]
+    # P3 重搜指令通道：{slot_idx, reason, need_hint?}，槽号必须是整数下标
+    value["re_search"] = [
+        {"slot_idx": int(directive["slot_idx"]),
+         "reason": str(directive.get("reason") or ""),
+         "need_hint": str(directive.get("need_hint") or "") or None}
+        for directive in value.get("re_search") or []
+        if isinstance(directive, dict)
+        and str(directive.get("slot_idx", "")).lstrip("-").isdigit()]
     return value
 
 
@@ -185,7 +196,7 @@ def run_narrative_critic(video, narrative: dict, story_plan: dict, *, runner) ->
             "answers": [], "comprehension": score_comprehension_answers([]),
             "issues": [{"type": "critic_parse_failed", "slot_idx": None,
                         "evidence": "Narrative Critic JSON parse failed"}],
-            "patches": [], "verdict": "critic parse failed",
+            "patches": [], "re_search": [], "verdict": "critic parse failed",
             "raw_head": answer.text[:300],
         }
     result["elapsed_s"] = answer.elapsed_s
