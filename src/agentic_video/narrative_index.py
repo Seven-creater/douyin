@@ -445,12 +445,19 @@ def parse_type_facets(raw: str, *, window_start: float, window_end: float,
             if not isinstance(value, list) or len(value) != 2:
                 return None
             try:
-                left = float(value[0]) + window_start
-                right = float(value[1]) + window_start
+                raw_left, raw_right = float(value[0]), float(value[1])
             except (TypeError, ValueError):
                 return None
-            left = max(window_start, min(window_end, left))
-            right = max(window_start, min(window_end, right))
+            # 时间基自动判别（2026-09-10 试点实测：模型不总守"片段内 0 起算"——
+            # 窗 0 返回电影坐标 [165,210] 被当切片坐标 +165 后夹成零长度全灭）：
+            # 区间本就落在电影窗内 → 视为电影坐标；否则按切片坐标归一（H1 同款坑）
+            if window_start - 5.0 <= raw_left and raw_right <= window_end + 5.0 \
+                    and raw_right > raw_left:
+                offset = 0.0
+            else:
+                offset = window_start
+            left = max(window_start, min(window_end, raw_left + offset))
+            right = max(window_start, min(window_end, raw_right + offset))
             if right <= left:
                 return None
             return [round(left, 3), round(right, 3)]

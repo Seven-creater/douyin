@@ -53,6 +53,17 @@ def test_parse_type_facets_normalizes_clip_time_to_movie_axis():
     assert facet["status"] == "supported" and facet["registry_known"] is True
 
 
+def test_parse_type_facets_detects_movie_timebase_answers():
+    """2026-09-10 试点实测：模型有时直接回电影坐标（[165,210] 而窗正是
+    165-210s）——不得再 +window_start 夹成零长度。"""
+    raw = _facet_raw(apply_interval=[165.0, 210.0],
+                     evidence_interval=[165.0, 210.0])
+    parsed = parse_type_facets(raw, window_start=165.0, window_end=210.0,
+                               known_entities={"e0"})
+    facet = parsed["facets"][0]
+    assert facet["apply_interval"] == [165.0, 210.0]      # 电影坐标原样保留
+
+
 def test_parse_type_facets_drops_junk_and_marks_unknown_entities():
     raw = json.dumps({"facets": [
         {"dimension": "rescue_scene", "value": "救助", "apply_interval": [0, 5]},   # 非库维度
