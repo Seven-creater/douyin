@@ -79,3 +79,21 @@ narrative 精化窗近零时长+跨轮无去重；缓存 JSON 读无容错+写�
 2. critic 类组件的幻觉有系统性（两次实证），一律要客观复核兜底；
 3. 时间坐标换算是本项目事故密度最高的面（H1/H4/M8 三个独立实例），任何"窗口/切片→
    全片"的数据回流都要显式 offset 校验和测试。
+
+## 修复回填（2026-09-10 同日，c7bdc95..b61c3c9）
+
+H1/H2/H3/H4/H5/H6 + M4 全部修复并验证：
+
+| 项 | 修复 | 验证 |
+|---|---|---|
+| H1 | parse_window_annotations 加 time_offset_s：模型对白 +窗口偏移归一电影轴并夹窗口范围；build_index merge_dialogue——ASR 时间戳为准、模型补翻译（≥50% 重叠才采）、空数组不再覆盖真值；存量数据 coord_system 自动迁移（+窗口起点，立即落盘） | 单测 3 条（偏移/夹界/迁移，3700s 窗口场景）；**正在跑的任务的 13+ 旧镜头由迁移兜底** |
+| H2 | renderer 弃用 escape_drawtext，改 drawtext_text_value（单引号包裹+' 关-转-开 注入+expansion=none） | 本地 ffmpeg 实测撇号/百分号/冒号/逗号全过 |
+| H3 | render_cache_key（recipe/theme/槽位/选材/画布/叙事 sha256），rendered.mp4 存在但键失配 → 重渲覆盖 | 单测：theme/画布/模式四键互异 |
+| H4 | segment_filter 按 op∩slot 求交：eq 加 enable=between 局部窗口；setpts/scale/tpad 无 timeline 支持（ffmpeg 实测报错证实）→ 部分覆盖跳过并记 partial_interval_skipped 进 render_manifest | 单测 2 条（整段/部分覆盖两态） |
+| H5 | narrative_annotations 与 attach_transcript 改 tmp+os.replace 原子写；损坏文件明确报错（提示备份恢复而非静默重标） | 单测（两写无 .tmp 残留） |
+| H6 | 初始窗行补窗口边界；越窗弃时刻操作：区间=窗口边界、status=uncertain、time_source=window_bounds，不再钉 t=0 伪装 supported | 单测（无 task 行的 None 时刻场景） |
+| M4 | _validated_gpu_spec：只允许 2/4 张不重复数字卡号，尾逗号/空白容忍归一，其余 SystemExit | 单测 8 用例 |
+
+回归：**311 passed / 0 failed**（含之前 4 个本地 cv2 环境挂——装 opencv-python-headless 后转绿）。
+服务器已 ff-only 拉到 b61c3c9；正在跑的标注进程不受影响（模块已加载），其存量旧坐标数据由
+coord_system 迁移在下次加载时自动归一。残留待办：M1/M2/M3 等 9 条中危未修（见上文处置建议）。
