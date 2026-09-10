@@ -393,8 +393,177 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
     return output_path
 
 
-def run_narrative_index(cfg, source: str, *, video: Path | None = None,
-                        force: bool = False, transcriber=None) -> Path:
+FACET_PROMPT = """你是电影素材类型维度标注 Agent。观看 {start:g}~{end:g} 秒片段，按维度
+age_appearance / location / era / interaction 提取结构化 facet。只输出 JSON：
+{{"facets":[
+ {{"dimension":"age_appearance","entity_id":"实体ID","value":"幼儿/儿童/少年/青年/成年/老年/uncertain",
+   "apply_interval":[0.0,1.0],"evidence_interval":[0.0,1.0],"evidence_source":"frame","confidence":0.0}},
+ {{"dimension":"location","value":"具体地点或场景类型（雪野/室内/城镇/列车…）",
+   "apply_interval":[0.0,1.0],"evidence_interval":[0.0,1.0],"evidence_source":"frame","confidence":0.0}},
+ {{"dimension":"era","value":"大正/近代/现代/uncertain",
+   "apply_interval":[0.0,1.0],"evidence_interval":[0.0,1.0],"evidence_source":"frame","confidence":0.0}},
+ {{"dimension":"interaction","a_entity_id":"实体A","b_entity_id":"实体B",
+   "relation":"保护|对抗|师徒|亲情|同伴|救助|陌生",
+   "apply_interval":[0.0,1.0],"evidence_interval":[0.0,1.0],"evidence_source":"frame","confidence":0.0}}
+]}}
+规则：
+- 时间用片段内秒数（0 起算）。apply_interval=该 facet 在片段内成立的区间；
+  evidence_interval=支撑它最直接的可见证据区间（如挡刀动作那两秒）。
+- 每条 facet 必须绑定到具体实体（interaction 绑实体对）；location/era 可无实体。
+- 只报告可见内容，不得根据 IP 常识补写；不确定的维度整条不输出。
+- 实体必须优先来自【实体注册表】；画面中出现注册表外人物才新建 ID（visible_ 前缀）。
+【实体注册表】{registry}
+"""
+
+FACET_PROMPT_VERSION = "facet_v1"
+
+
+def parse_type_facets(raw: str, *, window_start: float, window_end: float,
+                      known_entities: set[str]) -> dict:
+    """解析 facet 答案：切片坐标归一回电影轴并夹到窗口内，非法条目丢弃。
+
+    facet 的确认状态由证据推导：有 evidence_source 且 confidence>=0.5 为
+    supported，否则 uncertain——窗口级印象不允许直接冒充已确认事实。
+    """
+    from src.agentic_video.type_dimensions import (INTERACTION_RELATIONS,
+                                                   LIBRARY_FACET_DIMENSIONS)
+    block = extract_json_block(raw)
+    try:
+        payload = json.loads(block) if block else {}
+    except ValueError:
+        payload = {}
+    items = payload.get("facets") if isinstance(payload, dict) else None
+    facets = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        dimension = str(item.get("dimension") or "")
+        if dimension not in LIBRARY_FACET_DIMENSIONS:
+            continue
+        def _interval(key: str) -> list[float] | None:
+            value = item.get(key)
+            if not isinstance(value, list) or len(value) != 2:
+                return None
+            try:
+                left = float(value[0]) + window_start
+                right = float(value[1]) + window_start
+            except (TypeError, ValueError):
+                return None
+            left = max(window_start, min(window_end, left))
+            right = max(window_start, min(window_end, right))
+            if right <= left:
+                return None
+            return [round(left, 3), round(right, 3)]
+        apply_interval = _interval("apply_interval")
+        evidence_interval = _interval("evidence_interval") or apply_interval
+        if apply_interval is None:
+            continue
+        try:
+            confidence = min(1.0, max(0.0, float(item.get("confidence", 0))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        entry = {
+            "dimension": dimension,
+            "apply_interval": apply_interval,
+            "evidence_interval": evidence_interval,
+            "evidence_source": str(item.get("evidence_source") or "") or None,
+            "confidence": confidence,
+            "status": "supported" if confidence >= 0.5 and item.get("evidence_source")
+                      else "uncertain",
+        }
+        if dimension == "interaction":
+            a_id, b_id = str(item.get("a_entity_id") or ""), str(item.get("b_entity_id") or "")
+            relation = str(item.get("relation") or "")
+            if not a_id or not b_id or a_id == b_id or relation not in INTERACTION_RELATIONS:
+                continue
+            entry.update({"a_entity_id": a_id, "b_entity_id": b_id, "relation": relation})
+        else:
+            value = str(item.get("value") or "").strip()
+            if not value or value == "uncertain":
+                continue
+            entry["value"] = value[:24]
+            if item.get("entity_id"):
+                entry["entity_id"] = str(item["entity_id"])
+        for key in ("entity_id", "a_entity_id", "b_entity_id"):
+            if key in entry:
+                entry["registry_known"] = entry[key] in known_entities
+                break
+        facets.append(entry)
+    return {"facets": facets, "parse_status": "json" if block else "failed"}
+
+
+def run_type_facets(cfg, source: str, *, windows: list[int] | None = None,
+                    force: bool = False, runner=None) -> Path:
+    """库侧类型维度补充标注（加性：不触碰既有叙事标注/索引）。
+
+    断点续跑 + 依赖缓存键（源哈希+窗口+维度+提示词版本+模型指纹）：维度集或
+    提示词变了，对应窗口自动重提；windows 参数用于试点（如 3-5 窗先验质量）。
+    """
+    from src.agentic_video.narrative_agent import _omni_signature, _stable_hash
+    from src.agentic_video.recipe_v2 import sha256_file
+    from src.agentic_video.type_dimensions import LIBRARY_FACET_DIMENSIONS
+
+    result_path = cfg.paths.library_dir / "shots" / f"{source}__narrative" / "result.json"
+    if not result_path.exists():
+        raise FileNotFoundError(f"缺叙事索引镜头产物：{result_path}（先跑 index --profile narrative）")
+    output_path = result_path.parent / "type_facets.json"
+    saved = {"windows": {}, "completed": {}}
+    if output_path.exists() and not force:
+        try:
+            saved = json.loads(output_path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise RuntimeError(f"facet 状态文件损坏：{output_path}") from exc
+    envelope = json.loads(result_path.read_text(encoding="utf-8"))
+    shots = envelope["output"]["shots"]
+    video = Path(envelope["output"]["video"])
+    video_sha = sha256_file(video)
+    omni_sig = _omni_signature(cfg)
+
+    annotations_path = result_path.parent / "narrative_annotations.json"
+    known_entities: set[str] = set()
+    if annotations_path.exists():
+        annotations = json.loads(annotations_path.read_text(encoding="utf-8"))
+        for annotation in (annotations.get("shots") or {}).values():
+            known_entities.update(str(value) for value in annotation.get("entity_ids") or [])
+    registry = [{"entity_id": entity_id} for entity_id in sorted(known_entities)][:60]
+
+    by_window: dict[int, list[dict]] = {}
+    for shot in shots:
+        by_window.setdefault(int(shot["window_idx"]), []).append(shot)
+    targets = sorted(by_window) if windows is None else \
+        sorted(idx for idx in windows if idx in by_window)
+    for window_idx in targets:
+        window_shots = by_window[window_idx]
+        start = min(float(row["start_s"]) for row in window_shots)
+        end = max(float(row["end_s"]) for row in window_shots)
+        key = _stable_hash({
+            "schema": "type_facets_v1", "video_sha": video_sha,
+            "window": [start, end], "dimensions": LIBRARY_FACET_DIMENSIONS,
+            "prompt_version": FACET_PROMPT_VERSION,
+            "prompt_sha": _stable_hash(FACET_PROMPT), **omni_sig})
+        cached = saved["completed"].get(str(window_idx))
+        if cached == key and not force:
+            continue
+        if runner is None:
+            from src.perception.omni_runner import OmniRunner
+            runner = OmniRunner(cfg.perception.get("omni") or {})
+        prompt = FACET_PROMPT.format(
+            start=start, end=end,
+            registry=json.dumps(registry, ensure_ascii=False)[:4000])
+        clip_dir = result_path.parent / "facet_clips" / f"{window_idx:03d}"
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        answer = runner.watch(video, prompt, start_s=start, end_s=end, clip_dir=clip_dir,
+                              max_new_tokens=2048, duration_s=end - start)
+        parsed = parse_type_facets(answer.text, window_start=start, window_end=end,
+                                   known_entities=known_entities)
+        parsed["cache_key"] = key
+        saved["windows"][str(window_idx)] = parsed
+        saved["completed"][str(window_idx)] = key
+        _atomic_write_json(output_path, saved)
+    return output_path
+
+
+def run_narrative_index(cfg, source: str, *, video: Path | None = None,                        force: bool = False, transcriber=None) -> Path:
     video = resolve_source_video(cfg, source, video)
     index_cfg = cfg.library.get("narrative_index") or {}
     output_dir = cfg.paths.library_dir / "sources" / source

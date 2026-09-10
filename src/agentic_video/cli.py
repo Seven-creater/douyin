@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--skip-embeddings", action="store_true")
     index.add_argument("--skip-annotations", action="store_true")
 
+    facets = sub.add_parser(
+        "facets", help="type-dimension facet annotation for a narrative library source")
+    facets.add_argument("--source", default="guimie")
+    facets.add_argument("--windows", default=None,
+                        help="comma-separated window indexes for a pilot run, e.g. 0,1,2")
+    facets.add_argument("--force", action="store_true")
+
     decompose = sub.add_parser("decompose", help="reference video to Recipe v2")
     decompose.add_argument("--reference", required=True)
     decompose.add_argument("--output", required=True)
@@ -188,6 +195,21 @@ def _index(args, cfg) -> dict:
             "index": str(index_path) if index_path else None}
 
 
+def _facets(args, cfg) -> dict:
+    from src.agentic_video.narrative_index import run_type_facets
+
+    windows = None
+    if args.windows:
+        windows = [int(value) for value in str(args.windows).split(",") if value.strip()]
+    path = run_type_facets(cfg, args.source, windows=windows, force=args.force)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    n_facets = sum(len((row or {}).get("facets") or [])
+                   for row in (state.get("windows") or {}).values())
+    return {"facets": str(path),
+            "windows_done": len(state.get("completed") or {}),
+            "facets_total": n_facets}
+
+
 def _decompose(args, cfg) -> dict:
     from src.agentic_video.pipeline import (run_decomposition,
                                              run_narrative_decomposition)
@@ -285,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="agentic_video")
     handlers = {"discover": _discover, "benchmark": _benchmark,
-                "index": _index, "decompose": _decompose,
+                "index": _index, "facets": _facets, "decompose": _decompose,
                 "render": _render, "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
