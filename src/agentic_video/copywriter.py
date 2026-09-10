@@ -59,8 +59,10 @@ def _ask_llm(runner, story_plan: dict) -> dict | None:
     slot_lines = []
     for slot in story_plan.get("slots") or []:
         source = slot.get("source") or {}
+        entity_ids = source.get("entity_ids") or []
+        entities = "、".join(entity_ids) if entity_ids else "未知"
         slot_lines.append(f"- {slot.get('role')}：{str(source.get('caption') or '')[:60]}"
-                          f"（人物：{'、'.join(source.get("entity_ids") or []) or '未知'}）")
+                          f"（人物：{entities}）")
     prompt = (
         "你是抖音情感叙事爆款文案师。参考表达公式：开头一句颠覆常识的断言钩子"
         "（人们常常觉得…），中段画面实证，结尾成就卡连发后抛一句反转/留白短句。\n"
