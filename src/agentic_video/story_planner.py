@@ -15,6 +15,143 @@ _EXPAND_ROLES = ("conflict", "climax", "resolution")
 # 旧 45..75 把整类模板挡在门外。上界 75 保持不动（全部现有测试时长都在区间内）。
 STORY_MIN_TARGET_DURATION_S = 20.0
 STORY_MAX_TARGET_DURATION_S = 75.0
+# 必选弧角色（V1 P2 红线：必选槽缺证据 = unsupported，不作为成功交付）；
+# context/choice/consequence 为可选槽，缺失按模板记录后跳过。
+REQUIRED_ROLES = frozenset({"hook", "conflict", "climax", "resolution"})
+
+# 角色级证据规格模板：need 是观众必须获得的信息，must_have/must_not 是
+# 可核验的证据约束——检索和 P3 验证器都以这里为准，角色标签本身不是需求。
+_ROLE_NEED_TEMPLATES = {
+    "hook": {
+        "need": "开场呈现主角的处境或未被解决的表达张力，让观众想看后续",
+        "must_have": ["主角在场的可见处境"],
+        "must_not": ["与主角无关的纯环境空镜"],
+        "evidence_mode": "visual",
+    },
+    "context": {
+        "need": "让观众理解主角与关键他人/环境的关系背景",
+        "must_have": ["主角与至少一个关键对象同框或明确指向"],
+        "must_not": ["完全不含主角的镜头"],
+        "evidence_mode": "visual",
+    },
+    "conflict": {
+        "need": "呈现主角面对的问题具象化为可见的冲突或危险",
+        "must_have": ["冲突/危险可见", "主角在场"],
+        "must_not": ["主角不在场的纯环境镜头"],
+        "evidence_mode": "visual",
+    },
+    "choice": {
+        "need": "呈现主角做出关键选择或行动决断的可见过程",
+        "must_have": ["主角的行动可辨认"],
+        "must_not": ["只有他人的行动"],
+        "evidence_mode": "visual",
+    },
+    "climax": {
+        "need": "呈现主角的关键行动与情绪峰值",
+        "must_have": ["高潮动作或情绪峰值画面", "主角在场"],
+        "must_not": ["平淡过场"],
+        "evidence_mode": "visual",
+    },
+    "consequence": {
+        "need": "呈现行动带来的直接后果状态",
+        "must_have": ["结果状态可辨认（伤势/局势/他人反应等）"],
+        "must_not": ["与前面行动无关的新场景"],
+        "evidence_mode": "both",
+    },
+    "resolution": {
+        "need": "呈现情绪收束与最终状态",
+        "must_have": ["收束性画面（和解/启程/定格等）"],
+        "must_not": ["悬而未决的新冲突"],
+        "evidence_mode": "both",
+    },
+}
+
+
+def _usable(value: str) -> str | None:
+    """六问字段可用性：unknown/not_applicable/空 都不是可引用的内容。"""
+    text = str(value or "").strip()
+    return text if text and text not in {"unknown", "not_applicable", "uncertain"} else None
+
+
+def slot_need_spec(narrative: dict, segment: dict, idx: int) -> dict:
+    """把参考叙事弧段 + 六问 intent 编译成证据规格（确定性，LLM 润色留作后续）。
+
+    need 是**目标成片**的需求，不复制参考片具体事实：可迁移的是"处境→冲突→
+    行动→结果"的表达结构，目标结果必须由目标素材支持（"全国冠军"≠自动迁移
+    为"获得认可"）。entity_bindings 记录参考侧实体到槽位代号，库侧匹配靠
+    entity_names 语义；相邻槽共享绑定代号时 depends_on 生效（路径硬约束）。
+    """
+    intent = narrative.get("intent") or {}
+    role = segment["role"]
+    template = dict(_ROLE_NEED_TEMPLATES[role])
+    protagonist = _usable(intent.get("protagonist"))
+    problem = _usable(intent.get("problem"))
+    motivation = _usable(intent.get("motivation"))
+    change = _usable(intent.get("change"))
+    outcome = _usable(intent.get("outcome"))
+    need = template["need"]
+    if role == "hook" and (protagonist or problem):
+        need = f"开场呈现主角{('（' + protagonist + '）') if protagonist else ''}" \
+               f"的处境{('：' + problem) if problem else ''}，让观众想看后续"
+    elif role == "conflict" and problem:
+        need = f"呈现主角面对的问题具象化为可见冲突：{problem}"
+    elif role == "climax" and (motivation or problem):
+        need = ("呈现主角的关键行动与情绪峰值"
+                + (f"（动机：{motivation}）" if motivation else f"（面对：{problem}）"))
+    elif role == "resolution" and (change or outcome):
+        need = ("呈现情绪收束与最终状态"
+                + (f"（变化：{change}）" if change else "")
+                + (f"（结果：{outcome}）" if outcome else ""))
+    entity_by_id = {row["id"]: row for row in narrative.get("entities") or []}
+    bindings = {}
+    for event_id in segment.get("event_ids") or []:
+        event = next((row for row in narrative.get("events") or []
+                      if row["id"] == event_id), None) or {}
+        for entity_id in event.get("participants") or []:
+            entity = entity_by_id.get(entity_id) or {}
+            if entity_id in {v["reference_entity_id"] for v in bindings.values()}:
+                continue
+            key = "A" if "A" not in bindings else "B" if "B" not in bindings else None
+            if key is None:                                    # 首版只绑 A/B 双主角
+                break
+            bindings[key] = {
+                "reference_entity_id": entity_id,
+                "reference_name": str(entity.get("name_or_role") or entity_id),
+                "library_hint": str(entity.get("name_or_role") or "") or None,
+            }
+    spec = {
+        "function": str(segment.get("function") or f"{role} 段在整条表达中的作用"),
+        "need": need,
+        "entity_bindings": bindings,
+        "must_have": template["must_have"],
+        "must_not": template["must_not"],
+        "evidence_mode": template["evidence_mode"],
+        "required": role in REQUIRED_ROLES,
+        "depends_on": None,
+    }
+    return spec
+
+
+def _link_depends_on(specs: list[dict]) -> None:
+    """相邻槽共享实体绑定代号 → 后槽 depends_on 前槽（路径硬连续约束）。"""
+    for idx in range(1, len(specs)):
+        previous_keys = set(specs[idx - 1].get("entity_bindings") or {})
+        current_keys = set(specs[idx].get("entity_bindings") or {})
+        if previous_keys & current_keys:
+            specs[idx]["depends_on"] = idx - 1
+
+
+def _hard_continuity(specs: list[dict]) -> list[bool]:
+    """edge[i] = 组 i 与组 i-1 之间是否要求实体连续（可行性约束，非加分）。"""
+    return [idx > 0 and specs[idx].get("depends_on") == idx - 1
+            for idx in range(len(specs))]
+
+
+def _build_specs(narrative: dict) -> list[dict]:
+    specs = [slot_need_spec(narrative, segment, idx)
+             for idx, segment in enumerate(narrative.get("arc") or [])]
+    _link_depends_on(specs)
+    return specs
 
 
 def _transition_score(left: dict, right: dict) -> float:
@@ -34,34 +171,72 @@ def _transition_score(left: dict, right: dict) -> float:
     return score
 
 
-def rank_story_path(candidate_groups: list[list[dict]]) -> list[dict]:
-    """Viterbi-like path ranking with explicit entity/time continuity bonuses."""
+def rank_story_path(candidate_groups: list[list[dict]],
+                    hard_continuity: list[bool] | None = None) -> list[dict | None]:
+    """Viterbi-like path ranking with explicit entity/time continuity bonuses.
+
+    hard_continuity[i] 为真时，组 i-1 → i 的转移要求两组实体集有交集——这是
+    可行性约束（非法转移不进图），不是加分项；某组全部候选都不可达时该槽
+    返回 None（由上层按必选/可选决定 unsupported 或跳过），链条在该槽重启：
+    重启组的候选以链头身份入图（parent=None），不再受与前组的连续约束。
+    """
     if not candidate_groups or any(not group for group in candidate_groups):
         return []
-    scores = [{idx: float(row.get("semantic_score", row.get("score", 0)))
-               for idx, row in enumerate(candidate_groups[0])}]
+    hard = list(hard_continuity or [False] * len(candidate_groups))
+
+    def _self_score(row: dict) -> float:
+        return float(row.get("semantic_score", row.get("score", 0)))
+
+    scores: list[dict[int, float]] = [{idx: _self_score(row)
+                                       for idx, row in enumerate(candidate_groups[0])}]
+    # parents[g][idx] = 前驱下标；None = 链头（首组或断链重启组）
     parents: list[dict[int, int | None]] = [{idx: None for idx in scores[0]}]
     for group_idx in range(1, len(candidate_groups)):
         group, previous = candidate_groups[group_idx], candidate_groups[group_idx - 1]
+        previous_alive = bool(scores[-1])                     # 前组是否断链
         current_scores: dict[int, float] = {}
-        current_parents: dict[int, int] = {}
+        current_parents: dict[int, int | None] = {}
         for idx, row in enumerate(group):
-            options = [(scores[-1][prev_idx] + _transition_score(prev, row), prev_idx)
-                       for prev_idx, prev in enumerate(previous)]
+            if previous_alive:
+                options: list[tuple[float, int]] = []
+                for prev_idx, prev_score in scores[-1].items():
+                    prev = previous[prev_idx]
+                    if hard[group_idx] and not (set(prev.get("entity_ids") or [])
+                                                & set(row.get("entity_ids") or [])):
+                        continue                               # 非法转移：不进图
+                    options.append((prev_score + _transition_score(prev, row), prev_idx))
+                if not options:
+                    continue                                   # 该候选不可达
+            else:
+                options = [(0.0, -1)]                          # 重启：链头身份
             best_score, best_parent = max(options, key=lambda item: (item[0], -item[1]))
-            current_scores[idx] = best_score + float(row.get("semantic_score",
-                                                             row.get("score", 0)))
-            current_parents[idx] = best_parent
+            current_scores[idx] = best_score + _self_score(row)
+            current_parents[idx] = best_parent if best_parent >= 0 else None
         scores.append(current_scores)
         parents.append(current_parents)
-    cursor = max(scores[-1], key=lambda idx: (scores[-1][idx], -idx))
-    indexes = [cursor]
-    for group_idx in range(len(candidate_groups) - 1, 0, -1):
-        cursor = parents[group_idx][cursor]
-        indexes.append(cursor)
-    indexes.reverse()
-    return [deepcopy(candidate_groups[idx][row_idx])
-            for idx, row_idx in enumerate(indexes)]
+    path: list[dict | None] = [None] * len(candidate_groups)
+    cursor_group = len(candidate_groups) - 1
+    while cursor_group >= 0 and not scores[cursor_group]:
+        cursor_group -= 1                                     # 断链组：保持 None
+    if cursor_group < 0:
+        return path
+    cursor = max(scores[cursor_group], key=lambda idx: (scores[cursor_group][idx], -idx))
+    while cursor_group >= 0:
+        path[cursor_group] = deepcopy(candidate_groups[cursor_group][cursor])
+        parent = parents[cursor_group].get(cursor)
+        if parent is None:
+            # 链头：跳过紧邻的断链组，向前找上一段可达链
+            cursor_group -= 1
+            while cursor_group >= 0 and not scores[cursor_group]:
+                cursor_group -= 1
+            if cursor_group < 0:
+                break
+            cursor = max(scores[cursor_group],
+                         key=lambda idx: (scores[cursor_group][idx], -idx))
+            continue
+        cursor = parent
+        cursor_group -= 1
+    return path
 
 
 def _candidates_for_arc(segment: dict, source_rows: list[dict]) -> list[dict]:
@@ -136,6 +311,8 @@ def build_story_plan(narrative: dict, source_rows: list[dict], *, theme: str,
 def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                          theme: str, library: str, target_duration_s: float) -> dict:
     arc = narrative.get("arc") or []
+    specs = _build_specs(narrative)
+    hard = _hard_continuity(specs)
     path: list[dict | None] = [None] * len(candidate_groups)
     run_start = 0
     while run_start < len(candidate_groups):
@@ -145,7 +322,9 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
         run_end = run_start
         while run_end < len(candidate_groups) and candidate_groups[run_end]:
             run_end += 1
-        path[run_start:run_end] = rank_story_path(candidate_groups[run_start:run_end])
+        path[run_start:run_end] = rank_story_path(
+            candidate_groups[run_start:run_end],
+            hard_continuity=hard[run_start:run_end])
         run_start = run_end
     # 同源去重二 pass（2026-09-10 C3 核验：Viterbi 的 -0.30 同行惩罚只作用于相邻
     # 槽，7682 弧的 hook/conflict 引用同一旁白事件时隔槽撞段拦不住——短成片里
@@ -222,6 +401,8 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                        else "uncertain" if picked else "unsupported")
         reason = ("unexplained_entity_switch" if transition_reason == "unexplained"
                   else "" if picked else "library_insufficient")
+        if not picked and not specs[idx]["required"]:
+            reason = "optional_slot_no_evidence"           # 可选槽：记录后跳过
         slots.append({
             "slot_idx": idx, "role": segment["role"],
             "target_interval": [start, end],
@@ -232,17 +413,65 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "transition_reason": transition_reason,
             "source_interval_trimmed": source_trimmed,
             "dedup_conflict": bool(picked and row_use_counts.get(picked.get("row_idx"), 0) > 1),
+            "need_spec": specs[idx],
         })
+    # V1 P2 红线：必选槽 unsupported = 任务未完成，不作为成功成片交付；
+    # 缺口如实上报（P3 重搜会尝试补，补不上就以未达标收尾）。
+    required_unsupported = [slot["slot_idx"] for slot in slots
+                            if slot["status"] == "unsupported"
+                            and slot["need_spec"]["required"]]
     return {
         "story_plan_version": STORY_PLAN_VERSION, "theme": theme.strip(),
         "library": library, "target_duration_s": round(target_duration_s, 6),
         "reference_id": narrative["reference"]["id"], "slots": slots,
+        "required_unsupported": required_unsupported,
+        "plan_complete": not required_unsupported,
+        # 情绪峰值提示（参考弧 climax 段在参考时长中的比例）：P2 起透传给
+        # copywriter 对齐卡点连发，emotion_curve 首次有了消费者。
+        "emotion_peak_hint": _emotion_peak_hint(narrative),
     }
 
 
-def _arc_query(narrative: dict, segment: dict, theme: str) -> str:
+def _emotion_peak_hint(narrative: dict) -> dict | None:
+    curve = narrative.get("emotion_curve") or []
+    climax = next((row for row in narrative.get("arc") or []
+                   if row.get("role") == "climax"), None)
+    if climax:
+        events = [row for row in narrative.get("events") or []
+                  if row["id"] in set(climax.get("event_ids") or [])]
+        if events:
+            reference = narrative.get("reference") or {}
+            duration = float(reference.get("duration_s") or 0)
+            mid = sum(float(row["interval"][0]) for row in events) / len(events)
+            if duration > 0:
+                return {"source": "climax", "peak_ratio": round(mid / duration, 3)}
+    if curve:
+        peak = max(curve, key=lambda row: float(row.get("intensity", 0)))
+        reference = narrative.get("reference") or {}
+        duration = float(reference.get("duration_s") or 0)
+        if duration > 0:
+            mid = (float(peak["interval"][0]) + float(peak["interval"][1])) / 2
+            return {"source": "emotion_curve", "peak_ratio": round(mid / duration, 3)}
+    return None
+
+
+def _arc_query(narrative: dict, segment: dict, theme: str,
+               spec: dict | None = None) -> str:
+    """检索 query v3：叙事需求（观众要什么信息）优先于角色标签——裸角色匹配
+    只会召回"最燃镜头"而不是支持故事的证据。must_have/must_not 文本同入查询，
+    P3 验证器再逐条核证据（检索召回 + 事后验证双层把关）。"""
     event_by_id = {event["id"]: event for event in narrative.get("events") or []}
-    parts = [theme, f"叙事角色：{segment['role']}"]
+    parts = [theme]
+    if spec:
+        parts.append(f"叙事需求：{spec.get('need') or ''}")
+        parts.extend(f"需要：{item}" for item in spec.get("must_have") or [])
+        parts.extend(f"排除：{item}" for item in spec.get("must_not") or [])
+        hints = [binding.get("library_hint") for binding
+                 in (spec.get("entity_bindings") or {}).values()
+                 if binding.get("library_hint")]
+        if hints:
+            parts.append("人物：" + "、".join(hints[:3]))
+    parts.append(f"叙事角色：{segment['role']}")
     for event_id in segment.get("event_ids") or []:
         event = event_by_id.get(event_id) or {}
         parts.extend([str(event.get("action") or ""), str(event.get("state_before") or ""),
@@ -330,7 +559,9 @@ def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: st
     if not allowed:
         raise ValueError(f"source {library!r} has no rows outside the credits zone")
     arc = narrative.get("arc") or []
-    queries = [_arc_query(narrative, segment, theme) for segment in arc]
+    specs = _build_specs(narrative)
+    queries = [_arc_query(narrative, segment, theme, spec=spec)
+               for segment, spec in zip(arc, specs)]
     query_embeddings = E5Embedder(cfg.library.get("embed") or {}).embed(queries)
     candidate_groups = []
     compatible_roles = {

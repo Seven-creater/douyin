@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from src.agentic_video.narrative import ARC_ROLES
-from src.agentic_video.story_planner import (_expand_thin_arc, build_story_plan,
-                                             rank_story_path,
+from src.agentic_video.story_planner import (_arc_query, _build_specs,
+                                             _emotion_peak_hint,
+                                             _expand_thin_arc, _hard_continuity,
+                                             build_story_plan, rank_story_path,
+                                             slot_need_spec,
                                              story_plan_execution_inputs,
                                              validate_story_plan)
 from tests.test_agentic_narrative import valid_program
@@ -176,3 +179,95 @@ def test_execution_inputs_pass_copy_track_through():
                                                        "operations": []})
     assert asset_plan["copy_cues"] == plan["copy"]["cues"]
     assert asset_plan["audio_mode"] == "bgm"
+
+
+def test_slot_need_spec_compiles_six_questions_and_bindings():
+    """P2：need 是证据规格不是角色中文化——六问字段进 need，绑定从 participants
+    推导，unknown/not_applicable 不被当内容引用。"""
+    program = valid_program()
+    program["intent"].update({"protagonist": "救助者", "problem": "小猫被困",
+                              "motivation": "unknown", "outcome": "not_applicable"})
+    arc = program["arc"]
+    spec = slot_need_spec(program, arc[0], 0)
+    assert "救助者" in spec["need"] and "小猫被困" in spec["need"]
+    assert "unknown" not in spec["need"]                     # 未呈现的不引用
+    assert set(spec["entity_bindings"]) == {"A", "B"}         # person/cat 双绑定
+    assert spec["entity_bindings"]["A"]["reference_name"] == "救助者"
+    conflict_spec = slot_need_spec(program,
+                                   next(s for s in arc if s["role"] == "conflict"), 1)
+    assert conflict_spec["required"] is True
+    assert conflict_spec["must_have"] and conflict_spec["must_not"]
+    choice_spec = slot_need_spec(program,
+                                 next(s for s in arc if s["role"] == "choice"), 2)
+    assert choice_spec["required"] is False                   # 可选槽
+
+
+def test_adjacent_slots_share_bindings_depend_on_each_other():
+    program = valid_program()
+    specs = _build_specs(program)
+    for idx in range(1, len(specs)):
+        previous_keys = set(specs[idx - 1]["entity_bindings"])
+        if previous_keys & set(specs[idx]["entity_bindings"]):
+            assert specs[idx]["depends_on"] == idx - 1
+    assert _hard_continuity(specs)[0] is False                # 首槽无边
+
+
+def test_required_slot_unreachable_under_hard_continuity_is_unsupported():
+    """V1 P2 红线：共享实体绑定的相邻槽实体不相交 → 转移非法 → 必选槽
+    unsupported，plan 如实报未完成；绝不放宽约束凑满。"""
+    program = valid_program()
+    program["arc"] = [
+        {"role": "hook", "event_ids": ["e1"]},
+        {"role": "conflict", "event_ids": ["e2"]},            # 与 hook 共享 person/cat
+    ]
+    rows = [_candidate(0, "hook", "person", start=0, event_id="e1", score=0.9),
+            _candidate(1, "conflict", "stranger", start=4, event_id="e2", score=0.9)]
+    plan = build_story_plan(program, rows, theme="救助", library="guimie",
+                            target_duration_s=45.0)
+    conflict_slot = plan["slots"][1]
+    assert conflict_slot["status"] == "unsupported"
+    assert conflict_slot["reason"] in {"library_insufficient", "continuity_infeasible"}
+    assert plan["required_unsupported"] == [1]
+    assert plan["plan_complete"] is False
+    assert validate_story_plan(plan) == []                    # 未完成但结构合法
+
+
+def test_disjoint_entities_without_shared_bindings_still_allowed():
+    """绑定不重叠的相邻槽（如环境/反应镜头位）不要求实体连续——哪些位置必须
+    同主体由模板（绑定共享）决定，不是一刀切。"""
+    program = valid_program()
+    program["arc"] = [
+        {"role": "hook", "event_ids": ["e1"]},
+        {"role": "context", "event_ids": ["e2"]},              # 与 hook 共享绑定
+        {"role": "resolution", "event_ids": ["e3"]},
+    ]
+    program["entities"].append({"id": "stranger", "kind": "person",
+                                "name_or_role": "路人", "aliases": [],
+                                "evidence": [], "confidence": 0.9,
+                                "status": "uncertain"})
+    program["events"][2]["participants"] = []                  # 无参与实体（环境/收束镜头位）
+    rows = [_candidate(0, "hook", "person", start=0, event_id="e1", score=0.9),
+            _candidate(1, "context", "person", start=4, event_id="e2", score=0.9),
+            _candidate(2, "resolution", "stranger", start=9, event_id="e3", score=0.9)]
+    plan = build_story_plan(program, rows, theme="救助", library="guimie",
+                            target_duration_s=45.0)
+    assert plan["slots"][1]["status"] in {"supported", "uncertain"}
+    assert plan["required_unsupported"] == []
+
+
+def test_arc_query_v3_leads_with_need_not_bare_role():
+    program = valid_program()
+    program["intent"].update({"protagonist": "救助者", "problem": "小猫被困"})
+    spec = slot_need_spec(program, program["arc"][0], 0)
+    query = _arc_query(program, program["arc"][0], "救助", spec=spec)
+    assert query.index("叙事需求") < query.index("叙事角色")    # 需求优先于角色
+    assert "需要：" in query and "排除：" in query
+    assert "人物：" in query                                   # 绑定提示进查询
+
+
+def test_emotion_peak_hint_from_climax():
+    program = valid_program()
+    program["arc"].append({"role": "climax", "event_ids": ["e2"]})
+    hint = _emotion_peak_hint(program)
+    assert hint and hint["source"] == "climax"
+    assert 0.0 <= hint["peak_ratio"] <= 1.0
