@@ -92,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--target-duration", type=float, default=60.0)
     run.add_argument("--force", action="store_true")
     run.add_argument("--no-mask-backend", action="store_true")
+    run.add_argument("--no-verification", action="store_true",
+                     help="skip slot verification + layered re-search (P4 B-arm)")
     return parser
 
 
@@ -263,6 +265,8 @@ def _render(args, cfg) -> dict:
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
+    if args.no_verification:
+        cfg.library.setdefault("verification", {})["enabled"] = False
     final = run_full(cfg, Path(args.reference), theme=args.theme, library=args.library,
                      output_dir=Path(args.output), force=args.force,
                      use_mask_backend=not args.no_mask_backend,
