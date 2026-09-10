@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from src.agentic_video.long_video import (index_selected_windows, resolve_source_video,
@@ -10,6 +11,13 @@ from src.agentic_video.narrative import ARC_ROLES
 from src.template.schema import extract_json_block
 
 DEFAULT_QUOTAS = {"dialogue": 12, "action": 8, "emotion": 8, "context": 8}
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """tmp + os.replace 原子写：崩溃在半途不再截断既有状态（H5）。"""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _mean(rows: list[dict], key: str) -> float:
@@ -172,8 +180,7 @@ def attach_transcript_to_shots(result_path: Path, transcript: dict) -> Path:
                                        min(1.0, sum(d["end_s"] - d["start_s"]
                                                     for d in dialogue)
                                            / max(float(shot["duration_s"]), 0.001)))
-    Path(result_path).write_text(json.dumps(envelope, ensure_ascii=False, indent=2),
-                                 encoding="utf-8")
+    _atomic_write_json(Path(result_path), envelope)
     return Path(result_path)
 
 
@@ -230,7 +237,15 @@ def namespace_window_events(parsed: dict, window_idx: int) -> dict:
     return parsed
 
 
-def parse_window_annotations(raw: str, *, valid_shot_ids: set[int]) -> dict:
+def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
+                             time_offset_s: float = 0.0,
+                             clip_duration_s: float | None = None) -> dict:
+    """解析窗口标注答案。
+
+    H1：模型看的是从 time_offset_s 截出的切片（片段内 0 起算），其对白 start_s/end_s
+    必须 + time_offset_s 归一回电影时间轴，并夹到窗口范围内——否则窗口在 3700s 时，
+    下游会把 12.5s 当电影坐标从片头切素材/排字幕。
+    """
     block = extract_json_block(raw)
     try:
         payload = json.loads(block) if block else {}
@@ -253,15 +268,20 @@ def parse_window_annotations(raw: str, *, valid_shot_ids: set[int]) -> dict:
             confidence = min(1.0, max(0.0, float(item.get("confidence", 0))))
         except (TypeError, ValueError):
             confidence = 0.0
+        window_end = (time_offset_s + clip_duration_s
+                      if clip_duration_s is not None else float("inf"))
         dialogue = []
         for line in item.get("dialogue") or []:
             if not isinstance(line, dict):
                 continue
             try:
-                start, end = float(line.get("start_s")), float(line.get("end_s"))
+                start = float(line.get("start_s")) + time_offset_s
+                end = float(line.get("end_s")) + time_offset_s
                 line_confidence = min(1.0, max(0.0, float(line.get("confidence", 0.5))))
             except (TypeError, ValueError):
                 continue
+            start = max(time_offset_s, min(window_end, start))
+            end = max(time_offset_s, min(window_end, end))
             if end <= start:
                 continue
             dialogue.append({
@@ -294,19 +314,42 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
     output_path = result_path.parent / "narrative_annotations.json"
     saved = {"shots": {}, "causal_links": [], "completed_windows": []}
     if output_path.exists() and not force:
-        saved = json.loads(output_path.read_text(encoding="utf-8"))
+        try:
+            saved = json.loads(output_path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise RuntimeError(
+                f"标注状态文件损坏：{output_path}（可能是历史非原子写遗留）。"
+                "请从备份恢复；删除重跑会全量重标 36 窗。") from exc
     envelope = json.loads(result_path.read_text(encoding="utf-8"))
     shots = envelope["output"]["shots"]
     video = Path(envelope["output"]["video"])
+    by_window: dict[int, list[dict]] = {}
+    for shot in shots:
+        by_window.setdefault(int(shot["window_idx"]), []).append(shot)
+    # 旧数据迁移（H1 存量）：修复前写入的对白是切片坐标（0 起算），
+    # 无 coord_system 标记——按各窗口起点统一 +offset 归一回电影轴
+    if saved.get("shots") and saved.get("coord_system") != "movie":
+        window_start = {str(row["shot_idx"]): min(float(r["start_s"])
+                                                  for r in window_shots)
+                        for window_shots in by_window.values() for row in window_shots}
+        for key, annotation in saved["shots"].items():
+            offset = window_start.get(str(key))
+            if offset is None:
+                continue
+            for line in annotation.get("dialogue") or []:
+                try:
+                    line["start_s"] = round(offset + float(line.get("start_s", 0)), 3)
+                    line["end_s"] = round(offset + float(line.get("end_s", 0)), 3)
+                except (TypeError, ValueError):
+                    continue
+        saved["coord_system"] = "movie"
+        _atomic_write_json(output_path, saved)      # 迁移立即落盘（纯加载也持久化）
     captions_path = result_path.parent / "captions.json"
     captions = (json.loads(captions_path.read_text(encoding="utf-8"))
                 if captions_path.exists() else {})
     if runner is None:
         from src.perception.omni_runner import OmniRunner
         runner = OmniRunner(cfg.perception.get("omni") or {})
-    by_window: dict[int, list[dict]] = {}
-    for shot in shots:
-        by_window.setdefault(int(shot["window_idx"]), []).append(shot)
     processed = 0
     for window_idx, window_shots in sorted(by_window.items()):
         if window_idx in saved.get("completed_windows", []) and not force:
@@ -330,14 +373,15 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
         answer = runner.watch(video, prompt, start_s=start, end_s=end, clip_dir=clip_dir,
                               max_new_tokens=3072, duration_s=end - start)
         parsed = parse_window_annotations(
-            answer.text, valid_shot_ids={int(row["shot_idx"]) for row in window_shots})
+            answer.text, valid_shot_ids={int(row["shot_idx"]) for row in window_shots},
+            time_offset_s=start, clip_duration_s=end - start)
         parsed = namespace_window_events(parsed, window_idx)
         saved.setdefault("shots", {}).update(parsed["shots"])
         saved.setdefault("causal_links", []).extend(parsed["causal_links"])
         saved.setdefault("completed_windows", []).append(window_idx)
         saved["completed_windows"] = sorted(set(saved["completed_windows"]))
-        output_path.write_text(json.dumps(saved, ensure_ascii=False, indent=2),
-                               encoding="utf-8")
+        saved["coord_system"] = "movie"
+        _atomic_write_json(output_path, saved)
         processed += 1
     return output_path
 

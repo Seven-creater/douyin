@@ -34,6 +34,40 @@ def is_junk_caption(text: str) -> bool:
     return any(k in (text or "") for k in JUNK_KEYWORDS)
 
 
+def merge_dialogue(asr: list[dict], model: list[dict]) -> list[dict]:
+    """ASR/模型对白合并（H1）：SenseVoice 时间戳（电影坐标）为准；
+    模型对白只用来补中文翻译/兜底——互相覆盖会把坐标错位或空数组抹掉真值。"""
+    if not asr:
+        return [dict(m) for m in model if isinstance(m, dict)]
+    candidates = [dict(m) for m in model
+                  if isinstance(m, dict)
+                  and isinstance(m.get("start_s"), (int, float))
+                  and isinstance(m.get("end_s"), (int, float))]
+    merged = []
+    for line in asr:
+        out = dict(line)
+        span = max(1e-6, float(out["end_s"]) - float(out["start_s"]))
+        best = None
+        for m in candidates:
+            overlap = (min(float(out["end_s"]), float(m["end_s"]))
+                       - max(float(out["start_s"]), float(m["start_s"])))
+            if overlap <= 0:
+                continue
+            ratio = overlap / span
+            if best is None or ratio > best[0]:
+                best = (ratio, m)
+        if best and best[0] >= 0.5 and str(best[1].get("translation_zh") or "") \
+                not in ("", "uncertain"):
+            out["translation_zh"] = best[1]["translation_zh"]
+            try:
+                out["confidence"] = round(max(float(out.get("confidence", 0)),
+                                              float(best[1].get("confidence", 0))), 3)
+            except (TypeError, ValueError):
+                pass
+        merged.append(out)
+    return merged
+
+
 class E5Embedder:
     """E5-Omni-7B 文本嵌入（caption 与 query 同一侧，cosine 可比）。"""
 
@@ -84,6 +118,8 @@ def collect_rows(cfg: AppConfig) -> list[dict]:
                 cap = FALLBACK_CAPTION
             annotation = annotations.get(str(s["shot_idx"]), {})
             row = {**s, **annotation, "caption": cap}
+            row["dialogue"] = merge_dialogue(s.get("dialogue") or [],
+                                             annotation.get("dialogue") or [])
             row["causal_predecessors"] = causal_predecessors.get(
                 str(row.get("event_id") or ""), [])
             dialogue_text = " ".join(

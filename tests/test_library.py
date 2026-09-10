@@ -110,3 +110,21 @@ def test_build_seg_cmd_pad_and_crop():
     cmd2 = build_seg_cmd(Path("a.mp4"), Path("o.mp4"), shot_start=0, shot_dur=9.0,
                          need_dur=3.0, crf=20)
     assert "tpad" not in " ".join(cmd2) and "-t 3" in " ".join(cmd2)
+
+
+def test_merge_dialogue_prefers_asr_timing_and_keeps_model_translation():
+    """H1 合并侧：ASR 时间戳为准；模型补翻译；模型空数组不再抹掉 ASR 真值。"""
+    from src.library.build_index import merge_dialogue
+
+    asr = [{"start_s": 10.0, "end_s": 12.0, "original": "走れ",
+            "translation_zh": "uncertain", "confidence": 0.7}]
+    model = [{"start_s": 10.2, "end_s": 12.1, "original": "走れ",
+              "translation_zh": "快跑！", "confidence": 0.9}]
+    merged = merge_dialogue(asr, model)
+    assert merged[0]["start_s"] == 10.0 and merged[0]["end_s"] == 12.0   # ASR 时间戳
+    assert merged[0]["translation_zh"] == "快跑！"                        # 模型翻译
+    assert merged[0]["confidence"] == 0.9
+    # 模型空数组（合法无对白）不能覆盖 ASR
+    assert merge_dialogue(asr, []) == asr
+    # 无 ASR 时用模型对白兜底
+    assert merge_dialogue([], model) == model
