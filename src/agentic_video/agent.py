@@ -149,6 +149,13 @@ def run_bounded_agent(cfg: AppConfig, vid: str, *, budget: AgentBudget | None = 
     aggregate_path = run_decompose(cfg, vid, force=force, runner=runner)
     aggregate = json.loads(Path(aggregate_path).read_text(encoding="utf-8"))
     initial_results = list(aggregate.get("results") or [])
+    # H6：初始窗行原本不带窗口边界，导致弃用时刻的操作被钉到 t=0——补上边界
+    plan_by_idx = {int(w["idx"]): w for w in aggregate.get("windows_plan") or []}
+    for row in initial_results:
+        window = plan_by_idx.get(int(row.get("idx", -1)))
+        if window is not None:
+            row["window"] = {"start": float(window["start"]),
+                             "end": float(window["end"])}
     all_results = list(initial_results)
     tool_calls = [{"tool": "omni_window", "window_idx": row.get("idx"),
                    "phase": "initial"} for row in initial_results]
@@ -242,22 +249,29 @@ def build_recipe_from_agent(cfg: AppConfig, vid: str, agent_result: dict,
     tracks = {track["id"]: track for track in recipe["tracks"]}
     seen: set[tuple] = set()
     for row in agent_result.get("results") or []:
-        task = row.get("task") or {}
+        task = row.get("task") or row.get("window") or {}
         for raw in answer_operations(row.get("answer")):
             reported_type = raw.get("op_type")
             op_type = reported_type if reported_type in OP_TYPES else "unknown_edit"
+            window_start = max(0.0, min(duration, float(task.get("start", 0.0))))
+            window_end = max(window_start, min(duration, float(task.get("end", duration))))
             event_t = raw.get("event_time_original_s")
-            if not isinstance(event_t, (int, float)):
-                event_t = float(task.get("start", 0))
-            event_t = min(duration, max(0.0, float(event_t)))
+            # H6：越窗自报时刻已被 parse_window_answer 置 None（防编造）。
+            # 此时不再钉到 t=0 假装 supported：区间用窗口边界、状态压 uncertain、
+            # 证据标注 time_source=window_bounds（时刻仅为区间中点，供排序/去重）。
+            anchored = isinstance(event_t, (int, float))
+            if anchored:
+                event_t = min(duration, max(0.0, float(event_t)))
+            else:
+                event_t = round((window_start + window_end) / 2, 6)
             interval = raw.get("interval_original_s")
             if not (isinstance(interval, list) and len(interval) == 2):
-                if op_type in POINT_OP_TYPES:
+                if op_type in POINT_OP_TYPES and anchored:
                     interval = [event_t, event_t]
                 else:
-                    start = float(task.get("start", max(0.0, event_t - 0.2)))
-                    end = float(task.get("end", min(duration, event_t + 0.2)))
-                    interval = [max(0.0, start), min(duration, max(end, start + 0.001))]
+                    start = window_start
+                    end = max(window_end, window_start + 0.001)
+                    interval = [max(0.0, start), min(duration, end)]
             interval = [round(max(0.0, float(interval[0])), 6),
                         round(min(duration, float(interval[1])), 6)]
             # Omni occasionally reports a layer operation at a single frame.
@@ -278,7 +292,7 @@ def build_recipe_from_agent(cfg: AppConfig, vid: str, agent_result: dict,
                 continue
             seen.add(key)
             confidence = min(1.0, max(0.0, float(raw.get("confidence", 0))))
-            if op_type == "unknown_edit" or confidence < 0.5:
+            if not anchored or op_type == "unknown_edit" or confidence < 0.5:
                 status = "uncertain"
             elif op_type in SUPPORTED_RENDER_OPS:
                 status = "supported"
@@ -286,12 +300,15 @@ def build_recipe_from_agent(cfg: AppConfig, vid: str, agent_result: dict,
                 status = "unsupported"
             track_id, track_type, z = _track_for_operation(op_type)
             tracks.setdefault(track_id, {"id": track_id, "type": track_type, "z": z})
+            params = {k: raw[k] for k in ("subject", "what_changed", "motion",
+                                          "direction", "flash") if k in raw}
+            if not anchored:
+                params["time_source"] = "window_bounds"
             recipe["operations"].append({
                 "id": f"op_{len(recipe['operations']):04d}", "type": op_type,
                 "interval": interval, "track_id": track_id, "inputs": [],
                 "depends_on": [],
-                "params": {k: raw[k] for k in ("subject", "what_changed", "motion",
-                                                 "direction", "flash") if k in raw},
+                "params": params,
                 "evidence": [{"source": row.get("probe") or "omni_window",
                               "window_idx": row.get("idx"), "timestamp_s": event_t,
                               "quote": str(raw.get("evidence_quote") or "")[:200]}],

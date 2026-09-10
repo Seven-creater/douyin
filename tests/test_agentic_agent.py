@@ -108,3 +108,37 @@ def test_budget_defaults_match_plan():
     assert AgentBudget().max_initial_windows == 48
     assert AgentBudget().max_rounds == 2
     assert AgentBudget().max_refinement_windows == 16
+
+
+def test_unanchored_operations_use_window_bounds_and_uncertain(tmp_path):
+    """H6：越窗弃用时刻的操作不再钉到 t=0 假装 supported——窗口区间+uncertain+time_source。"""
+    cfg = AppConfig(
+        wellbyte={}, ranking={}, download={}, perception={}, template={}, generation={},
+        logging_level="INFO", library={},
+        paths=PathsCfg(raw_dir=tmp_path / "raw", processed_dir=tmp_path / "processed",
+                       videos_dir=tmp_path / "videos", logs_dir=tmp_path / "logs",
+                       perception_dir=tmp_path / "perception",
+                       generation_dir=tmp_path / "generation",
+                       library_dir=tmp_path / "library"))
+    vid = "r6"
+    video = cfg.paths.videos_dir / vid / "video.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    inspect_dir = cfg.paths.perception_dir / vid / "inspect"
+    inspect_dir.mkdir(parents=True)
+    common.write_result_json(inspect_dir, tool="inspect", aweme_id=vid, params={},
+                             output={"duration_s": 4.0, "fps": 24.0})
+    # 初始窗行：无 task 键，answer 里 event_time_original_s=None（越窗被弃用）
+    result = {"results": [{
+        "idx": 0, "probe": "omni_window", "window": {"start": 3.4, "end": 4.0},
+        "answer": {"operations": [{
+            "op_type": "text_layer_animation", "event_time_original_s": None,
+            "confidence": 0.9, "what_changed": "text", "evidence_quote": "文字闪现",
+        }]},
+    }]}
+    recipe = build_recipe_from_agent(cfg, vid, result)
+    op = recipe["operations"][0]
+    assert op["interval"] == [3.4, 4.0]                  # 窗口边界，不是 [0, ...]
+    assert op["status"] == "uncertain"                   # 不再伪造 supported
+    assert op["params"]["time_source"] == "window_bounds"
+    assert validate_recipe_v2(recipe) == []
