@@ -70,3 +70,34 @@ def test_thin_reference_arc_never_renders_a_single_slot():
     assert roles == sorted(roles, key=order.get)
     assert all(slot["target_interval"][1] - slot["target_interval"][0] < 60.0
                for slot in plan["slots"])
+
+
+def _wide_candidate(idx: int, role: str, start: float) -> dict:
+    row = _candidate(idx, role, "person", start=start, event_id=f"e{idx}")
+    row.update({"source_end_s": start + 45, "duration_s": 45,
+                "dialogue": [
+                    {"start_s": start + 1, "end_s": start + 3,
+                     "original": "前", "translation_zh": "窗内的对白"},
+                    {"start_s": start + 38, "end_s": start + 40,
+                     "original": "後", "translation_zh": "会越界的对白"},
+                ]})
+    return row
+
+
+def test_oversized_event_is_trimmed_to_slot_not_dropped():
+    """2026-09-10 v4 黑屏：45s 合并段 + 越界对白被一票否决 → picked=None →
+    渲染器 0 segment 纯黑 60s。现在必须裁剪保槽，只留窗内完整对白。"""
+    program = valid_program()
+    program["arc"] = program["arc"][:3]                      # hook/conflict/choice
+    rows = [_wide_candidate(0, "hook", start=5040),
+            _wide_candidate(1, "conflict", start=5370),
+            _wide_candidate(2, "choice", start=7819)]
+    plan = build_story_plan(program, rows, theme="鬼灭高燃战斗", library="guimie",
+                            target_duration_s=60.0)
+    assert validate_story_plan(plan) == []
+    for slot in plan["slots"]:
+        source = slot["source"]
+        assert slot["status"] == "supported"                 # 不再一票否决
+        assert slot["source_interval_trimmed"] is True
+        assert source["end_s"] - source["start_s"] <= 20.0 + 1e-6
+        assert [line["translation_zh"] for line in source["dialogue"]] == ["窗内的对白"]

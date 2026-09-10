@@ -157,6 +157,19 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                                [float(line.get("start_s", source_start)) for line in dialogue])
             source_end = max([source_end] +
                              [float(line.get("end_s", source_end)) for line in dialogue])
+        # 槽预算装不下整个事件段时裁剪而非弃槽（2026-09-10 v4 黑屏事故）：
+        # 旧逻辑 dialogue_would_be_cut 一票否决把三个槽全判 uncertain → picked=None
+        # → 渲染器 0 segment 纯黑 60s。合并段以事件起点为锚截到预算，对白只保留
+        # 完整落在窗内的行（不截半句），裁剪信息记 source_interval_trimmed 供溯源。
+        slot_budget = end - start
+        source_trimmed = False
+        if picked and source_end - source_start > slot_budget + 1e-6:
+            source_end = source_start + slot_budget
+            source_trimmed = True
+        if picked:
+            dialogue = [line for line in dialogue
+                        if float(line.get("start_s", source_start)) >= source_start - 1e-6
+                        and float(line.get("end_s", source_end)) <= source_end + 1e-6]
         source = {
             "video": str((picked or {}).get("video") or ""),
             "video_stem": str((picked or {}).get("video_stem") or ""),
@@ -179,15 +192,9 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                 transition_reason = "causal_transition"
             else:
                 transition_reason = "unexplained"
-        dialogue_would_be_cut = any(
-            float(line.get("end_s", source_start)) > source_start + (end - start) + 1e-6
-            or float(line.get("start_s", source_start)) < source_start - 1e-6
-            for line in dialogue)
         slot_status = ("supported" if picked and transition_reason != "unexplained"
-                       and not dialogue_would_be_cut
                        else "uncertain" if picked else "unsupported")
-        reason = ("dialogue_would_be_cut" if dialogue_would_be_cut
-                  else "unexplained_entity_switch" if transition_reason == "unexplained"
+        reason = ("unexplained_entity_switch" if transition_reason == "unexplained"
                   else "" if picked else "library_insufficient")
         slots.append({
             "slot_idx": idx, "role": segment["role"],
@@ -197,6 +204,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "status": slot_status,
             "reason": reason,
             "transition_reason": transition_reason,
+            "source_interval_trimmed": source_trimmed,
         })
     return {
         "story_plan_version": STORY_PLAN_VERSION, "theme": theme.strip(),
