@@ -11,6 +11,10 @@ from src.agentic_video import zones
 STORY_PLAN_VERSION = "1.0"
 MIN_STORY_SLOTS = 3
 _EXPAND_ROLES = ("conflict", "climax", "resolution")
+# 目标时长界（2026-09-10 放宽下界 45→20）：7682 型情感叙事模板天然 20-35s，
+# 旧 45..75 把整类模板挡在门外。上界 75 保持不动（全部现有测试时长都在区间内）。
+STORY_MIN_TARGET_DURATION_S = 20.0
+STORY_MAX_TARGET_DURATION_S = 75.0
 
 
 def _transition_score(left: dict, right: dict) -> float:
@@ -116,8 +120,9 @@ def build_story_plan(narrative: dict, source_rows: list[dict], *, theme: str,
     errors = validate_narrative_program(narrative)
     if errors:
         raise ValueError("invalid Narrative Program: " + "; ".join(errors))
-    if not 45 <= target_duration_s <= 75:
-        raise ValueError("target_duration_s must be within 45..75")
+    if not STORY_MIN_TARGET_DURATION_S <= target_duration_s <= STORY_MAX_TARGET_DURATION_S:
+        raise ValueError(f"target_duration_s must be within "
+                         f"{STORY_MIN_TARGET_DURATION_S:g}..{STORY_MAX_TARGET_DURATION_S:g}")
     narrative, added_roles = _expand_thin_arc(narrative)
     arc = narrative.get("arc") or []
     candidate_groups = [_candidates_for_arc(segment, source_rows) for segment in arc]
@@ -142,6 +147,27 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             run_end += 1
         path[run_start:run_end] = rank_story_path(candidate_groups[run_start:run_end])
         run_start = run_end
+    # 同源去重二 pass（2026-09-10 C3 核验：Viterbi 的 -0.30 同行惩罚只作用于相邻
+    # 槽，7682 弧的 hook/conflict 引用同一旁白事件时隔槽撞段拦不住——短成片里
+    # 重复素材会直接复发"零剪辑"感）。重复时换组内次优未用候选，无替代保留并
+    # 标记 dedup_conflict 供报告溯源。
+    used_rows: set = set()
+    for idx, picked in enumerate(path):
+        if not picked or picked.get("row_idx") is None:
+            continue
+        if picked.get("row_idx") in used_rows:
+            replacement = next(
+                (row for row in candidate_groups[idx]
+                 if row.get("row_idx") is not None
+                 and row.get("row_idx") not in used_rows), None)
+            if replacement is not None:
+                path[idx] = replacement
+        used_rows.add(path[idx].get("row_idx"))
+    row_use_counts: dict = {}
+    for picked in path:
+        key = (picked or {}).get("row_idx")
+        if key is not None:
+            row_use_counts[key] = row_use_counts.get(key, 0) + 1
     slot_duration = target_duration_s / max(1, len(arc))
     slots = []
     for idx, segment in enumerate(arc):
@@ -205,6 +231,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "reason": reason,
             "transition_reason": transition_reason,
             "source_interval_trimmed": source_trimmed,
+            "dedup_conflict": bool(picked and row_use_counts.get(picked.get("row_idx"), 0) > 1),
         })
     return {
         "story_plan_version": STORY_PLAN_VERSION, "theme": theme.strip(),
@@ -220,7 +247,10 @@ def _arc_query(narrative: dict, segment: dict, theme: str) -> str:
         event = event_by_id.get(event_id) or {}
         parts.extend([str(event.get("action") or ""), str(event.get("state_before") or ""),
                       str(event.get("state_after") or "")])
-    return "；".join(part for part in parts if part and part != "uncertain")
+    # 过滤噪声 token：英文 uncertain + 中文「不确定」（2026-09-10 C4 核验：
+    # 7682 程序事件的 state 文本是中文「不确定」，直接拼进 query 污染检索语义）
+    return "；".join(part for part in parts
+                     if part and part not in {"uncertain", "不确定"})
 
 
 def merge_event_candidates(rows: list[dict]) -> list[dict]:
@@ -413,6 +443,9 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
         "plan_version": "narrative-1.0", "theme": story_plan["theme"],
         "library": story_plan["library"], "reference_id": story_plan["reference_id"],
         "narrative_program_required": True, "slots": slots,
+        # 文案轨（7682 型模板）：cues 已在成片时间轴，渲染时压制对白翻译字幕
+        "copy_cues": (story_plan.get("copy") or {}).get("cues"),
+        "audio_mode": (story_plan.get("copy") or {}).get("audio_mode"),
     }
     return asset_plan, retrieval
 
@@ -438,8 +471,9 @@ def validate_story_plan(plan: dict) -> list[str]:
     if not str(plan.get("library") or "").strip():
         errors.append("library missing")
     duration = float(plan.get("target_duration_s") or 0)
-    if not 45 <= duration <= 75:
-        errors.append("target_duration_s outside 45..75")
+    if not STORY_MIN_TARGET_DURATION_S <= duration <= STORY_MAX_TARGET_DURATION_S:
+        errors.append("target_duration_s outside "
+                      f"{STORY_MIN_TARGET_DURATION_S:g}..{STORY_MAX_TARGET_DURATION_S:g}")
     slots = plan.get("slots")
     if not isinstance(slots, list) or not slots:
         return errors + ["slots must be non-empty"]

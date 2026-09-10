@@ -190,25 +190,41 @@ def _srt_timestamp(seconds: float) -> str:
 
 
 def write_story_subtitles(asset_plan: dict, retrieval: list[dict], output: Path) -> Path:
-    """Map source-time dialogue translations into deterministic output-time SRT."""
+    """Map source-time dialogue translations into deterministic output-time SRT.
+
+    文案轨优先（2026-09-10 MVP）：asset_plan 带 copy_cues（7682 型模板的
+    钩子/成就卡/反转梗，已在成片时间轴）时直接写文案 SRT 并跳过对白映射——
+    该型片子的表达公式是"纯文案 + 纯 BGM"，电影对白翻译字幕会互相打架。
+    """
     by_slot = {int(row["slot_idx"]): row for row in retrieval}
     cues = []
-    for slot in asset_plan.get("slots") or []:
-        picked = (by_slot.get(int(slot["slot_idx"])) or {}).get("picked") or {}
-        source_start = float(picked.get("source_start_s") or 0)
-        target_start = float(slot["start_s"])
-        target_end = float(slot["end_s"])
-        for line in picked.get("dialogue") or []:
-            subtitle = str(line.get("translation_zh") or "").strip()
-            if not subtitle or subtitle == "uncertain":
-                continue
-            start = target_start + max(0.0, float(line.get("start_s") or source_start)
-                                       - source_start)
-            end = target_start + max(0.0, float(line.get("end_s") or source_start)
-                                     - source_start)
-            start, end = max(target_start, start), min(target_end, end)
-            if end - start >= 0.1:
+    total = max((float(slot.get("end_s") or 0)
+                 for slot in asset_plan.get("slots") or []), default=0.0)
+    copy_cues = asset_plan.get("copy_cues") or []
+    if copy_cues:
+        for cue in copy_cues:
+            start = max(0.0, float(cue.get("start_s") or 0))
+            end = min(total, float(cue.get("end_s") or start))
+            subtitle = str(cue.get("text") or "").strip()
+            if subtitle and end - start >= 0.1:
                 cues.append((start, end, subtitle.replace("\r", " ").replace("\n", " ")))
+    else:
+        for slot in asset_plan.get("slots") or []:
+            picked = (by_slot.get(int(slot["slot_idx"])) or {}).get("picked") or {}
+            source_start = float(picked.get("source_start_s") or 0)
+            target_start = float(slot["start_s"])
+            target_end = float(slot["end_s"])
+            for line in picked.get("dialogue") or []:
+                subtitle = str(line.get("translation_zh") or "").strip()
+                if not subtitle or subtitle == "uncertain":
+                    continue
+                start = target_start + max(0.0, float(line.get("start_s") or source_start)
+                                           - source_start)
+                end = target_start + max(0.0, float(line.get("end_s") or source_start)
+                                         - source_start)
+                start, end = max(target_start, start), min(target_end, end)
+                if end - start >= 0.1:
+                    cues.append((start, end, subtitle.replace("\r", " ").replace("\n", " ")))
     output = Path(output)
     lines = []
     for idx, (start, end, subtitle) in enumerate(sorted(cues), 1):
@@ -260,8 +276,11 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
     payload = json.dumps({
         "reference": recipe.get("reference"),
         "operations": recipe.get("operations"),
-        # 语义版本标记：执行策略变更（v2=叙事模式剔除参考文字层）后旧缓存失效
-        "exec_policy": 2,
+        # 语义版本标记：执行策略变更（v2=叙事模式剔除参考文字层；
+        # v3=文案轨 + BGM 换轨）后旧缓存失效
+        "exec_policy": 3,
+        "copy_cues": asset_plan.get("copy_cues"),
+        "audio_mode": asset_plan.get("audio_mode"),
         "theme": asset_plan.get("theme"),
         "slots": asset_plan.get("slots"),
         "picked": [[row.get("slot_idx"),
@@ -404,16 +423,35 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     reference = Path(recipe["reference"]["uri"])
     filter_chain = final_filter(execution_recipe, font=Path(cfg.generation.get("assemble", {}).get(
         "font", "")))
+    use_bgm = False
     if narrative_mode:
         subtitles = write_story_subtitles(asset_plan, retrieval, output_dir / "subtitles.srt")
         if subtitles.stat().st_size:
             subtitle_filter = _subtitle_filter(subtitles)
             filter_chain = (subtitle_filter if filter_chain == "null"
                             else f"{filter_chain},{subtitle_filter}")
-        args = ["-y", "-loglevel", "error", "-i", str(masked_video),
-                "-vf", filter_chain, "-map", "0:v", "-map", "0:a?",
-                "-t", f"{render_duration:g}", "-c:v", "libx264", "-preset", "veryfast",
-                "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", str(final)]
+        # BGM 换轨（2026-09-10 MVP）：7682 型模板 = 纯文案 + 纯 BGM，素材对白
+        # 音轨丢弃。bgm 缺失时回退素材音轨并在 manifest 记 audio_fallback（不崩整跑）。
+        render_cfg = cfg.library.get("narrative_render") or {}
+        bgm_setting = str(render_cfg.get("bgm_path") or "")
+        bgm_path = (repo_root() / bgm_setting if bgm_setting and not Path(bgm_setting).is_absolute()
+                    else Path(bgm_setting) if bgm_setting else None)
+        use_bgm = (asset_plan.get("audio_mode") == "bgm" and bgm_path is not None
+                   and bgm_path.exists())
+        if use_bgm:
+            volume = float(render_cfg.get("bgm_volume", 0.9))
+            fade_out = max(0.0, render_duration - 1.0)
+            audio_args = ["-map", "1:a:0", "-af",
+                          f"atrim=duration={render_duration:g},volume={volume:g},"
+                          f"afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out:g}:d=1.0"]
+            pre_inputs = ["-stream_loop", "-1", "-i", str(bgm_path)]
+        else:
+            audio_args = ["-map", "0:a?"]
+            pre_inputs = []
+        args = (["-y", "-loglevel", "error", "-i", str(masked_video), *pre_inputs,
+                 "-vf", filter_chain, "-map", "0:v", *audio_args,
+                 "-t", f"{render_duration:g}", "-c:v", "libx264", "-preset", "veryfast",
+                 "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", str(final)])
         common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args)
         commands.append([cfg.perception.get("ffmpeg_bin", "ffmpeg"), *args])
     elif reference.exists():
@@ -445,6 +483,8 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     (output_dir / "render_manifest.json").write_text(json.dumps({
         "output": str(final), "commands": commands, "operations": runtime_status,
         "deterministic": True, "seed": recipe["provenance"]["seed"],
+        "audio": {"mode": "bgm" if use_bgm else "source",
+                  "fallback": bool(asset_plan.get("audio_mode") == "bgm" and not use_bgm)},
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
                           encoding="utf-8")

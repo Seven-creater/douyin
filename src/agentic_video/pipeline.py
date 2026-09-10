@@ -162,7 +162,8 @@ def run_rendering(cfg: AppConfig, recipe: dict, *, theme: str, library: str,
                   output_dir: Path, force: bool = False,
                   use_mask_backend: bool = True, narrative: dict | None = None,
                   story_plan: dict | None = None,
-                  target_duration_s: float = 60.0) -> tuple[dict, list[dict], Path]:
+                  target_duration_s: float = 60.0,
+                  runner=None) -> tuple[dict, list[dict], Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if narrative is not None:
@@ -172,6 +173,13 @@ def run_rendering(cfg: AppConfig, recipe: dict, *, theme: str, library: str,
                 target_duration_s=target_duration_s)
             (output_dir / "story_candidates.json").write_text(
                 json.dumps(candidate_groups, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 文案轨（2026-09-10 MVP，7682 型模板）：钩子/成就卡/反转梗 + BGM 模式。
+        # setdefault 语义：critic 轮传入的 current_story 已带 copy 则不重生成，
+        # 文案跨轮稳定；人工改 story_plan.json 的 copy 后走 render 子命令可重渲。
+        if "copy" not in story_plan:
+            from src.agentic_video.copywriter import build_copy_cues
+
+            story_plan["copy"] = build_copy_cues(story_plan, runner=runner)
         write_story_plan(story_plan, output_dir / "story_plan.json")
         asset_plan, retrieval = story_plan_execution_inputs(story_plan, recipe)
         retrieval_path = output_dir / "retrieval_results.json"
@@ -225,7 +233,7 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
     asset_plan, retrieval, final = run_rendering(
         cfg, recipe, theme=theme, library=library, output_dir=output_dir,
         force=force, use_mask_backend=use_mask_backend, narrative=narrative,
-        target_duration_s=target_duration_s)
+        target_duration_s=target_duration_s, runner=runner)
     manifest.stage("render", "complete", output=str(final))
     _release_gpu_cache()
 
@@ -287,7 +295,8 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
         asset_plan, retrieval, current_video = run_rendering(
             cfg, current_recipe, theme=theme, library=library, output_dir=round_dir,
             force=True, use_mask_backend=use_mask_backend, narrative=narrative,
-            story_plan=current_story, target_duration_s=target_duration_s)
+            story_plan=current_story, target_duration_s=target_duration_s,
+            runner=runner)
         shutil.copy2(current_video, output_dir / "rendered.mp4")
         for name in ("story_plan.json", "asset_plan.json", "retrieval_results.json",
                      "render_manifest.json", "subtitles.srt"):

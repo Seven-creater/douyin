@@ -129,3 +129,50 @@ def test_execution_inputs_never_advertise_reference_text_ops():
         assert "text_layer_animation" not in slot["operation_types"]
         assert "text_overlay" not in slot["operation_types"]
         assert "hard_cut" in slot["operation_types"]
+
+
+def test_target_duration_allows_short_emotional_template():
+    """2026-09-10：7682 型模板天然 20-35s，旧 45..75 下界把整类挡在门外。"""
+    program = valid_program()
+    rows = [_candidate(0, "hook", "person", start=0, event_id="e1"),
+            _candidate(1, "conflict", "person", start=4, event_id="e2"),
+            _candidate(2, "resolution", "person", start=9, event_id="e3")]
+    plan = build_story_plan(program, rows, theme="守护", library="guimie",
+                            target_duration_s=21.9)
+    assert validate_story_plan(plan) == []
+    with_static = dict(plan, target_duration_s=15.0)
+    assert any("target_duration_s" in e for e in validate_story_plan(with_static))
+
+
+def test_same_row_in_two_slots_gets_deduplicated():
+    """C3：hook/conflict 隔槽引用同一事件时，Viterbi 相邻惩罚拦不住撞段——
+    二 pass 必须换掉重复行或标记 dedup_conflict。"""
+    program = valid_program()
+    program["arc"] = [
+        {"role": "hook", "event_ids": ["e1"]},
+        {"role": "context", "event_ids": ["e1"]},
+        {"role": "conflict", "event_ids": ["e1"]},
+    ]
+    rows = [_candidate(0, "hook", "person", start=0, event_id="e1", score=0.95),
+            _candidate(1, "context", "other", start=4, event_id="e1", score=0.5),
+            _candidate(2, "conflict", "third", start=8, event_id="e1", score=0.5)]
+    plan = build_story_plan(program, rows, theme="守护", library="guimie",
+                            target_duration_s=45.0)
+    picked_rows = [slot["source"].get("shot_idx") for slot in plan["slots"]]
+    assert len(picked_rows) == len(set(picked_rows)) or \
+        any(slot.get("dedup_conflict") for slot in plan["slots"])
+
+
+def test_execution_inputs_pass_copy_track_through():
+    plan = build_story_plan(valid_program(),
+                           [_candidate(0, "hook", "person", start=0, event_id="e1"),
+                            _candidate(1, "conflict", "person", start=4, event_id="e2"),
+                            _candidate(2, "resolution", "person", start=9, event_id="e3")],
+                           theme="守护", library="guimie", target_duration_s=45.0)
+    plan["copy"] = {"cues": [{"kind": "hook_line", "start_s": 0.15, "end_s": 4.0,
+                              "text": "钩子"}],
+                    "audio_mode": "bgm"}
+    asset_plan, _ = story_plan_execution_inputs(plan, {"reference": {"duration_s": 25.3},
+                                                       "operations": []})
+    assert asset_plan["copy_cues"] == plan["copy"]["cues"]
+    assert asset_plan["audio_mode"] == "bgm"

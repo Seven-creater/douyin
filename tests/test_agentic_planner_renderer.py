@@ -233,6 +233,39 @@ def test_drawtext_text_value_quotes_apostrophes_and_percents():
     assert drawtext_text_value("") == "''"
 
 
+def test_story_subtitles_prefer_copy_cues_over_dialogue(tmp_path):
+    """MVP：文案轨在场时烧钩子/成就卡/反转梗，不再映射素材对白翻译。"""
+    plan = {"slots": [{"slot_idx": 0, "start_s": 0.0, "end_s": 11.0}],
+            "copy_cues": [
+                {"kind": "hook_line", "start_s": 0.15, "end_s": 4.0, "text": "钩子文案"},
+                {"kind": "info_card", "start_s": 9.2, "end_s": 10.2, "text": "成就卡"},
+                {"kind": "punchline", "start_s": 10.0, "end_s": 10.95, "text": "反转梗"},
+            ]}
+    retrieval = [{"slot_idx": 0, "picked": {
+        "source_start_s": 100.0, "source_end_s": 111.0,
+        "dialogue": [{"start_s": 101.0, "end_s": 103.0, "translation_zh": "素材对白"}],
+    }}]
+    path = write_story_subtitles(plan, retrieval, tmp_path / "copy.srt")
+    text = path.read_text(encoding="utf-8")
+    assert "钩子文案" in text and "反转梗" in text
+    assert "素材对白" not in text                      # 对白翻译被压制
+    assert "00:00:00,150 --> 00:00:04,000" in text
+
+
+def test_render_cache_key_sensitive_to_copy_track():
+    from src.agentic_video.renderer import render_cache_key
+    recipe = _recipe()
+    base_plan = {"theme": "守护", "slots": [{"slot_idx": 0, "start_s": 0,
+                                            "end_s": 2, "need_duration_s": 2}]}
+    retrieval = [{"slot_idx": 0, "picked": {"video": "g.mp4", "source_start_s": 10.0}}]
+    with_copy = {**base_plan, "copy_cues": [{"text": "钩子"}], "audio_mode": "bgm"}
+    a = render_cache_key(recipe, base_plan, retrieval, canvas_width=720,
+                         canvas_height=960, narrative_mode=True)
+    b = render_cache_key(recipe, with_copy, retrieval, canvas_width=720,
+                         canvas_height=960, narrative_mode=True)
+    assert a["sha256"] != b["sha256"]
+
+
 def test_scaled_recipe_strips_reference_text_ops_for_narrative_render():
     """2026-09-10 v5 帧验：参考 Recipe 的 text_layer_animation（黄色 NANCHANG 字幕
     转录）被 drawtext 烧到鬼灭画面上。叙事执行视图必须剔除文字层；缩放与否都剔。"""
