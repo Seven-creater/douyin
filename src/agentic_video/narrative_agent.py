@@ -1,6 +1,7 @@
 """Bounded active-perception agent for evidence-grounded narrative induction."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from dataclasses import asdict, dataclass
@@ -15,6 +16,70 @@ from src.agentic_video.narrative import (ARC_ROLES, CONTENT_TYPES, ENTITY_KINDS,
 from src.agentic_video.recipe_v2 import sha256_file
 from src.perception import common
 from src.template.schema import extract_json_block
+
+# 两层依赖缓存（2026-09-10 V1 计划 P0）：命中依据是输入依赖而非文件存在性——
+# 观察键 = 源哈希+区间+实际提示词哈希+采样参数+模型版本；归纳键 = 观察结果+
+# 外部上下文+归纳提示词+模型配置。prompt_version 只是人读版本号。
+CACHE_SCHEMA_VERSION = "narrative_cache_v1"
+WINDOW_PROMPT_VERSION = "v1"
+SYNTHESIS_PROMPT_VERSION = "v2"
+
+
+def _stable_hash(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False,
+                                     sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _omni_signature(cfg) -> dict:
+    """参与两层缓存键的模型/采样配置指纹。"""
+    perception = getattr(cfg, "perception", None) or {}
+    omni = perception.get("omni") or {}
+    try:
+        fps = float(omni.get("fps") or 2.0)
+    except (TypeError, ValueError):
+        fps = 2.0
+    return {"model": str(omni.get("model_path") or "omni"), "fps": fps,
+            "max_new_tokens": 1024}
+
+
+def _observation_key(video_sha: str, window: "NarrativeWindow", material: str,
+                     omni_sig: dict) -> str:
+    return _stable_hash({
+        "schema": CACHE_SCHEMA_VERSION, "kind": "observation",
+        "video_sha": video_sha, "interval": [window.start, window.end],
+        "probe": window.probe, "reason": window.reason,
+        "prompt_version": WINDOW_PROMPT_VERSION,
+        "prompt_sha": _stable_hash(WINDOW_PROMPT),
+        "material_sha": _stable_hash(material), **omni_sig})
+
+
+def _load_window_cache(window_dir: Path, key: str) -> dict | None:
+    """窗口观察缓存：params.cache_key 匹配才复用（缺失=旧产物，视为 miss 重看）。"""
+    path = window_dir / "result.json"
+    if not path.exists():
+        return None
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    if (envelope.get("params") or {}).get("cache_key") != key:
+        return None
+    output = envelope.get("output")
+    if isinstance(output, dict) and isinstance(output.get("observations"), list):
+        return output
+    return None
+
+
+def _synthesis_key(video_sha: str, material: str, observations: list[dict],
+                   omni_sig: dict) -> str:
+    return _stable_hash({
+        "schema": CACHE_SCHEMA_VERSION, "kind": "synthesis",
+        "video_sha": video_sha, "material_sha": _stable_hash(material),
+        "observations_sha": _stable_hash(observations),
+        "prompt_version": SYNTHESIS_PROMPT_VERSION,
+        "prompt_sha": _stable_hash(SYNTHESIS_PROMPT), **omni_sig})
 
 
 @dataclass(frozen=True)
@@ -71,30 +136,49 @@ WINDOW_PROMPT = """你是视频内容取证 Agent。请观看原视频 {start:g}
 
 
 SYNTHESIS_PROMPT = """你是 Narrative Program 归纳 Agent。根据分窗观察和确定性材料生成一份
-可验证的叙事程序。禁止根据标题或常识补写没有证据的剧情。只输出一个 JSON 对象，不要围栏。
+可验证的叙事程序。只输出一个 JSON 对象，不要围栏。
+
+证据分级（必须遵守）：
+- 画面、可辨认对白：可支持可见行动、说话内容；不得支持未呈现的动机或关系。
+- 视频内说明文字（OCR）：创作者对事件的陈述，不是已独立核实的事实。
+- 外部标题/评论/相关推荐：只是语境、解读、待核验线索——引用时 evidence.source 用
+  external_title/external_comment/external_related 且必须 quote 原文；不能当作本视频中必然发生的事件。
+- 禁止根据常识补写没有证据的剧情；无法分辨就写 uncertain，不要编。
+
+主角对账：开场/钩子文字陈述的主角处境，必须与画面主体的可见特征（性别、外观、伤情等）
+逐项核对；冲突时以画面+OCR 为准，并把对应字段降为 uncertain 请求复核；不得预设人物属性。
 
 顶层字段固定为 intent/entities/events/causal_links/arc/utterances/emotion_curve/evidence/status/uncertainties。
 顶层 evidence/status 由程序根据各项证据重新汇总，模型不得用它掩盖无证据断言。
 intent={{"topic":"...","message":"...","content_type":"real_story|screen_story|growth_story|uncertain",
+"protagonist":"主角是谁（按画面可见特征描述）或unknown",
+"goal":"主角的目标或not_applicable","problem":"面临什么问题或unknown",
+"motivation":"为什么采取关键行动；画面未呈现就写unknown，不补写",
+"change":"发生了什么变化或not_applicable","outcome":"最后的结果或unknown",
 "evidence":[],"confidence":0.0,"status":"supported|uncertain|unsupported"}}
 entity={{"id":"entity_000","kind":"person|animal|object|place|group|unknown","name_or_role":"...",
 "aliases":[],"evidence":[],"confidence":0.0,"status":"..."}}
 event={{"id":"event_000","interval":[0.0,1.0],"participants":["entity_000"],"action":"...",
-"state_before":"...或uncertain","state_after":"...或uncertain","evidence":[],"confidence":0.0,"status":"..."}}
+"state_before":"...或uncertain","state_after":"...或uncertain",
+"importance":"high|medium|low","evidence":[],"confidence":0.0,"status":"..."}}
 causal_link={{"from_event":"event_000","to_event":"event_001",
 "relation":"causes|motivates|enables|prevents|reveals","evidence":[],"confidence":0.0,"status":"..."}}
-arc={{"role":"hook|context|conflict|choice|climax|consequence|resolution","event_ids":["event_000"]}}
+arc={{"role":"hook|context|conflict|choice|climax|consequence|resolution",
+"event_ids":["event_000"],"function":"该段在整条表达中的作用（一句话）"}}
 utterance={{"id":"utterance_000","interval":[0.0,1.0],"speaker_id":"entity_000或null",
 "original":"原文或可靠概括","translation_zh":"已有中文则同原文；否则可靠翻译或uncertain",
 "evidence":[],"confidence":0.0,"status":"..."}}
 emotion={{"interval":[0.0,1.0],"emotion":"...","intensity":0.0,
 "evidence":[],"confidence":0.0,"status":"..."}}
 
+同一事件可以被多个弧段引用，但各段必须写明不同的 function、使用区间或新增信息；
+禁止把同一事件的相同描述复制进多个弧段凑齐故事弧。
+
 所有 supported 项必须带 evidence；evidence 必须含 source、interval、confidence，可含 frame/bbox/quote。
 因果只能从较早事件指向较晚事件。无法分辨时降为 uncertain，不要强行补齐七种 arc。
 
 【视频时长】{duration:g}s
-【确定性材料】{material}
+【确定性材料（含外部语境线索）】{material}
 【分窗观察】{observations}
 【上一版程序与补充探针】{previous}
 """
@@ -105,13 +189,11 @@ def _read_output(cfg, vid: str, tool: str) -> dict:
     return (env or {}).get("output") or {}
 
 
-def build_narrative_material(cfg, vid: str, *, start: float | None = None,
-                             end: float | None = None) -> str:
-    metadata = {}
-    # Manually curated references may carry the richer context.json instead of
-    # the downloader's metadata.json.  Treat both as hypotheses for where to
-    # look; the prompts still forbid using them as visual/narrative evidence.
-    for filename in ("context.json", "metadata.json"):
+def _load_reference_metadata(cfg, vid: str) -> dict:
+    """Manually curated references may carry the richer context.json instead of
+    the downloader's metadata.json; merge both (context wins)."""
+    metadata: dict = {}
+    for filename in ("metadata.json", "context.json"):
         metadata_path = cfg.paths.videos_dir / vid / filename
         if not metadata_path.exists():
             continue
@@ -121,11 +203,61 @@ def build_narrative_material(cfg, vid: str, *, start: float | None = None,
                 metadata.update(value)
         except ValueError:
             continue
-    rows = [f"外部标题（仅作待验证假设，不是证据）：{metadata.get('title') or '无'}"]
-    if metadata.get("author"):
-        rows.append(f"外部作者：{metadata['author']}")
-    if metadata.get("hashtags"):
-        rows.append("外部话题：" + ",".join(str(value) for value in metadata["hashtags"][:20]))
+    return metadata
+
+
+def build_reference_identity(cfg, vid: str, *, video: Path, video_sha: str) -> dict:
+    """P0 参考身份核对：任何验收前先确认 reference_id ↔ 文件 ↔ sha256 ↔ 标题
+    对得上，并给出关键证据位置。防止拿计划里的描述当核对标准。"""
+    metadata = _load_reference_metadata(cfg, vid)
+    shots = _read_output(cfg, vid, "shots")
+    boundaries = [float(value) for value in shots.get("boundaries_s") or []][:3]
+    ocr = _read_output(cfg, vid, "ocr")
+    key_evidence = []
+    for event in (ocr.get("text_events") or [])[:5]:
+        key_evidence.append({
+            "type": "ocr",
+            "interval": [float(event.get("t_start_s") or 0),
+                         float(event.get("t_end_s") or 0)],
+            "text": str(event.get("text") or "")[:60],
+        })
+    if boundaries:
+        key_evidence.append({"type": "shot_boundary", "interval": boundaries})
+    return {
+        "reference_id": vid, "video": str(video), "source_sha256": video_sha,
+        "metadata_title": str(metadata.get("title") or ""),
+        "metadata_author": str(metadata.get("author") or ""),
+        "key_evidence_locations": key_evidence,
+    }
+
+
+def build_narrative_material(cfg, vid: str, *, start: float | None = None,
+                             end: float | None = None,
+                             external: bool = True) -> str:
+    """确定性材料。external=False 供窗口观察用（只有片内信号，杜绝外部语境
+    污染观察层，同时观察缓存不随评论更新而失效）；external=True 供归纳层，
+    外部线索按证据分级表标注引用方式。"""
+    rows = []
+    if external:
+        metadata = _load_reference_metadata(cfg, vid)
+        rows.append("外部标题（语境线索；引用须 source=external_title 并 quote 原文，"
+                    "不作为本片事实）：" + str(metadata.get("title") or "无"))
+        if metadata.get("author"):
+            rows.append("外部作者：" + str(metadata["author"]))
+        if metadata.get("hashtags"):
+            rows.append("外部话题：" + ",".join(str(v) for v in metadata["hashtags"][:20]))
+        comments = metadata.get("comments") or []
+        for comment in comments[:20]:
+            text = str(comment if isinstance(comment, str)
+                       else comment.get("text") or "").strip()
+            if text:
+                rows.append(f"外部评论（语境线索，source=external_comment）：{text[:80]}")
+        related = metadata.get("related_videos") or []
+        titles = [str(row.get("title") or "").strip()[:40]
+                  for row in related[:5] if isinstance(row, dict)]
+        if titles:
+            rows.append("相关推荐标题（待核验线索，source=external_related）："
+                        + "；".join(titles))
     shots = _read_output(cfg, vid, "shots")
     boundaries = [float(value) for value in shots.get("boundaries_s") or []]
     if start is not None and end is not None:
@@ -246,7 +378,7 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
                             model: str, tool_calls: list[dict]) -> dict:
     program = new_narrative_program(
         reference_id=reference_id, reference_uri=reference_uri, sha256=sha256,
-        duration_s=duration_s, fps=fps, model=model, prompt_version="narrative_agent_v1")
+        duration_s=duration_s, fps=fps, model=model, prompt_version="narrative_agent_v2")
     block = extract_json_block(raw)
     try:
         payload = json.loads(block) if block else {}
@@ -260,6 +392,9 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
     intent["message"] = str(intent.get("message") or "uncertain")
     if intent.get("content_type") not in CONTENT_TYPES:
         intent["content_type"] = "uncertain"
+    # 必答六问（P0 v2）：允许 unknown / not_applicable——未呈现就承认，不补写
+    for field in ("protagonist", "goal", "problem", "motivation", "change", "outcome"):
+        intent[field] = str(intent.get(field) or "").strip() or "unknown"
     program["intent"] = intent
 
     entities = []
@@ -299,6 +434,8 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
         event["action"] = str(event.get("action") or "uncertain")
         event["state_before"] = str(event.get("state_before") or "uncertain")
         event["state_after"] = str(event.get("state_after") or "uncertain")
+        if event.get("importance") not in ("high", "medium", "low"):
+            event["importance"] = "medium"
         events.append(event)
     program["events"] = events
     event_ids = {row["id"] for row in events}
@@ -324,8 +461,14 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
         if not isinstance(segment, dict) or segment.get("role") not in ARC_ROLES:
             continue
         ids = [value for value in segment.get("event_ids") or [] if value in event_ids]
-        if ids:
-            arc.append({"role": segment["role"], "event_ids": ids})
+        if not ids:
+            continue
+        entry = {"role": segment["role"], "event_ids": ids}
+        # 同一事件可被多槽引用，但必须写明各段的不同功能（v2 红线：禁止复制描述凑弧）
+        function = str(segment.get("function") or "").strip()
+        if function:
+            entry["function"] = function
+        arc.append(entry)
     program["arc"] = arc
 
     utterances = []
@@ -432,26 +575,75 @@ def _refinement_windows(program: dict, initial: list[NarrativeWindow], *, round_
     return tasks
 
 
+def _ensure_runner(cfg, runner):
+    if runner is None:
+        from src.perception.omni_runner import OmniRunner
+        runner = OmniRunner(cfg.perception.get("omni") or {})
+    return runner
+
+
+def _observe_window(cfg, vid: str, video: Path, window: NarrativeWindow,
+                    window_dir: Path, runner, omni_sig: dict, video_sha: str,
+                    *, force: bool) -> tuple[dict, bool, object]:
+    """单窗观察，依赖键命中即复用（miss 才看片）。返回 (parsed, cached, runner)。"""
+    material = build_narrative_material(cfg, vid, start=window.start, end=window.end,
+                                        external=False)
+    key = _observation_key(video_sha, window, material, omni_sig)
+    if not force:
+        cached = _load_window_cache(window_dir, key)
+        if cached is not None:
+            return cached, True, runner
+    runner = _ensure_runner(cfg, runner)
+    prompt = WINDOW_PROMPT.format(
+        start=window.start, end=window.end, probe=window.probe, reason=window.reason,
+        material=material)
+    answer = runner.watch(video, prompt, start_s=window.start, end_s=window.end,
+                          clip_dir=window_dir, max_new_tokens=1024,
+                          duration_s=window.end - window.start)
+    parsed = parse_observation(answer.text)
+    params = asdict(window)
+    params["cache_key"] = key
+    common.write_result_json(window_dir, tool="narrative_window", aweme_id=vid,
+                             params=params, output=parsed)
+    return parsed, False, runner
+
+
 def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
                         budget: NarrativeBudget | None = None, force: bool = False,
                         runner=None) -> dict:
     budget = budget or NarrativeBudget()
     root = cfg.paths.perception_dir / vid / "narrative_agent"
     result_path = root / "result.json"
-    if result_path.exists() and not force:
-        program = json.loads(result_path.read_text(encoding="utf-8"))["program"]
-        if output is not None:
-            write_narrative_program(program, Path(output))
-        return program
     inspect = _read_output(cfg, vid, "inspect")
     duration = float(inspect.get("duration_s") or 0)
     fps = float(inspect.get("fps") or 24)
     if duration <= 0:
         raise FileNotFoundError(f"缺 inspect 产物：{vid}")
     video = cfg.paths.videos_dir / vid / "video.mp4"
-    if runner is None:
-        from src.perception.omni_runner import OmniRunner
-        runner = OmniRunner(cfg.perception.get("omni") or {})
+    video_sha = sha256_file(video)
+    omni_sig = _omni_signature(cfg)
+    full_material = build_narrative_material(cfg, vid)
+
+    # 归纳缓存快路径：信封的依赖指纹（源哈希+外部材料+归纳提示词+模型配置）与
+    # 当前输入完全一致才复用。旧信封（无 cache 字段）视为陈旧——改 prompt 后
+    # 不再被存在性判断骗过。观察缓存照常兜底，miss 的窗口才重新看片。
+    if result_path.exists() and not force:
+        try:
+            envelope = json.loads(result_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            envelope = None
+        cache = (envelope or {}).get("cache") if isinstance(envelope, dict) else {}
+        if (isinstance(envelope, dict)
+                and (cache or {}).get("schema") == CACHE_SCHEMA_VERSION
+                and ((cache or {}).get("prompt_versions") or {}).get("synthesis")
+                == SYNTHESIS_PROMPT_VERSION
+                and (cache or {}).get("synthesis_key") == _synthesis_key(
+                    video_sha, full_material,
+                    envelope.get("observations") or [], omni_sig)):
+            program = envelope["program"]
+            if output is not None:
+                write_narrative_program(program, Path(output))
+            return program
 
     windows = plan_narrative_windows(
         duration, max_windows=budget.max_initial_windows,
@@ -461,25 +653,20 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
     for window in windows:
         window_dir = root / "initial" / f"{window.idx:03d}"
         window_dir.mkdir(parents=True, exist_ok=True)
-        prompt = WINDOW_PROMPT.format(
-            start=window.start, end=window.end, probe=window.probe, reason=window.reason,
-            material=build_narrative_material(cfg, vid, start=window.start, end=window.end))
-        answer = runner.watch(video, prompt, start_s=window.start, end_s=window.end,
-                              clip_dir=window_dir, max_new_tokens=1024,
-                              duration_s=window.end - window.start)
-        parsed = parse_observation(answer.text)
+        parsed, cached, runner = _observe_window(
+            cfg, vid, video, window, window_dir, runner, omni_sig, video_sha,
+            force=force)
         observations.extend(parsed["observations"])
-        tool_calls.append({"tool": "omni_narrative_window", **asdict(window)})
-        common.write_result_json(window_dir, tool="narrative_window", aweme_id=vid,
-                                 params=asdict(window), output=parsed)
+        tool_calls.append({"tool": "omni_narrative_window", "cached": cached,
+                           **asdict(window)})
 
-    full_material = build_narrative_material(cfg, vid)
+    runner = _ensure_runner(cfg, runner)
     prompt = SYNTHESIS_PROMPT.format(
         duration=duration, material=full_material,
         observations=json.dumps(observations, ensure_ascii=False)[:24000], previous="无")
     answer = runner.ask(prompt, max_new_tokens=4096)
     program = parse_narrative_program(
-        answer.text, reference_id=vid, reference_uri=str(video), sha256=sha256_file(video),
+        answer.text, reference_id=vid, reference_uri=str(video), sha256=video_sha,
         duration_s=duration, fps=fps, model="bounded_active_perception",
         tool_calls=tool_calls)
     before = _evidence_signature(program)
@@ -497,30 +684,23 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
         if not tasks:
             stop_reason = "no_refinement_tasks"
             break
-        new_observations = []
         for task in tasks:
             task_dir = root / f"refinement_{round_idx}" / f"{task.idx:03d}"
             task_dir.mkdir(parents=True, exist_ok=True)
-            prompt = WINDOW_PROMPT.format(
-                start=task.start, end=task.end, probe=task.probe, reason=task.reason,
-                material=build_narrative_material(cfg, vid, start=task.start, end=task.end))
-            answer = runner.watch(video, prompt, start_s=task.start, end_s=task.end,
-                                  clip_dir=task_dir, max_new_tokens=1024,
-                                  duration_s=task.end - task.start)
-            parsed = parse_observation(answer.text)
-            new_observations.extend(parsed["observations"])
-            tool_calls.append({"tool": "omni_narrative_probe", **asdict(task)})
-            common.write_result_json(task_dir, tool="narrative_probe", aweme_id=vid,
-                                     params=asdict(task), output=parsed)
+            parsed, cached, runner = _observe_window(
+                cfg, vid, video, task, task_dir, runner, omni_sig, video_sha,
+                force=force)
+            observations.extend(parsed["observations"])
+            tool_calls.append({"tool": "omni_narrative_probe", "cached": cached,
+                               **asdict(task)})
         refinement_count += len(tasks)
-        observations.extend(new_observations)
         repair_prompt = SYNTHESIS_PROMPT.format(
             duration=duration, material=full_material,
             observations=json.dumps(observations, ensure_ascii=False)[:30000],
             previous=json.dumps(program, ensure_ascii=False)[:16000])
         answer = runner.ask(repair_prompt, max_new_tokens=4096)
         candidate = parse_narrative_program(
-            answer.text, reference_id=vid, reference_uri=str(video), sha256=sha256_file(video),
+            answer.text, reference_id=vid, reference_uri=str(video), sha256=video_sha,
             duration_s=duration, fps=fps, model="bounded_active_perception",
             tool_calls=tool_calls)
         errors = validate_narrative_program(candidate)
@@ -543,6 +723,18 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
     envelope = {
         "budget": asdict(budget), "initial_windows": len(windows),
         "refinement_windows": refinement_count, "stop_reason": stop_reason,
+        "prompt_versions": {"window": WINDOW_PROMPT_VERSION,
+                            "synthesis": SYNTHESIS_PROMPT_VERSION},
+        "reference_identity": build_reference_identity(
+            cfg, vid, video=video, video_sha=video_sha),
+        "cache": {
+            "schema": CACHE_SCHEMA_VERSION,
+            "prompt_versions": {"window": WINDOW_PROMPT_VERSION,
+                                "synthesis": SYNTHESIS_PROMPT_VERSION},
+            "video_sha": video_sha,
+            "synthesis_key": _synthesis_key(video_sha, full_material,
+                                            observations, omni_sig),
+        },
         "observations": observations, "program": program,
     }
     result_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2),

@@ -124,7 +124,9 @@ def test_narrative_material_reads_curated_context_as_unverified_hypothesis(tmp_p
 
     material = build_narrative_material(cfg, "ref")
 
-    assert "仅作待验证假设，不是证据" in material
+    # P0 v2 证据分级措辞：外部线索可引用（external_title 等）但不作为本片事实
+    assert "引用须 source=external_title 并 quote 原文" in material
+    assert "不作为本片事实" in material
     assert "父亲帮女儿练习用脚写字" in material
     assert "外部作者：良田" in material
     assert "外部话题：父亲,自信" in material

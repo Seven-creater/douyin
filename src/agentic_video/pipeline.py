@@ -142,6 +142,11 @@ def run_narrative_decomposition(cfg: AppConfig, reference: Path, output_dir: Pat
         budget=actual_budget, force=force, runner=runner)
     agent_result = json.loads((cfg.paths.perception_dir / vid / "narrative_agent" /
                                "result.json").read_text(encoding="utf-8"))
+    # P0 参考身份核对：任何验收前先核对 reference_id ↔ 文件 ↔ sha256 ↔ 标题
+    identity = agent_result.get("reference_identity")
+    if isinstance(identity, dict) and identity:
+        (output_dir / "reference_identity.json").write_text(
+            json.dumps(identity, ensure_ascii=False, indent=2), encoding="utf-8")
     manifest.stage("narrative_agent", "complete",
                    initial_windows=agent_result.get("initial_windows"),
                    refinement_windows=agent_result.get("refinement_windows"),
