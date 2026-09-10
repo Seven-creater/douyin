@@ -368,6 +368,12 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
             if isinstance(interval, list) and len(interval) == 2:
                 operation["interval"] = [round(float(value) * ratio, 6)
                                            for value in interval]
+    # 叙事重剪不复用参考片的文字层操作：text 描述的是参考视频自己的字幕/贴纸
+    # （如"黄色的 NANCHANG 文字"），烧到新素材上是张冠李戴（2026-09-10 v5 帧验：
+    # 该行中文出现在鬼灭画面上方）。编辑模式模仿参考剪辑程序时保留，此处剔除。
+    execution_recipe["operations"] = [
+        op for op in execution_recipe.get("operations") or []
+        if op.get("type") not in {"text_overlay", "text_layer_animation"}]
 
     slots, retrieval = [], []
     for item in story_plan["slots"]:

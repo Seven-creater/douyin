@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from src.agentic_video.narrative import ARC_ROLES
 from src.agentic_video.story_planner import (_expand_thin_arc, build_story_plan,
-                                             rank_story_path, validate_story_plan)
+                                             rank_story_path,
+                                             story_plan_execution_inputs,
+                                             validate_story_plan)
 from tests.test_agentic_narrative import valid_program
 
 
@@ -101,3 +103,29 @@ def test_oversized_event_is_trimmed_to_slot_not_dropped():
         assert slot["source_interval_trimmed"] is True
         assert source["end_s"] - source["start_s"] <= 20.0 + 1e-6
         assert [line["translation_zh"] for line in source["dialogue"]] == ["窗内的对白"]
+
+
+def test_execution_inputs_never_advertise_reference_text_ops():
+    """2026-09-10 v5 帧验：参考 Recipe 文字层（黄色 NANCHANG）不得进入叙事
+    执行视图的槽操作类型；非文字操作照常映射。"""
+    program = valid_program()
+    rows = [_candidate(0, "hook", "person", start=0, event_id="e1"),
+            _candidate(1, "conflict", "person", start=4, event_id="e2"),
+            _candidate(2, "resolution", "person", start=9, event_id="e3")]
+    plan = build_story_plan(program, rows, theme="鬼灭高燃战斗", library="guimie",
+                            target_duration_s=60.0)
+    recipe = {
+        "reference": {"duration_s": 25.3},
+        "operations": [
+            {"type": "hard_cut", "interval": [0.0, 25.3]},
+            {"type": "text_layer_animation", "interval": [2.0, 8.0],
+             "params": {"text": "黄色的\"NANCHANG\"文字叠加在画面上"}},
+            {"type": "text_overlay", "interval": [10.0, 12.0],
+             "params": {"text": "贴纸"}},
+        ],
+    }
+    asset_plan, _retrieval = story_plan_execution_inputs(plan, recipe)
+    for slot in asset_plan["slots"]:
+        assert "text_layer_animation" not in slot["operation_types"]
+        assert "text_overlay" not in slot["operation_types"]
+        assert "hard_cut" in slot["operation_types"]

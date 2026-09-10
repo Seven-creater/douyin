@@ -219,15 +219,23 @@ def write_story_subtitles(asset_plan: dict, retrieval: list[dict], output: Path)
 
 
 def _scaled_recipe(recipe: dict, duration_s: float) -> dict:
-    reference_duration = float(recipe["reference"]["duration_s"])
-    if reference_duration <= 0 or abs(reference_duration - duration_s) < 1e-6:
-        return recipe
+    """叙事重剪的执行视图：区间缩放到目标时长，并剔除参考片的文字层操作。
+
+    text_overlay/text_layer_animation 的 text 描述的是参考视频自己的字幕/贴纸
+    （如"黄色的 NANCHANG 文字叠加"），叙事重剪烧到新素材上是张冠李戴
+    （2026-09-10 v5 帧验实锤）。编辑模式不经过本函数，模仿参考剪辑程序时保留。
+    """
     scaled = deepcopy(recipe)
-    ratio = duration_s / reference_duration
-    scaled["reference"]["duration_s"] = duration_s
-    for operation in scaled.get("operations") or []:
-        operation["interval"] = [round(float(value) * ratio, 6)
-                                 for value in operation["interval"]]
+    reference_duration = float(scaled["reference"]["duration_s"])
+    if reference_duration > 0 and abs(reference_duration - duration_s) >= 1e-6:
+        ratio = duration_s / reference_duration
+        scaled["reference"]["duration_s"] = duration_s
+        for operation in scaled.get("operations") or []:
+            operation["interval"] = [round(float(value) * ratio, 6)
+                                     for value in operation["interval"]]
+    scaled["operations"] = [
+        op for op in scaled.get("operations") or []
+        if op.get("type") not in {"text_overlay", "text_layer_animation"}]
     return scaled
 
 
@@ -252,6 +260,8 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
     payload = json.dumps({
         "reference": recipe.get("reference"),
         "operations": recipe.get("operations"),
+        # 语义版本标记：执行策略变更（v2=叙事模式剔除参考文字层）后旧缓存失效
+        "exec_policy": 2,
         "theme": asset_plan.get("theme"),
         "slots": asset_plan.get("slots"),
         "picked": [[row.get("slot_idx"),

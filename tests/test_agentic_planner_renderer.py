@@ -233,6 +233,25 @@ def test_drawtext_text_value_quotes_apostrophes_and_percents():
     assert drawtext_text_value("") == "''"
 
 
+def test_scaled_recipe_strips_reference_text_ops_for_narrative_render():
+    """2026-09-10 v5 帧验：参考 Recipe 的 text_layer_animation（黄色 NANCHANG 字幕
+    转录）被 drawtext 烧到鬼灭画面上。叙事执行视图必须剔除文字层；缩放与否都剔。"""
+    from src.agentic_video.renderer import _scaled_recipe
+    recipe = _recipe()
+    recipe["operations"].append({
+        "id": "text", "type": "text_layer_animation", "interval": [1.0, 3.0],
+        "track_id": "video_main", "inputs": [], "depends_on": [],
+        "params": {"text": "黄色的\"NANCHANG\"文字叠加在画面上"},
+        "evidence": [{"source": "test"}], "confidence": 1.0, "status": "supported"})
+    scaled = _scaled_recipe(recipe, 8.0)                        # 4s 参考 → 8s 目标
+    assert [op["type"] for op in scaled["operations"]] == ["hard_cut", "speed_ramp"]
+    assert scaled["reference"]["duration_s"] == 8.0
+    assert scaled["operations"][0]["interval"] == [4.0, 4.0]    # 区间缩放仍在
+    same_duration = _scaled_recipe(recipe, 4.0)                 # 无需缩放也要剔
+    assert [op["type"] for op in same_duration["operations"]] == ["hard_cut", "speed_ramp"]
+    assert len(recipe["operations"]) == 3                        # 原 recipe 不被改动
+
+
 def test_render_cache_key_is_sensitive_to_theme_and_canvas():
     """H3：theme/画布/叙事模式变化必须改变缓存键——旧逻辑只看文件存在。"""
     from src.agentic_video.renderer import render_cache_key
