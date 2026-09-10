@@ -160,6 +160,9 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
       action: 8
       emotion: 8
       context: 8
+  # 槽级验证 + 分层重搜（P3；P4 对照的 C 档开 / B 档关）
+  verification:
+    enabled: true
   narrative_render:
     # 抖音竖屏画布（2026-09-10 起从 1920x1080 横屏切竖屏；canvas 已入渲染缓存键）
     width: 720

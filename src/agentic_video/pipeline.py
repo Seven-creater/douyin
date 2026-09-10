@@ -281,30 +281,35 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
         _release_gpu_cache()
 
     last_round_modified = False
+    verification_enabled = bool(((cfg.library.get("verification") or {})
+                                  .get("enabled", True)))
     for round_idx in range(1, max_rounds + 1):
         # ① 槽级验证：看实际进片区间，must_have 逐条核对（每轮一次验证 pass）。
         # 失败槽进分层重搜（层1候选池→层2改写查询全库），换掉的旧素材进已拒绝
-        # 清单——重搜不是换一轮旧候选。
-        from src.agentic_video.verify_slots import verify_slots
-        from src.agentic_video.story_planner import re_search_slot
-
-        verification = verify_slots(cfg, current_story, runner=runner)
-        (output_dir / f"verification_round_{round_idx}.json").write_text(
-            json.dumps(verification, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 清单——重搜不是换一轮旧候选。verification.enabled=false 时整体跳过
+        # （P4 的 B/C 对照开关：B=关，C=开）。
         round_reports = []
-        for failed_idx in verification["failed_slots"]:
-            old_source = current_story["slots"][failed_idx].get("source") or {}
-            if old_source.get("video"):
-                rejected_sources.append({
-                    "video": old_source.get("video"),
-                    "start_s": old_source.get("start_s"), "end_s": old_source.get("end_s"),
-                    "reason": "verification_failed"})
-            round_reports.append(re_search_slot(
-                cfg, current_story, failed_idx, theme=theme,
-                candidate_pool=candidate_pool.get(failed_idx),
-                rejected=rejected_sources))
-        if any(row.get("status") == "replaced" for row in round_reports):
-            _re_render(f"verify_render_{round_idx}")          # 重搜生效先重渲再给 critic 看
+        if verification_enabled:
+            from src.agentic_video.verify_slots import verify_slots
+            from src.agentic_video.story_planner import re_search_slot
+
+            verification = verify_slots(cfg, current_story, runner=runner)
+            (output_dir / f"verification_round_{round_idx}.json").write_text(
+                json.dumps(verification, ensure_ascii=False, indent=2), encoding="utf-8")
+            for failed_idx in verification["failed_slots"]:
+                old_source = current_story["slots"][failed_idx].get("source") or {}
+                if old_source.get("video"):
+                    rejected_sources.append({
+                        "video": old_source.get("video"),
+                        "start_s": old_source.get("start_s"),
+                        "end_s": old_source.get("end_s"),
+                        "reason": "verification_failed"})
+                round_reports.append(re_search_slot(
+                    cfg, current_story, failed_idx, theme=theme,
+                    candidate_pool=candidate_pool.get(failed_idx),
+                    rejected=rejected_sources))
+            if any(row.get("status") == "replaced" for row in round_reports):
+                _re_render(f"verify_render_{round_idx}")      # 重搜生效先重渲再给 critic 看
 
         narrative_critique = run_narrative_critic(
             current_video, narrative, current_story, runner=runner)
@@ -320,21 +325,26 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
             current_recipe, edit_critique.get("patches") or [])
         patched_story, story_audit = apply_story_patches(
             current_story, narrative_critique.get("patches") or [])
-        # ② critic 重搜指令通道：断点描述 + 改写需求 → 分层重搜（critic 不自己编素材）
-        for directive in narrative_critique.get("re_search") or []:
-            slot_idx = int(directive["slot_idx"])
-            if not 0 <= slot_idx < len(patched_story["slots"]):
-                continue
-            old_source = patched_story["slots"][slot_idx].get("source") or {}
-            if old_source.get("video"):
-                rejected_sources.append({
-                    "video": old_source.get("video"),
-                    "start_s": old_source.get("start_s"), "end_s": old_source.get("end_s"),
-                    "reason": f"critic: {directive.get('reason') or ''}"[:80]})
-            round_reports.append(re_search_slot(
-                cfg, patched_story, slot_idx, theme=theme,
-                candidate_pool=candidate_pool.get(slot_idx),
-                need_hint=directive.get("need_hint"), rejected=rejected_sources))
+        # ② critic 重搜指令通道：断点描述 + 改写需求 → 分层重搜（critic 不自己编素材）。
+        # 与 ① 同属 P4 的 C 档能力，B 档（纯 need/facet/路径约束）跳过。
+        if verification_enabled and narrative_critique.get("re_search"):
+            from src.agentic_video.story_planner import re_search_slot
+
+            for directive in narrative_critique["re_search"]:
+                slot_idx = int(directive["slot_idx"])
+                if not 0 <= slot_idx < len(patched_story["slots"]):
+                    continue
+                old_source = patched_story["slots"][slot_idx].get("source") or {}
+                if old_source.get("video"):
+                    rejected_sources.append({
+                        "video": old_source.get("video"),
+                        "start_s": old_source.get("start_s"),
+                        "end_s": old_source.get("end_s"),
+                        "reason": f"critic: {directive.get('reason') or ''}"[:80]})
+                round_reports.append(re_search_slot(
+                    cfg, patched_story, slot_idx, theme=theme,
+                    candidate_pool=candidate_pool.get(slot_idx),
+                    need_hint=directive.get("need_hint"), rejected=rejected_sources))
         re_search_log.extend({"round": round_idx, **row} for row in round_reports)
         (output_dir / f"recipe_patch_round_{round_idx}.json").write_text(
             json.dumps({"patches": edit_critique.get("patches") or [],
@@ -386,20 +396,20 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
     # 作为 P4 的机器指标；有界循环只保证停下来，不保证停在正确结果上。
     final_review = None
     if last_round_modified:
-        from src.agentic_video.verify_slots import verify_slots as _verify
+        final_review = {"narrative_critic": run_narrative_critic(
+            current_video, narrative, current_story, runner=runner)}
+        if verification_enabled:
+            from src.agentic_video.verify_slots import verify_slots as _verify
 
-        final_review = {
-            "verification": _verify(cfg, current_story, runner=runner),
-            "narrative_critic": run_narrative_critic(
-                current_video, narrative, current_story, runner=runner),
-        }
+            final_review["verification"] = _verify(cfg, current_story, runner=runner)
         (output_dir / "final_review.json").write_text(
             json.dumps(final_review, ensure_ascii=False, indent=2), encoding="utf-8")
         manifest.stage("final_review", "complete",
                        comprehension_pass=bool(
                            (final_review["narrative_critic"].get("comprehension") or {}
                             ).get("passes")),
-                       failed_slots=final_review["verification"]["failed_slots"])
+                       failed_slots=(final_review.get("verification") or {})
+                       .get("failed_slots", []))
     if re_search_log:
         (output_dir / "re_search_log.json").write_text(
             json.dumps(re_search_log, ensure_ascii=False, indent=2), encoding="utf-8")
