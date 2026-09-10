@@ -8,6 +8,7 @@ from pathlib import Path
 from src.agentic_video.long_video import (index_selected_windows, resolve_source_video,
                                            robust_normalize, scan_sparse_features)
 from src.agentic_video.narrative import ARC_ROLES
+from src.agentic_video.zones import zone_config
 from src.template.schema import extract_json_block
 
 DEFAULT_QUOTAS = {"dialogue": 12, "action": 8, "emotion": 8, "context": 8}
@@ -106,15 +107,21 @@ def _overlap_ratio(left: dict, right: dict) -> float:
 def select_narrative_windows(windows: list[dict], duration_s: float, *,
                              quotas: dict[str, int] | None = None,
                              max_overlap: float = 0.35,
-                             partitions: int = 6) -> list[dict]:
+                             partitions: int = 6,
+                             exclude_head_s: float = 0.0,
+                             exclude_tail_s: float = 0.0) -> list[dict]:
     quotas = dict(quotas or DEFAULT_QUOTAS)
     selected: list[dict] = []
     per_partition = max(1, (sum(quotas.values()) + partitions - 1) // partitions)
     partition_counts = [0] * partitions
+    # 片头/片尾排除区：OP/ED 职员表窗口不配浪费标注预算，也不进检索池
+    eligible = [row for row in windows
+                if not (float(row["start_s"]) < exclude_head_s
+                        or float(row["end_s"]) > duration_s - exclude_tail_s)]
     for selection_type, quota in quotas.items():
         score_key = f"{selection_type}_score"
         taken = 0
-        for row in sorted(windows, key=lambda item: (-float(item.get(score_key, 0)),
+        for row in sorted(eligible, key=lambda item: (-float(item.get(score_key, 0)),
                                                       float(item["start_s"]))):
             if taken >= quota:
                 break
@@ -410,13 +417,19 @@ def run_narrative_index(cfg, source: str, *, video: Path | None = None,
             stride_s=float(index_cfg.get("stride_s", 15.0)))
         quotas = {key: int((index_cfg.get("quotas") or {}).get(key, value))
                   for key, value in DEFAULT_QUOTAS.items()}
+        zones = zone_config(cfg)
+        is_movie = duration >= float(zones["min_movie_s"])
         selected = select_narrative_windows(
             candidates, duration, quotas=quotas,
             max_overlap=float(index_cfg.get("max_overlap", 0.35)),
-            partitions=int(index_cfg.get("partitions", 6)))
+            partitions=int(index_cfg.get("partitions", 6)),
+            exclude_head_s=float(zones["head_s"]) if is_movie else 0.0,
+            exclude_tail_s=float(zones["tail_s"]) if is_movie else 0.0)
         scan_path.write_text(json.dumps({
             "source": source, "video": str(video), "duration_s": duration,
             "configuration": index_cfg, "quotas": quotas,
+            "source_zones": {"head_s": float(zones["head_s"]) if is_movie else 0.0,
+                             "tail_s": float(zones["tail_s"]) if is_movie else 0.0},
             "candidate_count": len(candidates), "sample_count": len(samples),
             "selected_windows": selected,
         }, ensure_ascii=False, indent=2), encoding="utf-8")

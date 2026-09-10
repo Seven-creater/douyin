@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from src.agentic_video.recipe_v2 import validate_recipe_v2
+from src.agentic_video import zones
 from src.config import AppConfig
 from src.library.build_index import E5Embedder, load_index
 
@@ -60,10 +61,13 @@ def build_asset_plan(recipe: dict, theme: str, *, library: str) -> dict:
 
 def rank_asset_slots(rows: list[dict], embeddings, query_embeddings, slots: list[dict], *,
                      source: str | None = None, top_k: int = 5, min_score: float = 0.18,
-                     dedupe_window: int = 2) -> list[dict]:
+                     dedupe_window: int = 2,
+                     excluded_rows: set[int] | None = None) -> list[dict]:
+    skip = set(excluded_rows or ())
     allowed = [idx for idx, row in enumerate(rows)
-               if source is None or row.get("source") == source
-               or str(row.get("video_stem", "")).startswith(f"{source}__")]
+               if idx not in skip
+               and (source is None or row.get("source") == source
+                    or str(row.get("video_stem", "")).startswith(f"{source}__"))]
     if not allowed:
         raise ValueError(f"index has no rows for source {source!r}")
     used_recent: list[int] = []
@@ -124,7 +128,8 @@ def run_asset_retrieval(cfg: AppConfig, asset_plan: dict, output: Path, *,
         rows, embeddings, query_embeddings, slots, source=asset_plan.get("library"),
         top_k=int(retrieve_cfg.get("top_k", 5)),
         min_score=float(retrieve_cfg.get("min_cosine", 0.18)),
-        dedupe_window=int(retrieve_cfg.get("dedupe_window", 2)))
+        dedupe_window=int(retrieve_cfg.get("dedupe_window", 2)),
+        excluded_rows=zones.excluded_row_indices(rows, cfg))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(ranked, ensure_ascii=False, indent=2), encoding="utf-8")
     return output

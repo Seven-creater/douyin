@@ -32,6 +32,18 @@ def test_narrative_window_selection_has_type_quotas_and_no_large_overlap():
             assert overlap / 30 <= 0.35
 
 
+def test_window_selection_drops_head_and_tail_credit_zones():
+    """片头/片尾职员表窗口不进标注与检索池（2026-09-10 首跑选中 ED 段的教训）。"""
+    windows = [
+        {"start_s": 10.0, "end_s": 55.0, "dialogue_score": 1.0},     # 片头
+        {"start_s": 3030.0, "end_s": 3075.0, "dialogue_score": 0.8},  # 正片中段
+        {"start_s": 9060.0, "end_s": 9105.0, "dialogue_score": 1.0},  # 片尾 ED
+    ]
+    selected = select_narrative_windows(windows, 9295.8, quotas={"dialogue": 3},
+                                        exclude_head_s=90.0, exclude_tail_s=360.0)
+    assert [row["start_s"] for row in selected] == [3030.0]
+
+
 def test_dialogue_density_ignores_gapless_punctuation_only_segments():
     samples = [{"t_s": float(i), "motion": 0.2, "cut_density": 0.1,
                 "audio_energy": 0.3, "audio_onset": 0.1} for i in range(60)]

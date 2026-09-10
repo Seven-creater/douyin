@@ -55,6 +55,23 @@ def test_asset_ranking_filters_source_and_uses_action_fit():
     assert ranked[0]["picked"]["row_idx"] == 1
 
 
+def test_asset_ranking_skips_source_zone_excluded_rows():
+    """片尾职员表镜头即便语义分最高也不得被选进成片（zones 过滤接入检索）。"""
+    rows = [
+        {"source": "guimie", "video": "m.mp4", "video_stem": "g", "shot_idx": 0,
+         "start_s": 9060, "end_s": 9105, "duration_s": 45, "action_score": 1.0},
+        {"source": "guimie", "video": "m.mp4", "video_stem": "g", "shot_idx": 1,
+         "start_s": 3030, "end_s": 3035, "duration_s": 5, "action_score": 0.8},
+    ]
+    emb = np.array([[1.0, 0.0], [0.95, 0.05]], dtype="float32")
+    queries = np.array([[1.0, 0.0]], dtype="float32")
+    slots = [{"slot_idx": 0, "query": "战斗", "need_duration_s": 5.0,
+              "visual_intensity": 0.9}]
+    ranked = rank_asset_slots(rows, emb, queries, slots, source="guimie",
+                              excluded_rows={0})
+    assert ranked[0]["picked"]["row_idx"] == 1
+
+
 def test_renderer_filters_compile_requested_effects():
     recipe = _recipe()
     recipe["operations"][1]["interval"] = [2.0, 4.0]          # 覆盖整个 slot [2,4]

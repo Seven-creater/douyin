@@ -134,6 +134,10 @@ library:                   # 素材库（Spider-Man 预告片/电影 → 可检�
   sources:
     guimie:
       video: data/raw/guimie/Demon.Slayer.Infinity.Castle.2025.1080p.hevc.cq24.mp4
+  source_zones:            # 片头/片尾职员表区不进检索池（2026-09-10 成片审核：首跑选中了 ED 段）
+    head_s: 90             # 长片片头排除（OP/studio 版权卡）
+    tail_s: 360            # 长片片尾排除（ED 职员表滚动）
+    min_movie_s: 1800      # 短于 30 分钟的源（预告片/切片）不做区排除
   high_action:
     scan_fps: 2.0
     scan_width: 160
