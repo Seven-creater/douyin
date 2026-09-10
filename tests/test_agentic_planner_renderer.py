@@ -56,14 +56,35 @@ def test_asset_ranking_filters_source_and_uses_action_fit():
 
 
 def test_renderer_filters_compile_requested_effects():
-    vf = segment_filter(_recipe()["operations"], duration_s=2.0)
+    recipe = _recipe()
+    recipe["operations"][1]["interval"] = [2.0, 4.0]          # 覆盖整个 slot [2,4]
+    vf, skipped = segment_filter(recipe["operations"], duration_s=2.0,
+                                 slot_start=2.0, slot_end=4.0)
     assert "setpts=PTS/2" in vf and "trim=duration=2" in vf
     assert "force_original_aspect_ratio=increase" in vf
     assert "crop=720:960" in vf and "setsar=1" in vf and ",pad=" not in vf
+    assert skipped == []
+
+
+def test_segment_filter_partial_interval_policy():
+    """H4：setpts/scale/tpad 无 timeline 支持——部分覆盖跳过并记录；eq 用 enable 窗口。"""
+    recipe = _recipe()
+    ops = recipe["operations"]                                  # speed_ramp [2.2,3.0]
+    ops.append({"id": "eq", "type": "color_adjust", "interval": [2.2, 3.0],
+                "track_id": "video_main", "inputs": [], "depends_on": [],
+                "params": {}, "evidence": [{"source": "t"}], "confidence": 1.0,
+                "status": "supported"})
+    vf, skipped = segment_filter(ops, duration_s=2.0, slot_start=2.0, slot_end=4.0)
+    assert "setpts=PTS/2" not in vf                             # 部分覆盖不整段变速
+    assert "PTS-STARTPTS" in vf                                 # 链尾复位仍在
+    assert len(skipped) == 1 and skipped[0]["status"] == "partial_interval_skipped"
+    assert skipped[0]["type"] == "speed_ramp"
+    assert "enable='between(t,0.2,1)'" in vf                    # eq 局部窗口（slot 内坐标，%g 格式）
+    assert "eq=saturation=1.25" in vf
 
 
 def test_segment_filter_can_follow_model_subject_anchor():
-    vf = segment_filter([], width=1920, height=1080, duration_s=2.0, focus_x=0.2)
+    vf, _ = segment_filter([], width=1920, height=1080, duration_s=2.0, focus_x=0.2)
     assert "crop=1920:1080:(iw-1920)*0.2" in vf
 
 
@@ -183,3 +204,36 @@ def test_narrative_renderer_adds_silence_when_source_has_no_audio(tmp_path):
     except FileNotFoundError:
         pytest.skip("ffmpeg unavailable")
     assert any(stream.get("codec_type") == "audio" for stream in probe["streams"])
+
+
+def test_drawtext_text_value_quotes_apostrophes_and_percents():
+    """H2：撇号用 关-转-开 注入，百分号交给 expansion=none。"""
+    from src.agentic_video.renderer import drawtext_text_value
+
+    expected = "'" + "it" + "'\\''" + "s'"          # 字面量 'it'\''s'
+    assert drawtext_text_value("it's") == expected
+    assert drawtext_text_value("50%") == "'50%'"
+    assert drawtext_text_value("") == "''"
+
+
+def test_render_cache_key_is_sensitive_to_theme_and_canvas():
+    """H3：theme/画布/叙事模式变化必须改变缓存键——旧逻辑只看文件存在。"""
+    from src.agentic_video.renderer import render_cache_key
+
+    recipe = _recipe()
+    plan = {"theme": "鬼灭高燃战斗", "slots": [{"slot_idx": 0, "start_s": 0,
+                                          "end_s": 2, "need_duration_s": 2}]}
+    retrieval = [{"slot_idx": 0, "picked": {"video": "g.mp4", "source_start_s": 10.0}}]
+    base = render_cache_key(recipe, plan, retrieval, canvas_width=720,
+                            canvas_height=960, narrative_mode=False)
+    assert base == render_cache_key(recipe, plan, retrieval, canvas_width=720,
+                                    canvas_height=960, narrative_mode=False)
+    changed_theme = render_cache_key(recipe, {**plan, "theme": "蜘蛛侠"},
+                                     retrieval, canvas_width=720, canvas_height=960,
+                                     narrative_mode=False)
+    changed_canvas = render_cache_key(recipe, plan, retrieval, canvas_width=1920,
+                                      canvas_height=1080, narrative_mode=False)
+    changed_mode = render_cache_key(recipe, plan, retrieval, canvas_width=720,
+                                    canvas_height=960, narrative_mode=True)
+    assert len({base["sha256"], changed_theme["sha256"], changed_canvas["sha256"],
+                changed_mode["sha256"]}) == 4

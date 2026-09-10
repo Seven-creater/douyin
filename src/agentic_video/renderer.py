@@ -11,7 +11,6 @@ from typing import Protocol
 from src.agentic_video.recipe_v2 import validate_recipe_v2
 from src.config import AppConfig
 from src.config import repo_root
-from src.generation.assemble import escape_drawtext
 from src.perception import common
 
 MASK_OPS = {"tracked_mask_fill", "subject_cutout_composite", "mask_wipe",
@@ -70,35 +69,85 @@ class GroundedSamSubprocessBackend:
         return commands
 
 
+def drawtext_text_value(text: str) -> str:
+    """drawtext text= 的安全值（H2）：整体单引号包裹，' 用 关-转-开 注入，
+    配 expansion=none 免 %/{} 展开。旧 escape_drawtext 的 \\' 转义在
+    text='...' 包装下实测（ffmpeg 6.1.1）引号配对错乱直接 Filter not found。"""
+    return "'" + str(text).replace("\\", "\\\\").replace("'", "'\\''") + "'"
+
+
 def operations_for_interval(recipe: dict, start: float, end: float) -> list[dict]:
     return [op for op in recipe.get("operations") or []
             if op["interval"][0] <= end and op["interval"][1] >= start]
 
 
 def segment_filter(operations: list[dict], *, width: int = 720, height: int = 960,
-                   duration_s: float, focus_x: float = 0.5) -> str:
+                   duration_s: float, focus_x: float = 0.5,
+                   slot_start: float = 0.0, slot_end: float | None = None,
+                   ) -> tuple[str, list[dict]]:
+    """slot 内特效滤镜（H4）：op 区间与 slot 求交，按 timeline 支持能力分级。
+
+    eq 支持 enable=between → 局部窗口生效；setpts/scale/tpad 不支持 timeline
+    （ffmpeg 6.1.1 实测报 "Timeline not supported"）→ 仅当 op 覆盖几乎整个
+    slot 才整段应用，否则跳过并在返回的 skipped 里记录（render_manifest
+    显式报告 partial_interval_skipped，不静默错位）。segment 输出时间轴从 0
+    起算（结尾 setpts=PTS-STARTPTS），故 enable 窗口用 op∩slot 再减 slot_start。
+    """
+    slot_end = duration_s if slot_end is None else slot_end
+    slot_len = max(1e-6, slot_end - slot_start)
     focus_x = min(1.0, max(0.0, float(focus_x)))
     crop_x = (f"(iw-{width})*{focus_x:g}" if abs(focus_x - 0.5) > 1e-6
               else f"(iw-{width})/2")
     filters = [f"scale={width}:{height}:force_original_aspect_ratio=increase",
                f"crop={width}:{height}:{crop_x}:(ih-{height})/2",
                "setsar=1", "fps=24"]
+    skipped: list[dict] = []
+
+    def _local_window(op: dict) -> tuple[float, float, float]:
+        left = max(float(op["interval"][0]), slot_start) - slot_start
+        right = min(float(op["interval"][1]), slot_end) - slot_start
+        coverage = max(0.0, right - left) / slot_len
+        return max(0.0, left), max(0.0, right), coverage
+
+    def _skip(op: dict, left: float, right: float):
+        skipped.append({"operation_id": op.get("id"), "type": op["type"],
+                        "status": "partial_interval_skipped",
+                        "reason": "filter has no timeline support and op interval "
+                                  f"covers only part of the slot [{left:g},{right:g}]s"})
+
     for op in operations:
         params = op.get("params") or {}
+        left, right, coverage = _local_window(op)
+        if coverage <= 0:
+            continue
+        whole = coverage >= 0.98
         if op["type"] == "speed_ramp":
+            if not whole:
+                _skip(op, left, right)
+                continue
             rate = min(4.0, max(0.25, float(params.get("rate", 1.0))))
             filters.append(f"setpts=PTS/{rate:g}")
         elif op["type"] in {"crop_reframe", "zoom_punch"}:
+            if not whole:
+                _skip(op, left, right)
+                continue
             scale = min(2.0, max(1.0, float(params.get("scale", 1.2))))
             filters.extend([f"scale=iw*{scale:g}:ih*{scale:g}",
                             f"crop={width}:{height}:{crop_x}:(ih-{height})/2"])
         elif op["type"] == "color_adjust":
-            filters.append("eq=saturation=1.25:contrast=1.08")
+            if whole:
+                filters.append("eq=saturation=1.25:contrast=1.08")
+            else:
+                filters.append(f"eq=saturation=1.25:contrast=1.08:"
+                               f"enable='between(t,{left:g},{right:g})'")
         elif op["type"] == "beat_freeze":
+            if not whole:
+                _skip(op, left, right)
+                continue
             filters.append("tpad=stop_mode=clone:stop_duration=0.25")
     filters.extend([f"tpad=stop_mode=clone:stop_duration={duration_s:g}",
                     f"trim=duration={duration_s:g}", "setpts=PTS-STARTPTS"])
-    return ",".join(filters)
+    return ",".join(filters), skipped
 
 
 def final_filter(recipe: dict, *, font: Path | None = None) -> str:
@@ -116,8 +165,9 @@ def final_filter(recipe: dict, *, font: Path | None = None) -> str:
             filters.append(f"drawbox=x=0:y=0:w=iw:h=ih:color=purple@{opacity:g}:t=fill:"
                            f"enable='between(t,{start:g},{end:g})'")
         elif op["type"] in {"text_overlay", "text_layer_animation"}:
-            text = escape_drawtext(str(params.get("text") or params.get("subject") or ""))
-            if not text:
+            text = drawtext_text_value(
+                str(params.get("text") or params.get("subject") or ""))
+            if text == "''":
                 continue
             y = "h*0.78"
             if op["type"] == "text_layer_animation":
@@ -125,8 +175,9 @@ def final_filter(recipe: dict, *, font: Path | None = None) -> str:
                 # filter parser treats them as additional filter separators.
                 y = f"h-min(h*0.22\\,(t-{start:g})*h*0.8)"
             font_arg = f":fontfile='{font.as_posix()}'" if font and font.exists() else ""
-            filters.append(f"drawtext=text='{text}'{font_arg}:fontsize=52:fontcolor=white:"
-                           f"borderw=3:x=(w-text_w)/2:y={y}:enable='between(t,{start:g},{end:g})'")
+            filters.append(f"drawtext=text={text}{font_arg}:fontsize=52:fontcolor=white:"
+                           f"expansion=none:borderw=3:x=(w-text_w)/2:y={y}:"
+                           f"enable='between(t,{start:g},{end:g})'")
     return ",".join(filters) if filters else "null"
 
 
@@ -191,6 +242,27 @@ def _has_audio_stream(ffprobe_bin: str, video: Path) -> bool:
                for stream in probe.get("streams") or [])
 
 
+def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
+                     canvas_width: int, canvas_height: int,
+                     narrative_mode: bool) -> dict:
+    """产物缓存键（H3）：recipe/theme/槽位/选材/画布/叙事模式全量参与——
+    旧逻辑只看 rendered.mp4 是否存在，改主题重跑会静默返回旧主题成片。"""
+    import hashlib
+
+    payload = json.dumps({
+        "reference": recipe.get("reference"),
+        "operations": recipe.get("operations"),
+        "theme": asset_plan.get("theme"),
+        "slots": asset_plan.get("slots"),
+        "picked": [[row.get("slot_idx"),
+                    (row.get("picked") or {}).get("video"),
+                    (row.get("picked") or {}).get("source_start_s")]
+                   for row in retrieval],
+        "canvas": [canvas_width, canvas_height], "narrative": narrative_mode,
+    }, ensure_ascii=False, sort_keys=True)
+    return {"sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
+
+
 def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: list[dict],
                   output_dir: Path, *, mask_backend: MaskBackend | None = None,
                   force: bool = False) -> Path:
@@ -203,15 +275,25 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     final = output_dir / "rendered.mp4"
-    if final.exists() and not force:
-        return final
-    work = output_dir / "work"
-    work.mkdir(parents=True, exist_ok=True)
     narrative_mode = bool(asset_plan.get("narrative_program_required"))
     canvas_cfg = (cfg.library.get("narrative_render") or {}
                   if narrative_mode else cfg.generation.get("assemble", {}))
     canvas_width = int(canvas_cfg.get("width", 1920 if narrative_mode else 720))
     canvas_height = int(canvas_cfg.get("height", 1080 if narrative_mode else 960))
+    cache = render_cache_key(recipe, asset_plan, retrieval,
+                             canvas_width=canvas_width, canvas_height=canvas_height,
+                             narrative_mode=narrative_mode)
+    cache_path = output_dir / "render_cache.json"
+    if final.exists() and not force:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            cached = {}
+        if cached.get("sha256") == cache["sha256"]:
+            return final
+        # 键不匹配 → 旧产物属于另一 recipe/theme/画布：继续重渲覆盖（H3）
+    work = output_dir / "work"
+    work.mkdir(parents=True, exist_ok=True)
     render_duration = (max(float(slot["end_s"]) for slot in asset_plan["slots"])
                        if narrative_mode else float(recipe["reference"]["duration_s"]))
     execution_recipe = _scaled_recipe(recipe, render_duration) if narrative_mode else recipe
@@ -258,9 +340,12 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
                 source_has_audio = audio_streams[cache_key]
                 if not source_has_audio:
                     args.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
-            args.extend(["-vf", segment_filter(active, width=canvas_width,
-                                           height=canvas_height, duration_s=duration,
-                                           focus_x=float(picked.get("focus_x", 0.5))),
+            seg_filter, skipped_ops = segment_filter(
+                active, width=canvas_width, height=canvas_height, duration_s=duration,
+                focus_x=float(picked.get("focus_x", 0.5)),
+                slot_start=float(slot["start_s"]), slot_end=float(slot["end_s"]))
+            runtime_status.extend(skipped_ops)
+            args.extend(["-vf", seg_filter,
                          "-t", f"{max(duration, 0.1):g}"])
             if narrative_mode:
                 args.extend(["-map", "0:v:0", "-map",
@@ -351,4 +436,6 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
         "output": str(final), "commands": commands, "operations": runtime_status,
         "deterministic": True, "seed": recipe["provenance"]["seed"],
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+    cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
     return final
