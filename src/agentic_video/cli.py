@@ -182,6 +182,10 @@ def _index(args, cfg) -> dict:
     if not args.skip_captions:
         runner = Qwen2VLRunner(cfg.library.get("captions") or {})
         caption_video(cfg, result_path, force=args.force, limit=args.limit, runner=runner)
+        # 卸载 caption 模型再进 Omni 标注（2026-09-11 film1 实锤：Qwen2-VL 驻留
+        # + Omni 34GB/卡 在同进程叠加 → 46.77GB OOM；guimie 时代 caption 与
+        # 标注分进程跑没踩过，今天同进程串跑才爆）
+        runner.unload()
     annotations = None
     if args.profile == "narrative" and not args.skip_annotations:
         from src.agentic_video.narrative_index import run_narrative_annotations

@@ -394,6 +394,14 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
         saved["coord_system"] = "movie"
         _atomic_write_json(output_path, saved)
         processed += 1
+        # 窗间清 allocator 缓存（2026-09-11 film2 实锤：第 22 窗 8.32GB 激活
+        # 分配失败——碎片累积把 40GB 占死；guimie 36 窗没爆是余量运气）
+        try:
+            import torch
+
+            torch.cuda.empty_cache()
+        except Exception:                           # noqa: BLE001 - 无 CUDA 环境静默
+            pass
     return output_path
 
 

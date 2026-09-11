@@ -51,6 +51,22 @@ class Qwen2VLRunner:
                                                         max_pixels=512 * 28 * 28)
         self._model.eval()
 
+    def unload(self):
+        """显式卸载（cli._index 在 caption 后接 Omni 标注前调用——同进程
+        双模型叠加会 OOM，局部变量释放不归还 allocator 缓存）。"""
+        if self._model is None:
+            return
+        del self._model
+        self._model = None
+        self._processor = None
+        import gc
+
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def describe(self, image_path: Path, max_new_tokens: int = 96) -> str:
         self.load()
         import torch
