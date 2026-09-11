@@ -19,6 +19,10 @@ FFMPEG_OPS = {"hard_cut", "trim", "speed_ramp", "crop_reframe", "zoom_punch",
               "luma_flash", "color_adjust", "opacity_blend", "text_overlay",
               "text_layer_animation", "beat_freeze"}
 
+# 成片画布规则（2026-09-11 用户拍板）：所有剪辑成片一律 1920×1080 横屏。
+# 叙事/编辑两模式共用此默认；要出竖屏必须显式改配置，不得靠代码回退值复活。
+RENDER_CANVAS_DEFAULT = (1920, 1080)
+
 
 class MaskBackend(Protocol):
     def apply(self, video: Path, operations: list[dict], output: Path,
@@ -81,7 +85,9 @@ def operations_for_interval(recipe: dict, start: float, end: float) -> list[dict
             if op["interval"][0] <= end and op["interval"][1] >= start]
 
 
-def segment_filter(operations: list[dict], *, width: int = 720, height: int = 960,
+def segment_filter(operations: list[dict], *,
+                   width: int = RENDER_CANVAS_DEFAULT[0],
+                   height: int = RENDER_CANVAS_DEFAULT[1],
                    duration_s: float, focus_x: float = 0.5,
                    slot_start: float = 0.0, slot_end: float | None = None,
                    ) -> tuple[str, list[dict]]:
@@ -292,6 +298,17 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
     return {"sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
 
 
+def render_canvas(cfg: AppConfig, narrative_mode: bool) -> tuple[int, int]:
+    """成片画布解析：叙事模式读 library.narrative_render，编辑模式读
+    generation.assemble（均可用 width/height 覆盖）；缺省一律落
+    RENDER_CANVAS_DEFAULT（1920×1080 横屏，2026-09-11 规则）。"""
+    section = (cfg.library.get("narrative_render") if narrative_mode
+               else cfg.generation.get("assemble")) or {}
+    width = int(section.get("width") or RENDER_CANVAS_DEFAULT[0])
+    height = int(section.get("height") or RENDER_CANVAS_DEFAULT[1])
+    return width, height
+
+
 def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: list[dict],
                   output_dir: Path, *, mask_backend: MaskBackend | None = None,
                   force: bool = False) -> Path:
@@ -305,10 +322,7 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     output_dir.mkdir(parents=True, exist_ok=True)
     final = output_dir / "rendered.mp4"
     narrative_mode = bool(asset_plan.get("narrative_program_required"))
-    canvas_cfg = (cfg.library.get("narrative_render") or {}
-                  if narrative_mode else cfg.generation.get("assemble", {}))
-    canvas_width = int(canvas_cfg.get("width", 1920 if narrative_mode else 720))
-    canvas_height = int(canvas_cfg.get("height", 1080 if narrative_mode else 960))
+    canvas_width, canvas_height = render_canvas(cfg, narrative_mode)
     cache = render_cache_key(recipe, asset_plan, retrieval,
                              canvas_width=canvas_width, canvas_height=canvas_height,
                              narrative_mode=narrative_mode)

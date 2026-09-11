@@ -79,7 +79,7 @@ def test_renderer_filters_compile_requested_effects():
                                  slot_start=2.0, slot_end=4.0)
     assert "setpts=PTS/2" in vf and "trim=duration=2" in vf
     assert "force_original_aspect_ratio=increase" in vf
-    assert "crop=720:960" in vf and "setsar=1" in vf and ",pad=" not in vf
+    assert "crop=1920:1080" in vf and "setsar=1" in vf and ",pad=" not in vf
     assert skipped == []
 
 
@@ -103,6 +103,33 @@ def test_segment_filter_partial_interval_policy():
 def test_segment_filter_can_follow_model_subject_anchor():
     vf, _ = segment_filter([], width=1920, height=1080, duration_s=2.0, focus_x=0.2)
     assert "crop=1920:1080:(iw-1920)*0.2" in vf
+
+
+def test_render_canvas_rule_is_1920x1080_landscape():
+    """2026-09-11 用户规定：所有剪辑成片（叙事+编辑两模式）一律 1920×1080
+    横屏。裸配置回退与随库 default.yaml 都钉死在此；改回竖屏必须显式改
+    配置并有意触碰本测试。"""
+    from src.agentic_video.renderer import render_canvas
+    from src.config import load_config
+
+    bare = AppConfig(
+        wellbyte={}, ranking={}, download={}, template={}, generation={},
+        logging_level="INFO", perception={}, library={},
+        paths=PathsCfg(raw_dir="r", processed_dir="p", videos_dir="v", logs_dir="l",
+                       perception_dir="per", generation_dir="g", library_dir="lib"))
+    assert render_canvas(bare, narrative_mode=True) == (1920, 1080)
+    assert render_canvas(bare, narrative_mode=False) == (1920, 1080)
+
+    cfg = load_config()                                        # 随库交付配置
+    assert render_canvas(cfg, narrative_mode=True) == (1920, 1080)
+    # 显式覆盖仍生效：竖屏要走配置声明，不得靠代码回退复活
+    overridden = AppConfig(
+        wellbyte={}, ranking={}, download={}, template={}, generation={},
+        logging_level="INFO", perception={},
+        library={"narrative_render": {"width": 1080, "height": 1920}},
+        paths=PathsCfg(raw_dir="r", processed_dir="p", videos_dir="v", logs_dir="l",
+                       perception_dir="per", generation_dir="g", library_dir="lib"))
+    assert render_canvas(overridden, narrative_mode=True) == (1080, 1920)
 
 
 def test_final_filter_compiles_point_flash():
