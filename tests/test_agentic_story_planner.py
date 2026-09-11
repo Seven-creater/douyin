@@ -181,17 +181,17 @@ def test_execution_inputs_pass_copy_track_through():
     assert asset_plan["audio_mode"] == "bgm"
 
 
-def test_slot_need_spec_compiles_six_questions_and_bindings():
-    """P2：need 是证据规格不是角色中文化——六问字段进 need，绑定从 participants
-    推导，unknown/not_applicable 不被当内容引用。"""
+def test_slot_need_spec_compiles_bindings_without_reference_facts():
+    """P2 + 2026-09-11 C2 验证器实锤：need 只含可迁移结构，参考片六问的具体事实
+    （protagonist/problem 原文）不得灌入——否则跨库变成「找穿跆拳道服的角色」。"""
     program = valid_program()
     program["intent"].update({"protagonist": "救助者", "problem": "小猫被困",
                               "motivation": "unknown", "outcome": "not_applicable"})
     arc = program["arc"]
     spec = slot_need_spec(program, arc[0], 0)
-    assert "救助者" in spec["need"] and "小猫被困" in spec["need"]
-    assert "unknown" not in spec["need"]                     # 未呈现的不引用
-    assert set(spec["entity_bindings"]) == {"A", "B"}         # person/cat 双绑定
+    assert "救助者" not in spec["need"] and "小猫被困" not in spec["need"]
+    assert "处境" in spec["need"]                              # 结构性需求保留
+    assert set(spec["entity_bindings"]) == {"A", "B"}          # 绑定照常从 participants 推导
     assert spec["entity_bindings"]["A"]["reference_name"] == "救助者"
     conflict_spec = slot_need_spec(program,
                                    next(s for s in arc if s["role"] == "conflict"), 1)
@@ -199,7 +199,7 @@ def test_slot_need_spec_compiles_six_questions_and_bindings():
     assert conflict_spec["must_have"] and conflict_spec["must_not"]
     choice_spec = slot_need_spec(program,
                                  next(s for s in arc if s["role"] == "choice"), 2)
-    assert choice_spec["required"] is False                   # 可选槽
+    assert choice_spec["required"] is False                    # 可选槽
 
 
 def test_adjacent_slots_share_bindings_depend_on_each_other():

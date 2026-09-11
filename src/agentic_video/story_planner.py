@@ -84,24 +84,11 @@ def slot_need_spec(narrative: dict, segment: dict, idx: int) -> dict:
     intent = narrative.get("intent") or {}
     role = segment["role"]
     template = dict(_ROLE_NEED_TEMPLATES[role])
-    protagonist = _usable(intent.get("protagonist"))
-    problem = _usable(intent.get("problem"))
-    motivation = _usable(intent.get("motivation"))
-    change = _usable(intent.get("change"))
-    outcome = _usable(intent.get("outcome"))
+    # 红线（2026-09-11 C2 验证器实锤）：六问的 protagonist/problem/motivation/
+    # change/outcome 是**参考片**的事实，灌进 need 会变成「找穿跆拳道服的角色」
+    # 这类跨库荒谬需求——可迁移的只有「处境→冲突→行动→结果」的结构，目标
+    # 主角由 entity_bindings 的库侧语义对接，不由参考片描述指定。
     need = template["need"]
-    if role == "hook" and (protagonist or problem):
-        need = f"开场呈现主角{('（' + protagonist + '）') if protagonist else ''}" \
-               f"的处境{('：' + problem) if problem else ''}，让观众想看后续"
-    elif role == "conflict" and problem:
-        need = f"呈现主角面对的问题具象化为可见冲突：{problem}"
-    elif role == "climax" and (motivation or problem):
-        need = ("呈现主角的关键行动与情绪峰值"
-                + (f"（动机：{motivation}）" if motivation else f"（面对：{problem}）"))
-    elif role == "resolution" and (change or outcome):
-        need = ("呈现情绪收束与最终状态"
-                + (f"（变化：{change}）" if change else "")
-                + (f"（结果：{outcome}）" if outcome else ""))
     entity_by_id = {row["id"]: row for row in narrative.get("entities") or []}
     bindings = {}
     for event_id in segment.get("event_ids") or []:
