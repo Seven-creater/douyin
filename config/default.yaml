@@ -170,9 +170,10 @@ library:                   # 素材库（2026-09-11 起主力 = 罗小黑两部�
   verification:
     enabled: true
   narrative_render:
-    # 抖音竖屏画布 1K（2026-09-11 用户拍板 720x960 → 1080x1920；canvas 已入渲染缓存键）
-    width: 1080
-    height: 1920
+    # 横屏电影式画布 1K（2026-09-11 用户拍板：1920x1080，16:9 素材零裁切观看；
+    # canvas 已入渲染缓存键，竖屏需求时改回 1080x1920 即可）
+    width: 1920
+    height: 1080
     # 7682 型情感叙事模板的 BGM：模板自带 BGM 提取轨（版权状态与素材一致），
     # 渲染时替换素材对白音轨；文件缺失自动回退素材音轨（manifest 记 audio_fallback）
     bgm_path: data/library/bgm/template_7682.m4a
