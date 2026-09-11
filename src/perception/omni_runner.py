@@ -46,7 +46,8 @@ def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
 
     4K 源必须降采样（2026-09-11 罗小黑 2160p 实锤：2160p 切片喂 Omni，
     视觉 token 把进程顶到 46GB/卡 OOM；1280 宽对 fps=2 的理解/标注绰绰有余，
-    1080p 及以下源不受影响——scale=min 不放大）。
+    1080p 及以下源不受影响——scale=min 不放大）。5.1 声源必须下混立体声
+    （同日实锤：杜比/DTS 6 声道让 librosa audioread reshape 直接 ValueError）。
     """
     clip = clip_dir / "clip.mp4"
     if clip.exists():
@@ -60,7 +61,7 @@ def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
         "-y", "-ss", f"{start_s}", "-to", f"{end_s}", "-i", str(video_path),
         "-vf", f"scale='min({max_width},iw)':-2",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-movflags", "+faststart",
+        "-ac", "2", "-c:a", "aac", "-movflags", "+faststart",
         str(clip),
     ], timeout_s=300)
     return clip
