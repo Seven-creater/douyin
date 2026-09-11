@@ -159,7 +159,7 @@ def test_source_transcript_language_from_source_config(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ta, "transcribe_with_model", fake_transcribe)
     cfg = SimpleNamespace(library={"sources": {"lxh": {"language": "zh"}}},
-                          paths=SimpleNamespace(library_dir=tmp_path))
+                          perception={}, paths=SimpleNamespace(library_dir=tmp_path))
     run_source_transcript(cfg, "lxh", Path("v.mp4"), model=object())
     assert captured["language"] == "zh"
     result = json.loads((tmp_path / "lxh" / "narrative_transcript.json")
