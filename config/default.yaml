@@ -129,10 +129,16 @@ generation:               # Phase 4 MiniMax 生成管线
 logging:
   level: INFO
 
-library:                   # 素材库（Spider-Man 预告片/电影 → 可检索镜头库）
+library:                   # 素材库（2026-09-11 起主力 = 罗小黑两部电影：中文可人工核验+Qwen 语种优势）
   raw_subdir: raw          # data/library/raw/<来源>/<文件>.mp4
   sources:
-    guimie:
+    luoxiaohei1:
+      video: data/raw/luoxiaohei/罗小黑1 2019.4K.H265.60fps.10bit.Dolby.5.1.chs.mkv
+      language: zh
+    luoxiaohei2:
+      video: data/raw/luoxiaohei/罗小黑战记2.Ⅱ..2160p.WEB-DL.HQ.HDR.H265.DTS5.1.mp4
+      language: zh
+    guimie:                # 已退役（日语难人工核验）；保留产物供管线回归对照
       video: data/raw/guimie/Demon.Slayer.Infinity.Castle.2025.1080p.hevc.cq24.mp4
   source_zones:            # 片头/片尾职员表区不进检索池（2026-09-10 成片审核：首跑选中了 ED 段）
     head_s: 90             # 长片片头排除（OP/studio 版权卡）

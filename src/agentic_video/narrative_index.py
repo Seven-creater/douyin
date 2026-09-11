@@ -154,6 +154,10 @@ def run_source_transcript(cfg, source: str, video: Path, *, force: bool = False,
         return json.loads(path.read_text(encoding="utf-8"))
     from src.perception.transcribe_audio import (load_transcriber,
                                                   transcribe_with_model)
+    # 语种按源配置（2026-09-11 罗小黑库切换：中文源 language: zh；未配置走
+    # auto——旧硬编码 ja 对中文源是错的转写前提）
+    source_cfg = (cfg.library.get("sources") or {}).get(source) or {}
+    language = str(source_cfg.get("language") or "auto")
     transcribe_cfg = cfg.perception.get("transcribe") or {}
     if model is None:
         model = load_transcriber(
@@ -161,8 +165,8 @@ def run_source_transcript(cfg, source: str, video: Path, *, force: bool = False,
             vad_model=transcribe_cfg.get("vad_model", "fsmn-vad"),
             vad_max_segment_ms=int(transcribe_cfg.get("vad_max_single_segment_ms", 30000)),
             device=transcribe_cfg.get("device", "cuda:0"))
-    result = transcribe_with_model(model, video, language="ja")
-    result["language"] = "ja"
+    result = transcribe_with_model(model, video, language=language)
+    result["language"] = language
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
 
@@ -192,7 +196,7 @@ def attach_transcript_to_shots(result_path: Path, transcript: dict) -> Path:
 
 
 WINDOW_ANNOTATION_PROMPT = """你是电影叙事素材标注 Agent。观看 {start:g}~{end:g} 秒片段，
-根据给定镜头编号、时间、三帧描述和日语 ASR，为每个镜头标注可见内容。只输出 JSON：
+根据给定镜头编号、时间、三帧描述和 ASR 转写，为每个镜头标注可见内容。只输出 JSON：
 {{"shots":[{{"shot_idx":0,"entity_ids":["稳定、简短的角色ID"],
 "entity_names":["角色名或可见身份"],"event_id":"window事件ID",
 "event_summary":"主体做了什么并造成什么变化","story_role":"hook|context|conflict|choice|climax|consequence|resolution",

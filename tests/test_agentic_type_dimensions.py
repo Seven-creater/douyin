@@ -143,3 +143,28 @@ def test_run_type_facets_pilot_windows_and_resume(tmp_path):
 def test_library_facet_dimensions_cover_union_needs():
     assert set(LIBRARY_FACET_DIMENSIONS) == {"age_appearance", "location", "era",
                                              "interaction"}
+
+
+def test_source_transcript_language_from_source_config(tmp_path, monkeypatch):
+    """2026-09-11 罗小黑库切换：语种按 library.sources.<source>.language（zh），
+    未配置走 auto——旧硬编码 ja 对中文源是错误的转写前提。"""
+    import src.perception.transcribe_audio as ta
+    from src.agentic_video.narrative_index import run_source_transcript
+
+    captured = {}
+
+    def fake_transcribe(model, video, language):
+        captured["language"] = language
+        return {"segments": [], "full_text": ""}
+
+    monkeypatch.setattr(ta, "transcribe_with_model", fake_transcribe)
+    cfg = SimpleNamespace(library={"sources": {"lxh": {"language": "zh"}}},
+                          paths=SimpleNamespace(library_dir=tmp_path))
+    run_source_transcript(cfg, "lxh", Path("v.mp4"), model=object())
+    assert captured["language"] == "zh"
+    result = json.loads((tmp_path / "lxh" / "narrative_transcript.json")
+                        .read_text(encoding="utf-8"))
+    assert result["language"] == "zh"
+
+    run_source_transcript(cfg, "unconfigured", Path("v.mp4"), model=object())
+    assert captured["language"] == "auto"
