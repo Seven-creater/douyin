@@ -208,10 +208,15 @@ def run_rendering(cfg: AppConfig, recipe: dict, *, theme: str, library: str,
 def _release_gpu_cache() -> None:
     """critic 前释放检索/渲染阶段驻留的显存（2026-09-10 v4：E5 检索 + 渲染后
     GPU0 仅剩 10.9GiB，叙事 critic 的视觉编码要 11.45GiB 直接 OOM 崩掉整轮）。
-    allocator 缓存不随局部变量释放，需要显式 empty_cache。"""
+    allocator 缓存不随局部变量释放，需要显式 empty_cache；2026-09-11 罗小黑
+    P4 实锤第二层：E5 模型对象在 retrieval 后虽无引用但带循环引用，不 gc.collect
+    就不回收——15GB 驻留把 B/C 的 critic 阶段双双顶死。"""
     try:
+        import gc
+
         import torch
 
+        gc.collect()
         torch.cuda.empty_cache()
     except Exception:  # noqa: BLE001 - 无 torch/CPU 环境静默跳过
         pass
