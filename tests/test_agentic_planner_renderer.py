@@ -333,3 +333,19 @@ def test_render_cache_key_is_sensitive_to_theme_and_canvas():
                                     canvas_height=960, narrative_mode=True)
     assert len({base["sha256"], changed_theme["sha256"], changed_canvas["sha256"],
                 changed_mode["sha256"]}) == 4
+
+
+def test_source_subtitle_band_crop_applies_to_luoxiaohei_only():
+    """V3 P4：罗小黑 WEB-DL 内嵌字幕带按源配置裁切（Omni 索引侧不裁），
+    未配置的源不受影响。"""
+    from src.agentic_video.renderer import source_subtitle_treatment
+    cfg = AppConfig(
+        wellbyte={}, ranking={}, download={}, template={}, generation={},
+        logging_level="INFO", perception={},
+        library={"sources": {"luoxiaohei1": {"subtitle_band": {"crop_bottom": 0.12}}}},
+        paths=PathsCfg(raw_dir="r", processed_dir="p", videos_dir="v", logs_dir="l",
+                       perception_dir="per", generation_dir="g", library_dir="lib"))
+    crop = source_subtitle_treatment(cfg, "luoxiaohei1__narrative")
+    assert crop == "crop=iw:ih*0.88:0:0"
+    assert source_subtitle_treatment(cfg, "guimie") == ""      # 未配置不裁
+    assert source_subtitle_treatment(cfg, "") == ""

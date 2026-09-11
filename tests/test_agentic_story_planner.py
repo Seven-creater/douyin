@@ -3,11 +3,14 @@ from __future__ import annotations
 from src.agentic_video.narrative import ARC_ROLES
 from src.agentic_video.story_planner import (_arc_query, _build_specs,
                                              _emotion_peak_hint,
-                                             _expand_thin_arc, _hard_continuity,
+                                             _hard_continuity,
                                              build_story_plan, rank_story_path,
                                              slot_need_spec,
                                              story_plan_execution_inputs,
                                              validate_story_plan)
+from src.agentic_video.narrative_form import (compile_form_need,
+                                              infer_narrative_form,
+                                              resolve_slot_sequence)
 from tests.test_agentic_narrative import valid_program
 
 
@@ -44,31 +47,53 @@ def test_story_plan_is_traceable_and_rejects_missing_source():
     assert any("source.video" in e for e in validate_story_plan(plan))
 
 
-def test_expand_thin_arc_chunks_events_in_time_order():
+def test_thin_arc_maps_to_form_template_never_synthesizes_conflict():
+    """V3 P1：薄参考弧（hook/consequence）不再被 _expand_thin_arc 强补 conflict
+    （lxh_p4_C2 选错故事语法的病灶）——Form 模板按实际表达结构给声明式槽序列。"""
     program = valid_program()
     program["arc"] = [program["arc"][0]]                     # 只留 hook
-    expanded, added = _expand_thin_arc(program, min_slots=3)
-    assert added == ["conflict", "climax"]
-    roles = [segment["role"] for segment in expanded["arc"]]
-    assert roles == ["hook", "conflict", "climax"]
-    assert all(segment.get("synthesized") for segment in expanded["arc"][1:])
-    # 两个补位段按时序切分事件引用：冲突拿早期、高潮拿后期
-    assert expanded["arc"][1]["event_ids"] == ["e1"]
-    assert expanded["arc"][2]["event_ids"] == ["e2", "e3"]
+    program["utterances"] = [{"id": f"u{i}", "interval": [0.0, 2.0], "speaker_id": None,
+                              "original": "x", "translation_zh": "x",
+                              "evidence": [], "confidence": 0.9, "status": "uncertain"}
+                             for i in range(4)]              # 文字轨密 → assertion 型
+    slots, form_name = resolve_slot_sequence(program)
+    assert form_name == "assertion_visual_payoff"
+    roles = [slot["role"] for slot in slots]
+    assert roles == ["hook", "context", "consequence", "resolution"]
+    assert "conflict" not in roles                            # 绝不合成冲突
+    assert all(slot["required"] for slot in slots)            # 声明式必选
+    assert slots[0]["form_function"] == "premise"
+    assert slots[1]["form_function"] == "counter_evidence"
 
 
-def test_thin_reference_arc_never_renders_a_single_slot():
-    """2026-09-10 首跑病灶：arc=[hook] 把 60s 全灌进 1 个槽，成片零剪辑。"""
+def test_form_needs_carry_zero_reference_facts():
+    """form_function 编译的需求零参考事实（V3 P1：Reference Narrative 不直接
+    成为 Target Narrative）。"""
+    need = compile_form_need("counter_evidence")
+    assert "做得到" in need["need"]
+    for value in (need["need"], *need["must_have"], *need["must_not"]):
+        assert "跆拳道" not in value and "双手" not in value
+    assert infer_narrative_form(valid_program()) == "classic_arc"   # 有冲突角色
+
+
+def test_thin_reference_arc_renders_form_slots_not_single_slot():
+    """2026-09-10 首跑病灶回归：arc=[hook] 不得把 60s 灌进 1 个槽；
+    V3 后由 Form 模板给 4 槽（不再是自动补弧的 3 槽）。"""
     program = valid_program()
     program["arc"] = [program["arc"][0]]
+    program["utterances"] = [{"id": f"u{i}", "interval": [0.0, 2.0], "speaker_id": None,
+                              "original": "x", "translation_zh": "x",
+                              "evidence": [], "confidence": 0.9, "status": "uncertain"}
+                             for i in range(4)]
     rows = [_candidate(0, "hook", "person", start=0, event_id="e1"),
-            _candidate(1, "conflict", "person", start=4, event_id="e2"),
-            _candidate(2, "climax", "person", start=8, event_id="e2"),
+            _candidate(1, "context", "person", start=4, event_id="e2"),
+            _candidate(2, "consequence", "person", start=8, event_id="e2"),
             _candidate(3, "resolution", "person", start=12, event_id="e3")]
     plan = build_story_plan(program, rows, theme="鬼灭高燃战斗", library="guimie",
                             target_duration_s=60.0)
-    assert len(plan["slots"]) >= 3
-    assert plan["arc_expanded"]["added_roles"] == ["conflict", "climax"]
+    assert len(plan["slots"]) == 4
+    assert "arc_expanded" not in plan                          # 补弧机制已删
+    assert plan["narrative_form"]["name"] == "assertion_visual_payoff"
     assert validate_story_plan(plan) == []
     order = {role: idx for idx, role in enumerate(ARC_ROLES)}
     roles = [slot["role"] for slot in plan["slots"]]
@@ -214,20 +239,23 @@ def test_adjacent_slots_share_bindings_depend_on_each_other():
 
 def test_required_slot_unreachable_under_hard_continuity_is_unsupported():
     """V1 P2 红线：共享实体绑定的相邻槽实体不相交 → 转移非法 → 必选槽
-    unsupported，plan 如实报未完成；绝不放宽约束凑满。"""
+    unsupported，plan 如实报未完成；绝不放宽约束凑满。
+    V3 起厚弧（≥3 段）直接走参考弧——本例用厚弧验证（薄弧由 Form 模板接管）。"""
     program = valid_program()
     program["arc"] = [
         {"role": "hook", "event_ids": ["e1"]},
         {"role": "conflict", "event_ids": ["e2"]},            # 与 hook 共享 person/cat
+        {"role": "resolution", "event_ids": ["e3"]},
     ]
     rows = [_candidate(0, "hook", "person", start=0, event_id="e1", score=0.9),
-            _candidate(1, "conflict", "stranger", start=4, event_id="e2", score=0.9)]
+            _candidate(1, "conflict", "stranger", start=4, event_id="e2", score=0.9),
+            _candidate(2, "resolution", "person", start=8, event_id="e3", score=0.9)]
     plan = build_story_plan(program, rows, theme="救助", library="guimie",
                             target_duration_s=45.0)
     conflict_slot = plan["slots"][1]
     assert conflict_slot["status"] == "unsupported"
     assert conflict_slot["reason"] in {"library_insufficient", "continuity_infeasible"}
-    assert plan["required_unsupported"] == [1]
+    assert 1 in plan["required_unsupported"]
     assert plan["plan_complete"] is False
     assert validate_story_plan(plan) == []                    # 未完成但结构合法
 
@@ -287,3 +315,109 @@ def test_library_scope_matches_multiple_film_sources():
     assert not _row_in_library(rows[2], "luoxiaohei1,luoxiaohei2")
     assert not _row_in_library(rows[1], "luoxiaohei1")   # 单源不含片2
     assert _row_in_library(rows[2], "guimie")
+
+
+def test_entity_contract_locks_protagonist_against_higher_score_impostor():
+    """V3 P1/P3 核心断言（外审二轮）：identity constraint > semantic similarity。
+    槽0 选小黑后主角锁定；槽1 即使"无限"候选分数更高也不能上位——
+    lxh_p4_C2 三槽三主角的病灶直接回归测试。"""
+    program = valid_program()
+    program["arc"] = [
+        {"role": "hook", "event_ids": ["e1"]},
+        {"role": "conflict", "event_ids": ["e2"]},
+        {"role": "resolution", "event_ids": ["e3"]},
+    ]
+    xiaohei = {"row_idx": 0, "video": "movie.mp4", "video_stem": "luoxiaohei1__narrative",
+               "shot_idx": 0, "source_start_s": 100, "source_end_s": 103, "duration_s": 3,
+               "caption": "hook", "story_role": "hook", "entity_ids": ["e5"],
+               "entity_names": ["小黑"], "event_id": "e1", "semantic_score": 0.85,
+               "dialogue": []}
+    impostor = {**xiaohei, "row_idx": 1, "shot_idx": 1, "source_start_s": 200,
+                "source_end_s": 203, "entity_ids": ["e9"], "entity_names": ["无限"],
+                "story_role": "conflict", "caption": "conflict", "event_id": "e2",
+                "semantic_score": 0.99}                    # 分数更高但不是主角
+    xiaohei_conflict = {**xiaohei, "row_idx": 2, "shot_idx": 2, "source_start_s": 300,
+                        "source_end_s": 303, "story_role": "conflict",
+                        "caption": "conflict", "event_id": "e2",
+                        "semantic_score": 0.5}
+    resolution = {**xiaohei, "row_idx": 3, "shot_idx": 3, "source_start_s": 400,
+                  "source_end_s": 403, "story_role": "resolution",
+                  "caption": "resolution", "event_id": "e3"}
+    plan = _plan_with_groups(program, [[xiaohei], [impostor, xiaohei_conflict],
+                                       [resolution]])
+    contract = plan["entity_contract"]
+    assert contract["protagonist"] == "char:xiaohei"      # 注册表归一（别名 小黑）
+    assert contract["relaxed"] is False
+    picked_names = [slot["source"].get("entity_names") for slot in plan["slots"]]
+    assert "无限" not in {name for names in picked_names if names for name in names}
+    assert all(slot["status"] == "supported" for slot in plan["slots"])
+
+
+def _plan_with_groups(program, groups):
+    from src.agentic_video.story_planner import _assemble_story_plan
+    return _assemble_story_plan(program, groups, theme="守护",
+                                library="luoxiaohei1", target_duration_s=45.0)
+
+
+def test_entity_registry_unifies_cross_film_entities():
+    """V3 P2：两部电影各自的 entity_id 经注册表归一到同一 canonical id——
+    画面还是小黑，系统不再以为换人了。"""
+    from src.library.entity_registry import (load_entity_registry,
+                                             row_identity_keys)
+    registry = {"char:xiaohei": {"aliases": ["小黑"],
+                                 "source_entities": ["luoxiaohei1/entity_005",
+                                                     "luoxiaohei2/entity_017"]}}
+    film1 = {"video_stem": "luoxiaohei1__narrative", "entity_ids": ["entity_005"],
+             "entity_names": ["小黑"]}
+    film2 = {"video_stem": "luoxiaohei2__narrative", "entity_ids": ["entity_017"],
+             "entity_names": ["小黑"]}
+    keys1, keys2 = row_identity_keys(film1, registry), row_identity_keys(film2, registry)
+    assert "char:xiaohei" in keys1 and "char:xiaohei" in keys2
+    # 未注册实体回退源内键（同片约束仍成立）
+    unknown = {"video_stem": "luoxiaohei1__narrative", "entity_ids": ["entity_042"],
+               "entity_names": ["神秘角色"]}
+    assert "id:luoxiaohei1/entity_042" in row_identity_keys(unknown, registry)
+    # 空注册表不崩
+    assert row_identity_keys(film1, {})
+
+
+def test_evidence_window_follows_relevant_shot_not_event_start():
+    """V3 P2 断言（lxh_p4_C2 槽1）：事件聚合 caption 说"奔跑"，相关镜头在事件
+    后段——裁剪窗口必须跟着证据走，不再从事件起点盲切 7.3s 放出开头的施法段；
+    槽 caption 只保留被裁入镜头。"""
+    from src.agentic_video.story_planner import _select_evidence_window
+    member_shots = [
+        {"shot_idx": 0, "start_s": 945.0, "end_s": 952.0,
+         "caption": "紫发角色在墓园伸手施法"},
+        {"shot_idx": 1, "start_s": 952.0, "end_s": 956.5,
+         "caption": "少年在森林中奔跑追赶"},
+        {"shot_idx": 2, "start_s": 956.5, "end_s": 960.0,
+         "caption": "奔跑中回头张望"},
+    ]
+    window = _select_evidence_window(member_shots, budget_s=8.0,
+                                     query_text="叙事需求：主角奔跑的动作；需要：奔跑可见")
+    assert window is not None
+    assert window["start_s"] == 952.0                    # 跟着奔跑镜头，不是 945
+    assert window["end_s"] == 960.0
+    assert "奔跑" in window["caption"] and "施法" not in window["caption"]
+
+
+def test_merged_events_carry_member_shots_and_preceding():
+    """V3 P2：事件行带成员镜头明细（供证据窗口裁剪）与同窗时序前驱
+    （替代普遍为空的库内因果图，不造假）。"""
+    from src.agentic_video.story_planner import merge_event_candidates
+    rows = [
+        {"video": "m.mp4", "video_stem": "s", "window_idx": 0, "event_id": "eA",
+         "story_role": "conflict", "source_start_s": 100, "source_end_s": 104,
+         "duration_s": 4, "caption": "对峙", "entity_ids": ["a"], "entity_names": ["甲"],
+         "dialogue": [], "semantic_score": 0.5},
+        {"video": "m.mp4", "video_stem": "s", "window_idx": 0, "event_id": "eB",
+         "story_role": "climax", "source_start_s": 104, "source_end_s": 108,
+         "duration_s": 4, "caption": "爆发", "entity_ids": ["a"], "entity_names": ["甲"],
+         "dialogue": [], "semantic_score": 0.6},
+    ]
+    merged = merge_event_candidates(rows)
+    by_event = {row["event_id"]: row for row in merged}
+    assert len(by_event["eA"]["member_shots"]) == 1
+    assert by_event["eB"]["preceding_event_ids"] == ["eA"]
+    assert by_event["eA"]["preceding_event_ids"] == []

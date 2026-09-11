@@ -81,3 +81,48 @@ def test_llm_tier_used_when_json_parses():
 def test_empty_plan_degrades_gracefully():
     copy = build_copy_cues({"slots": [], "target_duration_s": 0})
     assert copy["cues"] == [] and copy["audio_mode"] == "dialogue"
+
+
+def _grounding_plan():
+    slots = [
+        {"slot_idx": 0, "role": "hook", "status": "supported",
+         "target_interval": [0.0, 7.0], "source": {
+             "caption": "小黑在雨中被困", "entity_names": ["小黑"]}},
+        {"slot_idx": 1, "role": "conflict", "status": "supported",
+         "target_interval": [7.0, 14.0], "source": {
+             "caption": "小黑与敌人对峙", "entity_names": ["小黑"]}},
+        {"slot_idx": 2, "role": "resolution", "status": "supported",
+         "target_interval": [14.0, 22.0], "source": {
+             "caption": "小黑守护同伴倒下", "entity_names": ["小黑"]}},
+    ]
+    return {"slots": slots, "target_duration_s": 22.0, "theme": "守护"}
+
+
+def test_cues_carry_slot_and_subject_binding():
+    """V3 P4：每条 cue 绑 slot_idx/subject_entity/evidence。"""
+    copy = build_copy_cues(_grounding_plan(), runner=None)
+    assert copy["source"] == "template"
+    for cue in copy["cues"]:
+        assert cue.get("slot_idx") is not None
+        assert cue.get("subject_entity")
+        assert cue.get("evidence")
+
+
+def test_copy_grounding_drops_unevidenced_lines():
+    """V3 P4 负例（lxh_p4_C2 punchline 病灶）：「可它还是救了他」在画面无救助
+    时必须被替换为无断言兜底；无 caption 重合的 card 必须被丢弃。"""
+    from src.agentic_video.copywriter import validate_copy_grounding
+    plan = _grounding_plan()
+    copy = {"cues": [
+        {"kind": "hook_line", "slot_idx": 0, "text": "人们常常觉得妖怪无情"},
+        {"kind": "info_card", "slot_idx": 1, "text": "对峙"},
+        {"kind": "info_card", "slot_idx": 2, "text": "妖灵被关进笼子"},  # 无重合→丢
+        {"kind": "punchline", "slot_idx": 2, "text": "可它还是救了他"},   # 无救助画面→换
+        {"kind": "punchline", "slot_idx": 2, "text": "但故事才刚刚开始"}, # 无断言→保留
+    ]}
+    report = validate_copy_grounding(copy, plan)
+    texts = [cue["text"] for cue in copy["cues"]]
+    assert "妖灵被关进笼子" not in texts
+    assert "可它还是救了他" not in texts
+    assert report["replaced_punchline"] is True
+    assert any(row["reason"] == "no_visual_evidence" for row in report["dropped"])

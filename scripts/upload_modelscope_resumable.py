@@ -21,7 +21,7 @@ import oss2
 from modelscope.hub.api import HubApi
 
 FILE = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\29785\Desktop\douyin\data\raw\guimie\Demon.Slayer.Kimetsu.no.Yaiba.Infinity.Castle.2025.1080p.BluRay.x265.10bit.DTS.5Audio.mkv"
-DATASET = 'guimie'
+DATASET = sys.argv[2] if len(sys.argv) > 2 else 'guimie'
 NAMESPACE = 'sevenchen777'
 PART_SIZE = 100 * 1024 * 1024  # 100MB/片，10.2GB ≈ 105 片（OSS 上限 10000 片）
 CKPT = FILE + '.upload_ckpt.json'

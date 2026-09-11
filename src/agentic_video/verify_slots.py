@@ -138,3 +138,117 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
                             if row["verdict"] == "uncertain"],
         "prompt_version": VERIFICATION_PROMPT_VERSION,
     }
+
+
+DETERMINISTIC_CHECK_VERSION = "det_check_v1"
+
+
+def deterministic_story_check(story_plan: dict, *, registry: dict | None = None) -> dict:
+    """V3 P3：渲染前零模型全局检查——Local Correctness ≠ Narrative Coherence。
+
+    lxh_p4_C2 病灶：三槽三个主角各自过槽级验证，成片却不知主角是谁。
+    三指标（确定性，不依赖 critic）：Protagonist Switch Count（单主角必须 0）/
+    Required-slot Protagonist Presence（100%）/ Unexplained Entity Transition
+    Rate（0）。Slot0=小黑、Slot1=无限 在这里直接 FAIL，一分钱 Omni 不花。
+    """
+    from src.agentic_video.narrative_form import protagonist_required
+    from src.library.entity_registry import load_entity_registry, row_identity_keys
+
+    if registry is None:
+        registry = load_entity_registry()
+    contract = story_plan.get("entity_contract") or {}
+    protagonist = contract.get("protagonist")
+    live = [slot for slot in story_plan.get("slots") or []
+            if slot.get("status") in {"supported", "uncertain"}
+            and (slot.get("source") or {}).get("video")]
+    presence: list[tuple[int, bool]] = []
+    for slot in live:
+        if not protagonist_required(slot.get("need_spec") or {}):
+            continue
+        keys = row_identity_keys(slot.get("source") or {}, registry)
+        presence.append((int(slot["slot_idx"]),
+                         (not protagonist) or protagonist in keys))
+    missing = [idx for idx, ok in presence if not ok]
+    # 主角中途缺席再回归 = 一次切换（present→absent→present）
+    switch_count = 0
+    seen_present = seen_absent = False
+    for _idx, ok in presence:
+        if ok:
+            if seen_absent:
+                switch_count += 1
+            seen_present, seen_absent = True, False
+        elif seen_present:
+            seen_absent = True
+    unexplained = [int(slot["slot_idx"]) for slot in live
+                   if slot.get("transition_reason") == "unexplained"]
+    reversals: list[list[int]] = []          # 信息项：同片时间倒流（倒叙须有理由）
+    for left, right in zip(live, live[1:]):
+        left_src, right_src = left.get("source") or {}, right.get("source") or {}
+        if left_src.get("video") == right_src.get("video") \
+                and float(right_src.get("start_s") or 0) \
+                < float(left_src.get("start_s") or 0) - 1e-6:
+            reversals.append([int(left["slot_idx"]), int(right["slot_idx"])])
+    metrics = {
+        "protagonist": protagonist,
+        "protagonist_switch_count": switch_count,
+        "required_protagonist_presence":
+            round((len(presence) - len(missing)) / len(presence), 4)
+            if presence else None,
+        "unexplained_entity_transition_rate":
+            round(len(unexplained) / max(1, len(live) - 1), 4),
+        "time_reversals": reversals,
+    }
+    violations = []
+    if switch_count:
+        violations.append(f"protagonist_switch_count={switch_count}")
+    if missing:
+        violations.append(f"required_slots_missing_protagonist={missing}")
+    if unexplained:
+        violations.append(f"unexplained_entity_transitions={unexplained}")
+    return {"version": DETERMINISTIC_CHECK_VERSION, "passed": not violations,
+            "metrics": metrics, "violations": violations,
+            "re_search_slots": sorted(set(missing) | set(unexplained))}
+
+
+BLIND_VIDEO_PROMPT = """你是第一次观看这条短视频的观众，没有任何背景资料。
+只根据画面和可听声音回答，不猜画面外剧情。只输出 JSON：
+{"main_character":"这条视频的主要人物是谁（按可见外观描述）",
+"consistent_protagonist":true,
+"switch_points":[{"at_s":0.0,"what_changed":"无法解释的人物切换"}],
+"story_in_one_sentence":"这条视频讲了什么",
+"event_relations":"前后段事件的关系：延续/并列/无关，逐段说明"}
+判定纪律：前后主要人物换成另一个人且没有转场理由，consistent_protagonist
+写 false 并在 switch_points 给出大致时间；不确定也写 false 并说明原因。"""
+
+BLIND_VIDEO_PROMPT_VERSION = "blind_v1"
+
+
+def blind_video_check(video_path, *, runner) -> dict:
+    """V3 P3：渲染后盲看（零上下文）——只看成片回答主体一致性/故事性。
+
+    不给 Story Plan / 文案 / 参考语境（V1 红线3：看过计划的模型自报答对
+    不可信——lxh_p4_C2 的 comprehension 5/5 与 coherence 0 同文件自相矛盾）。
+    """
+    answer = runner.watch(Path(video_path), BLIND_VIDEO_PROMPT, max_new_tokens=1024)
+    block = extract_json_block(answer.text)
+    try:
+        payload = json.loads(block) if block else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        return {"parsed": False, "consistent_protagonist": None,
+                "main_character": "", "switch_points": [],
+                "story_in_one_sentence": "", "event_relations": "",
+                "raw_head": str(answer.text)[:400],
+                "prompt_version": BLIND_VIDEO_PROMPT_VERSION}
+    consistent = payload.get("consistent_protagonist")
+    return {
+        "parsed": True,
+        "main_character": str(payload.get("main_character") or ""),
+        "consistent_protagonist": consistent if isinstance(consistent, bool) else None,
+        "switch_points": [item for item in payload.get("switch_points") or []
+                          if isinstance(item, dict)],
+        "story_in_one_sentence": str(payload.get("story_in_one_sentence") or ""),
+        "event_relations": str(payload.get("event_relations") or ""),
+        "prompt_version": BLIND_VIDEO_PROMPT_VERSION,
+    }

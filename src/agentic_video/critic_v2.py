@@ -155,10 +155,82 @@ def should_stop(history: list[dict], next_recipe: dict, *, max_rounds: int = 2,
     return False, "continue"
 
 
+def recipe_skeleton(recipe: dict) -> str:
+    """V3 P4：critic 只看 Recipe 操作骨架（type/interval/status）——旧版全文
+    12k 字里带参考片自己的文字层/人物描述，edit critic 幻觉出成片里不存在
+    的"跆拳道比赛、手写文字、户外风景照"（C2 实锤参考污染）。"""
+    rows = []
+    for op in (recipe.get("operations") or [])[:80]:
+        rows.append({"type": op.get("type"),
+                     "interval": op.get("interval"),
+                     "status": op.get("status")})
+    return json.dumps({"reference": recipe.get("reference"),
+                       "operations": rows}, ensure_ascii=False)[:3000]
+
+
+def reference_terms(narrative: dict | None, recipe: dict | None) -> list[str]:
+    """V3 P4：参考片专属词（intent 主题/主角 + 参考文字层文本）——critic 证据
+    引用这些词而目标库里没有，就是参考污染幻觉的特征。长 CJK 段切二元组
+    （"跆拳道服"→跆拳/拳道），证据里"跆拳道比赛"才对得上。"""
+    terms: set[str] = set()
+
+    def _absorb(text: str) -> None:
+        for run in _content_tokens(text):
+            if len(run) == 2:
+                terms.add(run)
+            elif len(run) > 2:
+                terms.update(run[i:i + 2] for i in range(len(run) - 1))
+
+    intent = (narrative or {}).get("intent") or {}
+    for field in ("protagonist", "topic", "message"):
+        _absorb(str(intent.get(field) or ""))
+    for op in ((recipe or {}).get("operations") or []):
+        _absorb(str(((op.get("params") or {}).get("text")) or ""))
+    return sorted(terms)[:60]
+
+
+def _content_tokens(text: str) -> list[str]:
+    """按标点/空白切出 CJK 连续段（粗粒度内容词）。"""
+    tokens, current = [], []
+    for char in str(text or ""):
+        if "一" <= char <= "鿿":
+            current.append(char)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
+def filter_critic_issues(critique: dict, library_entity_names: list[str],
+                         reference_tokens: list[str] | None = None) -> dict:
+    """V3 P4 幻觉过滤：issue 证据引用**参考片专属词**（且不引用目标素材实体）
+    → 参考污染幻觉，弃用。C2 实锤：edit critic 描述成片里不存在的
+    "跆拳道比赛、手写文字、户外风景照"（全是参考片内容）。"""
+    names = [str(name) for name in library_entity_names if str(name).strip()]
+    refs = [str(term) for term in reference_tokens or [] if len(str(term)) >= 2]
+    if not refs:
+        return critique
+    kept, dropped = [], []
+    for issue in critique.get("issues") or []:
+        evidence = str((issue or {}).get("evidence") or "")
+        mentions_library = any(name in evidence for name in names)
+        mentions_reference = any(term in evidence for term in refs)
+        if mentions_reference and not mentions_library:
+            dropped.append({**issue, "dropped_reason": "reference_contamination"})
+        else:
+            kept.append(issue)
+    critique["issues"] = kept
+    critique["hallucinated_issues"] = dropped
+    return critique
+
+
 def run_structured_critic(video: Path, recipe: dict, asset_plan: dict,
-                          retrieval: list[dict], *, runner) -> dict:
+                          retrieval: list[dict], *, runner,
+                          narrative: dict | None = None) -> dict:
     prompt = CRITIC_PROMPT.format(
-        recipe=json.dumps(recipe, ensure_ascii=False)[:12000],
+        recipe=recipe_skeleton(recipe),
         asset_plan=json.dumps(asset_plan, ensure_ascii=False)[:5000],
         retrieval=json.dumps(retrieval, ensure_ascii=False)[:5000])
     answer = runner.watch(video, prompt, max_new_tokens=2048)
@@ -170,7 +242,13 @@ def run_structured_critic(video: Path, recipe: dict, asset_plan: dict,
                                 "operation_id": None}], "patches": [],
                     "verdict": "critic parse failed", "raw_head": answer.text[:300]}
     critique["elapsed_s"] = answer.elapsed_s
-    return critique
+    # 幻觉过滤（V3 P4）：证据引用参考片专属词且不引用目标素材 → 弃用
+    entity_names = []
+    for row in retrieval or []:
+        picked = row.get("picked") or {}
+        entity_names.extend(str(v) for v in (picked.get("entity_names") or []))
+    return filter_critic_issues(critique, entity_names,
+                                reference_tokens=reference_terms(narrative, recipe))
 
 
 def build_fault_suite(recipes: list[dict], *, count: int = 60) -> list[dict]:

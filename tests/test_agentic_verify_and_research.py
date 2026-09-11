@@ -143,3 +143,71 @@ def test_re_search_fails_explicitly_when_nothing_eligible(tmp_path):
                             rejected=everything_rejected)
     assert report["status"] == "failed"                     # 明确失败，不放宽凑满
     assert json.dumps(plan["slots"][1]["source"], ensure_ascii=False) == before
+
+
+def _contract_plan(switched=False):
+    """三槽计划：正常=全小黑；switched=槽1 换成无限（C2 病灶形态）。"""
+    def slot(idx, role, name, entity_id, status="supported"):
+        return {"slot_idx": idx, "role": role, "status": status,
+                "transition_reason": "entity_continuity" if idx else "opening",
+                "need_spec": {"required": True,
+                              "entity_requirements": {"protagonist": "required"}},
+                "source": {"video": "a.mkv", "video_stem": "luoxiaohei1__narrative",
+                           "start_s": 100 + idx * 50, "end_s": 107 + idx * 50,
+                           "entity_ids": [entity_id], "entity_names": [name],
+                           "caption": f"{name}行动"}}
+    slots = [slot(0, "hook", "小黑", "entity_005")]
+    if switched:
+        second = slot(1, "conflict", "无限", "entity_009")
+        second["transition_reason"] = "unexplained"
+        slots.append(second)
+    else:
+        slots.append(slot(1, "conflict", "小黑", "entity_005"))
+    slots.append(slot(2, "resolution", "小黑", "entity_005"))
+    return {"slots": slots, "entity_contract": {
+        "protagonist": "char:xiaohei", "locked_slots": [0, 1, 2],
+        "free_slots": [], "relaxed": False}}
+
+
+def test_deterministic_check_catches_protagonist_switch_without_omni():
+    """V3 P3：Slot0=小黑、Slot1=无限 在渲染前就被确定性拦下（零模型）。"""
+    from src.agentic_video.verify_slots import deterministic_story_check
+    registry = {"char:xiaohei": {"aliases": ["小黑"]},
+                "char:wuxian": {"aliases": ["无限"]}}
+    ok = deterministic_story_check(_contract_plan(switched=False), registry=registry)
+    assert ok["passed"] is True
+    assert ok["metrics"]["protagonist_switch_count"] == 0
+    assert ok["metrics"]["required_protagonist_presence"] == 1.0
+    bad = deterministic_story_check(_contract_plan(switched=True), registry=registry)
+    assert bad["passed"] is False
+    assert bad["metrics"]["protagonist_switch_count"] == 1
+    assert 1 in bad["re_search_slots"]
+
+
+def test_blind_video_check_prompt_carries_zero_context():
+    """V3 P3：盲看 prompt 只描述任务，不含计划/文案/参考——独立证词。"""
+    from src.agentic_video.verify_slots import BLIND_VIDEO_PROMPT
+    assert "Story Plan" not in BLIND_VIDEO_PROMPT
+    assert "Narrative Program" not in BLIND_VIDEO_PROMPT
+    assert "consistent_protagonist" in BLIND_VIDEO_PROMPT
+
+
+def test_blind_video_check_parses_structured_answer():
+    from types import SimpleNamespace
+    import json as _json
+    from src.agentic_video.verify_slots import blind_video_check
+
+    class _Runner:
+        def watch(self, video, prompt, **kwargs):
+            assert "背景资料" in prompt
+            return SimpleNamespace(text=_json.dumps({
+                "main_character": "一只黑猫妖灵",
+                "consistent_protagonist": False,
+                "switch_points": [{"at_s": 7.0, "what_changed": "人物换成人类男性"}],
+                "story_in_one_sentence": "看不懂在讲什么",
+                "event_relations": "无关"}, ensure_ascii=False))
+
+    result = blind_video_check("fake.mp4", runner=_Runner())
+    assert result["parsed"] is True
+    assert result["consistent_protagonist"] is False
+    assert result["switch_points"][0]["at_s"] == 7.0

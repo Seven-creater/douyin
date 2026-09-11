@@ -231,3 +231,90 @@ def test_prompt_v2_carries_tiered_evidence_and_reconciliation_rules():
     for field in ("protagonist", "goal", "problem", "motivation", "change", "outcome"):
         assert field in SYNTHESIS_PROMPT                       # 六问
     assert "not_applicable" in SYNTHESIS_PROMPT
+
+
+def test_window_prompt_v2_reports_facts_without_story_role():
+    """V3 P0 断言3：观察层不得输出 story_role（同窗两次观察角色跳变 hook→context），
+    且多事件窗必须逐个列出（11s 窗压成一个 observation 是 badcase 主病灶）。"""
+    from src.agentic_video.narrative_agent import (WINDOW_PROMPT,
+                                                   WINDOW_PROMPT_VERSION)
+    assert WINDOW_PROMPT_VERSION == "v2"
+    assert "story_role" not in WINDOW_PROMPT
+    assert "不判断叙事角色" in WINDOW_PROMPT
+    assert "逐个列出" in WINDOW_PROMPT
+
+
+def test_dedupe_text_signals_merges_cross_modal_repetition():
+    """V3 P0 断言1：同句 OCR×5 + ASR 整句×1 → 材料里只出现一次合并条目，
+    保留跨模态元数据（合并非删除）。"""
+    from src.agentic_video.narrative_agent import dedupe_text_signals
+    ocr = [{"t_start_s": t, "t_end_s": t + 1,
+            "text": "人们常常觉得失去了双手，就会变成一个废人"} for t in range(5)]
+    asr = [{"start_ms": 0, "end_ms": 9790,
+            "text": "人们常常觉得失去了双手，就会变成一个废人。"}]
+    merged = dedupe_text_signals(ocr, asr)
+    assert len(merged) == 1
+    entry = merged[0]
+    assert entry["sources"] == ["ocr", "asr"]
+    assert entry["repeat_count"] == {"ocr": 5, "asr": 1}
+    assert entry["interval"] == [0.0, 9.79]
+    # 分行字幕 + ASR 整句：包含式匹配也并进同一条
+    ocr2 = [{"t_start_s": 0, "t_end_s": 2, "text": "人们常常觉得失去了双手"},
+            {"t_start_s": 2, "t_end_s": 4, "text": "就会变成一个废人"}]
+    merged2 = dedupe_text_signals(ocr2, asr)
+    assert len(merged2) == 2                    # 两行各自聚合，ASR 并入首个匹配
+    assert any("asr" in entry["sources"] for entry in merged2)
+
+
+def test_material_modes_change_text_signal_visibility(tmp_path):
+    from src.agentic_video.narrative_agent import build_narrative_material
+    cfg = _agent_cfg(tmp_path)
+    ocr_dir = cfg.paths.perception_dir / "ref" / "ocr"
+    ocr_dir.mkdir(parents=True, exist_ok=True)
+    (ocr_dir / "result.json").write_text(json.dumps(
+        {"output": {"text_events": [{"t_start_s": 0.0, "t_end_s": 1.0, "text": "字幕一"}]}}),
+        encoding="utf-8")
+    asr_dir = cfg.paths.perception_dir / "ref" / "transcribe"
+    asr_dir.mkdir(parents=True, exist_ok=True)
+    (asr_dir / "result.json").write_text(json.dumps(
+        {"output": {"segments": [{"start_ms": 0, "end_ms": 2000, "text": "字幕一"}]}}),
+        encoding="utf-8")
+    full = build_narrative_material(cfg, "ref", external=False, material_mode="full")
+    video_only = build_narrative_material(cfg, "ref", external=False,
+                                          material_mode="video_only")
+    ocr_dedup = build_narrative_material(cfg, "ref", external=False,
+                                         material_mode="ocr_dedup")
+    assert "字幕一" in full and "跨模态一致" in full
+    assert "字幕一" not in video_only                      # A 条件：纯视频
+    assert "字幕一" in ocr_dedup and "ASR" not in ocr_dedup  # B 条件：无 ASR
+
+
+def test_narrative_agent_text_only_mode_never_watches_video(tmp_path):
+    """D 条件：纯文本归纳零次看片——text-dominant 判定的对照组。"""
+    cfg = _agent_cfg(tmp_path)
+    runner = _FakeRunner()
+    program = run_narrative_agent(cfg, "ref", runner=runner, material_mode="text_only")
+    assert runner.watches == 0 and runner.asks >= 1
+    assert program["provenance"]["prompt_version"] == "narrative_agent_v2"
+
+
+def test_windows_align_to_shot_boundaries_instead_of_equal_split():
+    """V3 P0 断言2：21.934s 参考片不再被均分成 2×10.967s——镜头边界（hard）
+    优先成窗界，OCR/ASR 变化点（soft）只拆超长段。"""
+    from src.agentic_video.narrative_agent import plan_narrative_windows
+    windows = plan_narrative_windows(21.934, max_windows=24, target_window_s=12.0,
+                                     hard_cuts=[7.133, 14.033], soft_cuts=[17.7, 20.9])
+    starts = [window.start for window in windows]
+    assert 7.133 in starts and 14.033 in starts       # hard 边界保留为窗界
+    assert 10.967 not in starts                        # 等分中点不再切窗
+    assert all(a.end == b.start for a, b in zip(windows, windows[1:]))
+    assert windows[0].start == 0 and windows[-1].end == 21.934
+    assert any("hard" in window.basis for window in windows)
+    # 无切点回退等分（兼容老路径）
+    fallback = plan_narrative_windows(60.0, max_windows=6, target_window_s=12)
+    assert len(fallback) == 5
+    # 1s 一变的字幕软切点不碎窗：min_window_s 兜底
+    noisy = plan_narrative_windows(20.0, hard_cuts=[10.0],
+                                   soft_cuts=[1, 2, 3, 4, 5, 6, 11, 12, 13])
+    assert len(noisy) <= 6
+    assert all(window.end - window.start >= 3.0 - 1e-6 for window in noisy)

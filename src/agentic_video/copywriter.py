@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-COPY_VERSION = "copy_v1"
+COPY_VERSION = "copy_v2"          # V3 P4：cue 绑 slot_idx/subject/evidence + grounding 校验
 
 # 模板保底文案：通用但不空洞的断言/收尾，适配逆袭-励志-守护类主题
 _FALLBACK_HOOKS = (
@@ -66,8 +66,11 @@ def _ask_llm(runner, story_plan: dict) -> dict | None:
     prompt = (
         "你是抖音情感叙事爆款文案师。参考表达公式：开头一句颠覆常识的断言钩子"
         "（人们常常觉得…），中段画面实证，结尾成就卡连发后抛一句反转/留白短句。\n"
-        f"主题：{theme}\n已选素材段：\n" + "\n".join(slot_lines) +
-        "\n只依据上面素材 caption 写实，不得编造素材外的人物/事件。输出 JSON："
+        f"主题：{theme}\n已选素材段（每行一个槽位，cards 按槽位顺序逐条对应）：\n"
+        + "\n".join(slot_lines) +
+        "\n证据纪律：每条 card 必须是对应槽位 caption 的写实转写，不得编造画面"
+        "外的人物/事件；punchline 如果含动作断言（救/赢/找到等），该动作必须"
+        "在末槽 caption 里可见——画面没有的动作一个字不许写。输出 JSON："
         '{"hook": "<=20字断言句", "cards": ["<=12字陈述式事实/成就，3-4条"], '
         '"punchline": "<=14字反转或留白句"}'
     )
@@ -109,27 +112,95 @@ def build_copy_cues(story_plan: dict, runner=None) -> dict:
     first_end = float(slots[0]["target_interval"][1])
     last_start = float(slots[-1]["target_interval"][0])
     last_duration = total - last_start
+
+    def _subject(slot: dict) -> str:
+        names = (slot.get("source") or {}).get("entity_names") or []
+        return "、".join(str(name) for name in names[:2]) if names else ""
+
+    def _evidence(slot: dict) -> str:
+        return str((slot.get("source") or {}).get("caption") or "")[:80]
+
     cues = [{
         "kind": "hook_line",
         "start_s": 0.15,
         "end_s": round(min(4.2, first_end - 0.2), 3),
         "text": copy["hook"],
+        "slot_idx": int(slots[0]["slot_idx"]),
+        "subject_entity": _subject(slots[0]),
+        "evidence": _evidence(slots[0]),
     }]
     # 末槽装得下的卡数：留 1.4s 给反转梗，每张占 1.1s
     n_cards = max(1, min(len(copy["cards"]), int((last_duration - 1.4) // 1.1) or 1))
     t = last_start + 0.2
-    for card in copy["cards"][:n_cards]:
+    for card_idx, card in enumerate(copy["cards"][:n_cards]):
+        card_slot = slots[1 + card_idx] if 1 + card_idx < len(slots) else slots[-1]
         cues.append({"kind": "info_card", "start_s": round(t, 3),
-                     "end_s": round(t + 1.0, 3), "text": card})
+                     "end_s": round(t + 1.0, 3), "text": card,
+                     "slot_idx": int(card_slot["slot_idx"]),
+                     "subject_entity": _subject(card_slot),
+                     "evidence": _evidence(card_slot)})
         t += 1.1
     cues.append({
         "kind": "punchline",
         "start_s": round(max(0.0, total - 1.0), 3),
         "end_s": round(max(0.1, total - 0.05), 3),
         "text": copy["punchline"],
+        "slot_idx": int(slots[-1]["slot_idx"]),
+        "subject_entity": _subject(slots[-1]),
+        "evidence": _evidence(slots[-1]),
     })
     return {"cues": cues, "audio_mode": "bgm", "source": source_tier,
             "version": COPY_VERSION}
+
+
+# 动作断言词：punchline 含这些词时必须有画面证据（V3 P4）
+_ACTION_ASSERTION_CHARS = ("救", "赢", "找到", "夺", "守住", "护住", "翻盘",
+                           "逆袭", "夺冠", "康复", "打败", "战胜")
+
+
+def validate_copy_grounding(copy: dict, story_plan: dict) -> dict:
+    """V3 P4：无画面证据的文案不烧录——card 必须与绑定槽 caption 有词面重合，
+    punchline 的动作断言必须命中末槽画面词，否则丢弃/换无断言兜底。
+
+    lxh_p4_C2 病灶：punchline「可它还是救了他」——22 秒里没有任何"救"的
+    画面，文案在替乱剪编造叙事关系。copy 是最后生成的（槽位定稿后），但
+    "最后"不等于"免检"。
+    """
+    from src.agentic_video.story_planner import _text_shingles
+
+    slots = story_plan.get("slots") or []
+    by_idx = {int(slot.get("slot_idx", -1)): slot for slot in slots}
+    report = {"dropped": [], "replaced_punchline": False, "kept": 0}
+    cues = list((copy or {}).get("cues") or [])
+    kept = []
+    for cue in cues:
+        kind = cue.get("kind")
+        text = str(cue.get("text") or "")
+        if kind == "info_card":
+            slot = by_idx.get(int(cue.get("slot_idx", -1)))
+            caption = str(((slot or {}).get("source") or {}).get("caption") or "")
+            grounded = (slot is not None
+                        and slot.get("status") in {"supported", "uncertain"}
+                        and caption
+                        and bool(_text_shingles(text) & _text_shingles(caption)))
+            if not grounded:
+                report["dropped"].append({"kind": kind, "text": text,
+                                          "reason": "no_visual_evidence"})
+                continue
+        elif kind == "punchline":
+            live = [slot for slot in slots
+                    if slot.get("status") in {"supported", "uncertain"}]
+            caption = str(((live[-1].get("source") or {}).get("caption") or "")
+                          if live else "")
+            asserts_action = any(verb in text for verb in _ACTION_ASSERTION_CHARS)
+            if asserts_action and not (_text_shingles(text) & _text_shingles(caption)):
+                cue = {**cue, "text": _FALLBACK_PUNCHLINES[0],
+                       "grounding": "replaced_nonassertive"}
+                report["replaced_punchline"] = True
+        kept.append(cue)
+    copy["cues"] = kept
+    report["kept"] = len(kept)
+    return report
 
 
 def write_copy_track(copy: dict, path) -> object:

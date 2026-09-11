@@ -263,7 +263,9 @@ def _render(args, cfg) -> dict:
         target_duration_s=args.target_duration)
     manifest.stage("render", "complete", output=str(final))
     return {"output": str(final), "slots": len(plan["slots"]),
-            "missing": sum(bool(row.get("missing")) for row in retrieval)}
+            # V3 修正：missing 只数 unsupported 槽——旧口径把带 re_searched 溯源
+            # 说明的 supported 槽也误计成缺素材（C2 wide 渲染 missing:2 假警报）
+            "missing": sum(1 for row in retrieval if (row.get("picked") is None))}
 
 
 def _run(args, cfg) -> dict:

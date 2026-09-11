@@ -272,6 +272,18 @@ def _has_audio_stream(ffprobe_bin: str, video: Path) -> bool:
                for stream in probe.get("streams") or [])
 
 
+def source_subtitle_treatment(cfg: AppConfig, video_stem: str) -> str:
+    """按源配置的内嵌字幕带裁切（V3 P4）：罗小黑 WEB-DL 源自带烧录中文字幕，
+    与成片文案轨同屏打架（lxh_p4_C2 盲看实锤「你是要」抢戏）。渲染侧裁掉
+    底部字幕带；Omni 索引侧不裁（字幕是标注证据）。返回前置 crop 滤镜或空串。"""
+    name = str(video_stem or "").split("__")[0]
+    band = ((cfg.library.get("sources") or {}).get(name) or {}).get("subtitle_band") or {}
+    ratio = float(band.get("crop_bottom") or 0)
+    if not 0 < ratio < 0.4:
+        return ""
+    return f"crop=iw:ih*{1 - ratio:g}:0:0"
+
+
 def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
                      canvas_width: int, canvas_height: int,
                      narrative_mode: bool) -> dict:
@@ -388,7 +400,10 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
                 focus_x=float(picked.get("focus_x", 0.5)),
                 slot_start=float(slot["start_s"]), slot_end=float(slot["end_s"]))
             runtime_status.extend(skipped_ops)
-            args.extend(["-vf", seg_filter,
+            subtitle_crop = source_subtitle_treatment(
+                cfg, str(picked.get("video_stem") or ""))
+            vf_chain = f"{subtitle_crop},{seg_filter}" if subtitle_crop else seg_filter
+            args.extend(["-vf", vf_chain,
                          "-t", f"{max(duration, 0.1):g}"])
             if narrative_mode:
                 args.extend(["-map", "0:v:0", "-map",

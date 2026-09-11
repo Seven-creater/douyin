@@ -21,8 +21,16 @@ from src.template.schema import extract_json_block
 # 观察键 = 源哈希+区间+实际提示词哈希+采样参数+模型版本；归纳键 = 观察结果+
 # 外部上下文+归纳提示词+模型配置。prompt_version 只是人读版本号。
 CACHE_SCHEMA_VERSION = "narrative_cache_v1"
-WINDOW_PROMPT_VERSION = "v1"
+# v2（V3 P0，2026-09-12）：①观察层不再输出 story_role——角色归纳只发生在
+# synthesis 层（Observation ≠ Interpretation，同窗两次观察 story_role 不稳定的
+# badcase 断言3）；②材料文本改为跨模态合并条目（同句 OCR 重复 5 次+ASR 1 次
+# 不再放大 6 倍灌入，断言1）。prompt_sha 进缓存键，旧观察自动失效重看。
+WINDOW_PROMPT_VERSION = "v2"
 SYNTHESIS_PROMPT_VERSION = "v2"
+# 消融模式（V3 P0）：text-dominant anchoring 验证——A 纯视频 / B 视频+合并OCR /
+# C 全量（现状）/ D 纯文本（零观察）。主判据 A vs C vs D：C≈D 且 A 明显不同
+# 才实锤"文字压倒视觉"；B 测 ASR 边际贡献。
+MATERIAL_MODES = ("full", "video_only", "ocr_dedup", "text_only")
 
 
 def _stable_hash(payload: Any) -> str:
@@ -98,10 +106,12 @@ class NarrativeWindow:
     phase: str = "initial"
     probe: str = "event_observation"
     reason: str = "timeline_coverage"
+    basis: tuple[str, ...] = ()       # 边界来源（"hard"/"soft"），溯源用
 
 
-def plan_narrative_windows(duration_s: float, *, max_windows: int = 24,
-                           target_window_s: float = 12.0) -> list[NarrativeWindow]:
+def _plan_equal_windows(duration_s: float, max_windows: int,
+                        target_window_s: float) -> list[NarrativeWindow]:
+    """无事件信号切点时的回退：时长等分（长片则等距抽样）。"""
     if duration_s <= 0 or max_windows <= 0:
         return []
     target = max(1.0, float(target_window_s))
@@ -123,11 +133,97 @@ def plan_narrative_windows(duration_s: float, *, max_windows: int = 24,
             for idx, (start, end) in enumerate(zip(starts, ends))]
 
 
+def plan_narrative_windows(duration_s: float, *, max_windows: int = 24,
+                           target_window_s: float = 12.0,
+                           hard_cuts: list[float] | None = None,
+                           soft_cuts: list[float] | None = None,
+                           min_window_s: float = 3.0) -> list[NarrativeWindow]:
+    """V3 P0：窗口边界对齐事件信号，不再固定时长等分。
+
+    hard 切点（镜头边界/重大视觉变化）优先成为窗口边界；soft 切点（OCR 文本
+    变化/ASR 段边界）只在段落超过 target_window_s 时辅助再拆——1s 一变的字幕
+    不会把窗口切碎。target_window_s 从"固定切分宽度"降级为"合并上限"。
+    lxh_p4_C2 badcase 断言2：21.9s 参考片被均分成 2×10.967s，第二窗跨镜头
+    边界 7.133/14.033，把 6 个语义事件压成一个 observation（拥抱/户外微笑
+    不稳定总结）。无切点时回退等分（兼容老测试与长片抽样）。
+    """
+    if duration_s <= 0 or max_windows <= 0:
+        return []
+    hard = sorted({round(float(value), 3) for value in (hard_cuts or [])
+                   if 0 < float(value) < duration_s})
+    soft = sorted({round(float(value), 3) for value in (soft_cuts or [])
+                   if 0 < float(value) < duration_s} - set(hard))
+    if not hard and not soft:
+        return _plan_equal_windows(duration_s, max_windows, target_window_s)
+    # 只有 soft 时整片视为一个 hard 段，软切点负责拆超长段
+    boundaries = [0.0, *hard, duration_s]
+    spans: list[list[float]] = []
+    for left, right in zip(boundaries, boundaries[1:]):
+        if right <= left:
+            continue
+        if right - left <= target_window_s:
+            spans.append([left, right])
+            continue
+        # 超长 hard 段：用段内 soft 切点贪心再拆（每片 ≥ min_window_s 优先）
+        pieces, cursor = [], left
+        inner = [value for value in soft if left < value < right]
+        for value in inner:
+            if value - cursor >= min_window_s and right - value >= min_window_s:
+                pieces.append([cursor, value])
+                cursor = value
+        pieces.append([cursor, right])
+        merged_pieces = []
+        for piece in pieces:
+            if merged_pieces and (merged_pieces[-1][1] - merged_pieces[-1][0]
+                                  + piece[1] - piece[0]) <= target_window_s:
+                merged_pieces[-1][1] = piece[1]
+            else:
+                merged_pieces.append(piece)
+        spans.extend(merged_pieces)
+    # 过短段并入较短邻段（<1s 的镜头不该独占观察窗）
+    changed = True
+    while changed and len(spans) > 1:
+        changed = False
+        for idx, span in enumerate(spans):
+            if span[1] - span[0] >= min_window_s:
+                continue
+            left_ok, right_ok = idx > 0, idx < len(spans) - 1
+            if left_ok and (not right_ok or
+                            spans[idx - 1][1] - spans[idx - 1][0] <= spans[idx + 1][1] - spans[idx + 1][0]):
+                spans[idx - 1][1] = span[1]
+            elif right_ok:
+                spans[idx + 1][0] = span[0]
+            spans.pop(idx)
+            changed = True
+            break
+    while len(spans) > max_windows:   # 预算上限：合并最短相邻对
+        best = min(range(len(spans) - 1),
+                   key=lambda i: spans[i][1] - spans[i][0] + spans[i + 1][1] - spans[i + 1][0])
+        spans[best][1] = spans[best + 1][1]
+        spans.pop(best + 1)
+    hard_set, soft_set = set(hard), set(soft)
+    windows = []
+    for idx, (start, end) in enumerate(spans):
+        basis: set[str] = set()
+        for point in (start, end):
+            if point in hard_set:
+                basis.add("hard")
+            if point in soft_set:
+                basis.add("soft")
+        windows.append(NarrativeWindow(idx=idx, start=round(start, 3),
+                                       end=round(end, 3), basis=tuple(sorted(basis))))
+    return windows
+
+
 WINDOW_PROMPT = """你是视频内容取证 Agent。请观看原视频 {start:g}~{end:g} 秒，只报告这段中
-真正可见或可听的内容，不推测画面外剧情。只输出 JSON：
+真正可见或可听的内容，不推测画面外剧情。只报告事实，不判断叙事角色——
+"这段在故事里是什么角色"由后续全局归纳负责，观察层下结论只会污染证据。
+一个窗口里有多个不同事件时必须逐个列出，不许合并成一句话总结。
+只输出 JSON：
 {{"observations":[{{"start_s":{start:g},"end_s":{end:g},"entities":["人物或角色"],
-"action":"发生的动作/状态变化","speech":"可听对白概括或null",
-"emotion":"可见/可听情绪或uncertain","story_role":"hook|context|conflict|choice|climax|consequence|resolution|uncertain",
+"action":"发生的动作/状态变化（可见事实，observable facts）",
+"speech":"可听对白概括或null",
+"emotion":"可见/可听情绪或uncertain",
 "evidence":[{{"source":"frame|asr|ocr|audio","interval":[{start:g},{end:g}],"quote":"短证据","confidence":0.0}}],
 "confidence":0.0}}],"uncertainties":[]}}
 探针：{probe}；原因：{reason}。时间必须使用原视频时间，不确定就写 uncertain。
@@ -231,12 +327,100 @@ def build_reference_identity(cfg, vid: str, *, video: Path, video_sha: str) -> d
     }
 
 
+def _normalize_text_signal(text: str) -> str:
+    """文本归一（匹配用）：全角→半角、去标点/空白、小写。"""
+    out = []
+    for char in str(text or ""):
+        code = ord(char)
+        if code == 0x3000:
+            code = 32
+        elif 0xFF01 <= code <= 0xFF5E:
+            code -= 0xFEE0
+        char = chr(code)
+        if char.isalnum():
+            out.append(char.lower())
+    return "".join(out)
+
+
+def _signal_overlaps(interval: list[float], other: list[float]) -> bool:
+    return min(interval[1], other[1]) > max(interval[0], other[0])
+
+
+def dedupe_text_signals(ocr_events: list[dict],
+                        asr_segments: list[dict]) -> list[dict]:
+    """跨模态文本合并（V3 P0）：合并而非删除。
+
+    同一文本的 OCR 重复帧聚为一条；ASR 与 OCR 语义重叠（归一相同或包含，
+    且时间重叠）时并进同一条。给模型的文本只出现一次，但保留"哪些模态、
+    各重复几次"的证据元数据——跨模态一致是有价值的证据，重复放大是毒。
+    lxh_p4_C2 badcase 断言1：开场字幕 OCR×5 + ASR×1 把单一文本放大 6 倍，
+    成为压扁 intent 的 semantic anchor。
+    """
+    merged: dict[str, dict] = {}
+    for event in ocr_events or []:
+        text = str(event.get("text") or "").strip()
+        key = _normalize_text_signal(text)
+        if not key:
+            continue
+        left = float(event.get("t_start_s") or 0)
+        right = float(event.get("t_end_s") or left)
+        if key in merged:
+            entry = merged[key]
+            entry["interval"] = [min(entry["interval"][0], left),
+                                 max(entry["interval"][1], right)]
+            entry["repeat_count"]["ocr"] += 1
+        else:
+            merged[key] = {"text": text, "interval": [left, right],
+                           "sources": ["ocr"], "repeat_count": {"ocr": 1}}
+    for segment in asr_segments or []:
+        text = str(segment.get("text") or "").strip()
+        key = _normalize_text_signal(text)
+        if not key:
+            continue
+        left = float(segment.get("start_ms") or 0) / 1000
+        right = float(segment.get("end_ms") or 0) / 1000
+        target = None
+        if key in merged:
+            target = merged[key]
+        else:   # 包含式匹配：OCR 分行字幕 vs ASR 整句（7682 实例）
+            for other_key, entry in merged.items():
+                if (other_key in key or key in other_key) \
+                        and _signal_overlaps(entry["interval"], [left, right]):
+                    target = entry
+                    break
+        if target is not None:
+            if "asr" not in target["sources"]:
+                target["sources"].append("asr")
+            target["repeat_count"]["asr"] = target["repeat_count"].get("asr", 0) + 1
+            target["interval"] = [min(target["interval"][0], left),
+                                  max(target["interval"][1], right)]
+        else:
+            merged[key] = {"text": text, "interval": [left, right],
+                           "sources": ["asr"], "repeat_count": {"asr": 1}}
+    return list(merged.values())
+
+
+def _merged_signal_line(entry: dict) -> str:
+    counts = "＋".join(f"{source.upper()}×{count}"
+                      for source, count in entry["repeat_count"].items())
+    cross = "，跨模态一致" if len(entry["sources"]) > 1 else ""
+    return (f"文字 {entry['interval'][0]:g}~{entry['interval'][1]:g}s"
+            f"（{counts}{cross}，重复已聚合）：{entry['text']}")
+
+
 def build_narrative_material(cfg, vid: str, *, start: float | None = None,
                              end: float | None = None,
-                             external: bool = True) -> str:
+                             external: bool = True,
+                             material_mode: str = "full") -> str:
     """确定性材料。external=False 供窗口观察用（只有片内信号，杜绝外部语境
     污染观察层，同时观察缓存不随评论更新而失效）；external=True 供归纳层，
-    外部线索按证据分级表标注引用方式。"""
+    外部线索按证据分级表标注引用方式。
+
+    material_mode（V3 P0 消融）：full=OCR+ASR 跨模态合并（默认）；
+    video_only=不带任何文本信号；ocr_dedup=只给合并后的 OCR（测 ASR 边际）；
+    text_only 与 full 同材料（它作用在观察层：跳过全部看片）。
+    文本一律走 dedupe_text_signals 合并——重复文本是 text-dominant
+    anchoring 的放大器，不进材料。"""
     rows = []
     if external:
         metadata = _load_reference_metadata(cfg, vid)
@@ -263,24 +447,24 @@ def build_narrative_material(cfg, vid: str, *, start: float | None = None,
     if start is not None and end is not None:
         boundaries = [value for value in boundaries if start <= value <= end]
     rows.append("镜头边界：" + ",".join(f"{value:g}" for value in boundaries[:80]))
-    ocr = _read_output(cfg, vid, "ocr")
-    for event in ocr.get("text_events") or []:
-        left = float(event.get("t_start_s") or 0)
-        right = float(event.get("t_end_s") or left)
-        if start is not None and (right < start or left > float(end)):
-            continue
-        rows.append(f"OCR {left:g}~{right:g}s：{event.get('text') or ''}")
-    asr = _read_output(cfg, vid, "transcribe")
-    segments = asr.get("segments") or []
-    if segments:
-        for segment in segments:
-            left = float(segment.get("start_ms") or 0) / 1000
-            right = float(segment.get("end_ms") or 0) / 1000
-            if start is not None and (right < start or left > float(end)):
-                continue
-            rows.append(f"ASR {left:g}~{right:g}s：{segment.get('text') or ''}")
-    elif asr.get("full_text"):
-        rows.append("ASR 无可靠分段：" + str(asr["full_text"])[:1200])
+    if material_mode != "video_only":
+        ocr = _read_output(cfg, vid, "ocr")
+        asr = _read_output(cfg, vid, "transcribe")
+        ocr_events = list(ocr.get("text_events") or [])
+        segments = list(asr.get("segments") or [])
+        if start is not None:
+            ocr_events = [event for event in ocr_events
+                          if not (float(event.get("t_end_s") or 0) < start
+                                  or float(event.get("t_start_s") or 0) > float(end))]
+            segments = [segment for segment in segments
+                        if not (float(segment.get("end_ms") or 0) / 1000 < start
+                                or float(segment.get("start_ms") or 0) / 1000 > float(end))]
+        merged = dedupe_text_signals(
+            ocr_events, [] if material_mode == "ocr_dedup" else segments)
+        for entry in merged:
+            rows.append(_merged_signal_line(entry))
+        if material_mode == "full" and not segments and asr.get("full_text"):
+            rows.append("ASR 无可靠分段：" + str(asr["full_text"])[:1200])
     beats = _read_output(cfg, vid, "beats")
     points = [float(value) for value in beats.get("beat_points_s") or []]
     if start is not None and end is not None:
@@ -304,6 +488,15 @@ def parse_observation(raw: str) -> dict:
                          if isinstance(item, dict)],
         "uncertainties": [str(item) for item in value.get("uncertainties") or []],
     }
+
+
+def _strip_story_role(observations: list[dict]) -> list[dict]:
+    """V3 P0：观察层不再有 story_role（旧缓存/v2 前输出防御性剥离）——
+    角色归纳只发生在 synthesis 层。"""
+    for item in observations:
+        if isinstance(item, dict):
+            item.pop("story_role", None)
+    return observations
 
 
 def _normalize_evidence(items: Any, duration: float) -> list[dict]:
@@ -584,10 +777,11 @@ def _ensure_runner(cfg, runner):
 
 def _observe_window(cfg, vid: str, video: Path, window: NarrativeWindow,
                     window_dir: Path, runner, omni_sig: dict, video_sha: str,
-                    *, force: bool) -> tuple[dict, bool, object]:
+                    *, force: bool, material_mode: str = "full"
+                    ) -> tuple[dict, bool, object]:
     """单窗观察，依赖键命中即复用（miss 才看片）。返回 (parsed, cached, runner)。"""
     material = build_narrative_material(cfg, vid, start=window.start, end=window.end,
-                                        external=False)
+                                        external=False, material_mode=material_mode)
     key = _observation_key(video_sha, window, material, omni_sig)
     if not force:
         cached = _load_window_cache(window_dir, key)
@@ -610,7 +804,12 @@ def _observe_window(cfg, vid: str, video: Path, window: NarrativeWindow,
 
 def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
                         budget: NarrativeBudget | None = None, force: bool = False,
-                        runner=None) -> dict:
+                        runner=None, material_mode: str = "full") -> dict:
+    """material_mode（V3 P0 消融）：full / video_only / ocr_dedup / text_only。
+    text_only 零次看片——synthesis 只拿文本材料，是 text-dominant 判定的
+    D 条件（A 纯视频 vs C 全量 vs D 纯文本：C≈D 且 A 异 → 文字压倒视觉）。"""
+    if material_mode not in MATERIAL_MODES:
+        raise ValueError(f"material_mode must be one of {MATERIAL_MODES}")
     budget = budget or NarrativeBudget()
     root = cfg.paths.perception_dir / vid / "narrative_agent"
     result_path = root / "result.json"
@@ -622,7 +821,8 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
     video = cfg.paths.videos_dir / vid / "video.mp4"
     video_sha = sha256_file(video)
     omni_sig = _omni_signature(cfg)
-    full_material = build_narrative_material(cfg, vid)
+    full_material = build_narrative_material(cfg, vid,
+                                             material_mode=material_mode)
 
     # 归纳缓存快路径：信封的依赖指纹（源哈希+外部材料+归纳提示词+模型配置）与
     # 当前输入完全一致才复用。旧信封（无 cache 字段）视为陈旧——改 prompt 后
@@ -645,9 +845,21 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
                 write_narrative_program(program, Path(output))
             return program
 
-    windows = plan_narrative_windows(
+    # 切窗信号（V3 P0）：hard=镜头边界；soft=OCR 文本变化点/ASR 段边界——
+    # 窗口不再固定时长等分，对齐事件信号后多事件窗不再被压成一个观察。
+    shots = _read_output(cfg, vid, "shots")
+    hard_cuts = [float(value) for value in shots.get("boundaries_s") or []]
+    ocr = _read_output(cfg, vid, "ocr")
+    asr = _read_output(cfg, vid, "transcribe")
+    soft_cuts: list[float] = []
+    for entry in dedupe_text_signals(list(ocr.get("text_events") or []), []):
+        soft_cuts.append(float(entry["interval"][0]))
+    for segment in asr.get("segments") or []:
+        soft_cuts.append(float(segment.get("start_ms") or 0) / 1000)
+    windows = ([] if material_mode == "text_only" else plan_narrative_windows(
         duration, max_windows=budget.max_initial_windows,
-        target_window_s=budget.target_window_s)
+        target_window_s=budget.target_window_s,
+        hard_cuts=hard_cuts, soft_cuts=soft_cuts))
     observations = []
     tool_calls = []
     for window in windows:
@@ -655,8 +867,8 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
         window_dir.mkdir(parents=True, exist_ok=True)
         parsed, cached, runner = _observe_window(
             cfg, vid, video, window, window_dir, runner, omni_sig, video_sha,
-            force=force)
-        observations.extend(parsed["observations"])
+            force=force, material_mode=material_mode)
+        observations.extend(_strip_story_role(parsed["observations"]))
         tool_calls.append({"tool": "omni_narrative_window", "cached": cached,
                            **asdict(window)})
 
@@ -671,8 +883,10 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
         tool_calls=tool_calls)
     before = _evidence_signature(program)
     refinement_count = 0
-    stop_reason = "no_refinement_needed"
-    for round_idx in range(1, budget.max_rounds + 1):
+    stop_reason = ("text_only_no_observation" if material_mode == "text_only"
+                   else "no_refinement_needed")
+    for round_idx in range(1, 0 if material_mode == "text_only"
+                           else budget.max_rounds + 1):
         if not _needs_refinement(program):
             stop_reason = "narrative_complete"
             break
@@ -689,8 +903,8 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
             task_dir.mkdir(parents=True, exist_ok=True)
             parsed, cached, runner = _observe_window(
                 cfg, vid, video, task, task_dir, runner, omni_sig, video_sha,
-                force=force)
-            observations.extend(parsed["observations"])
+                force=force, material_mode=material_mode)
+            observations.extend(_strip_story_role(parsed["observations"]))
             tool_calls.append({"tool": "omni_narrative_probe", "cached": cached,
                                **asdict(task)})
         refinement_count += len(tasks)
@@ -723,6 +937,7 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
     envelope = {
         "budget": asdict(budget), "initial_windows": len(windows),
         "refinement_windows": refinement_count, "stop_reason": stop_reason,
+        "material_mode": material_mode,
         "prompt_versions": {"window": WINDOW_PROMPT_VERSION,
                             "synthesis": SYNTHESIS_PROMPT_VERSION},
         "reference_identity": build_reference_identity(

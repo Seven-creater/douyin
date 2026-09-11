@@ -118,19 +118,22 @@ def apply_story_patches(plan: dict, patches: list[dict]) -> tuple[dict, list[dic
 
 
 def score_comprehension_answers(answers: list[dict]) -> dict:
-    by_id = {int(row.get("question_id", -1)): bool(row.get("correct"))
+    """V3 P4：不再自评对错——只统计覆盖（几问有带证据的回答），对错判定
+    移交独立盲看协议（blind_video_check / 人工五问），模型不得自报答对。"""
+    by_id = {int(row.get("question_id", -1)): bool(str(row.get("evidence") or "").strip())
+             and bool(str(row.get("answer") or "").strip())
              for row in answers if isinstance(row, dict)}
-    correct = sum(by_id.get(idx, False) for idx in range(len(COMPREHENSION_QUESTIONS)))
-    return {"correct": correct, "total": len(COMPREHENSION_QUESTIONS),
-            "score": correct / len(COMPREHENSION_QUESTIONS), "passes": correct >= 4}
+    covered = sum(by_id.get(idx, False) for idx in range(len(COMPREHENSION_QUESTIONS)))
+    return {"covered": covered, "total": len(COMPREHENSION_QUESTIONS),
+            "score": covered / len(COMPREHENSION_QUESTIONS), "passes": False}
 
 
-NARRATIVE_CRITIC_PROMPT = """你是可审计的 Narrative Critic。请只观看成片回答五个理解问题，
-并检查人物连续、事件因果、高潮铺垫、结尾收束和字幕同步。参考程序只用于核对答案，不能用来代替看片。
+NARRATIVE_CRITIC_PROMPT = """你是可审计的 Narrative Critic。请只观看成片检查人物连续、事件因果、
+结尾收束与字幕同步，并回答五个理解问题。
 
 只输出一个 JSON 对象：
 {"theme_relevance":0.0,"narrative_coherence":0.0,
- "answers":[{"question_id":0,"answer":"看片得到的答案","correct":true,"evidence":"可见/可听证据"}],
+ "answers":[{"question_id":0,"answer":"只看片得到的答案","evidence":"可见/可听证据"}],
  "issues":[{"type":"entity_switch|causal_order|missing_resolution|subtitle_timing|dialogue_cut",
             "slot_idx":0,"evidence":"具体可见现象"}],
  "patches":[{"op":"replace","path":"/slots/0/source","value":{},"reason":"证据关系"}],
@@ -138,13 +141,30 @@ NARRATIVE_CRITIC_PROMPT = """你是可审计的 Narrative Critic。请只观看�
  "verdict":"一句话结论"}
 
 五个问题依次为：{questions}
+判定纪律：答案只能来自画面与可听内容；下面的槽位事实清单只用于定位问题位置，
+不得把清单文本当成你"看到"的内容（参考污染）。
 只允许替换已有槽的 source/status/reason/target_interval。不能创造事件、对白或素材。
 若某槽画面不支持其叙事需求且你无法直接给出替代素材，用 re_search 指令描述断点与
 改写后的检索需求——不要自己编造 source。
 
-【Narrative Program】{narrative}
-【Story Plan】{story_plan}
+【槽位事实清单（≤2000 字，仅定位用）】{slot_facts}
 """
+
+
+def _slot_facts_summary(story_plan: dict, narrative: dict) -> str:
+    """V3 P4：critic 只拿槽位事实摘要——旧版把 Narrative Program + Story Plan
+    全文（22k 字）给出去，模型直接从计划里抄理解题答案（C2 实锤：comprehension
+    5/5 与 coherence 0 同文件自相矛盾）。"""
+    lines = [f"主题：{str((narrative.get('intent') or {}).get('topic') or '')[:60]}"]
+    for slot in story_plan.get("slots") or []:
+        source = slot.get("source") or {}
+        entities = "、".join(str(v) for v in (source.get("entity_names")
+                                              or source.get("entity_ids") or [])[:3])
+        lines.append(
+            f"槽{slot.get('slot_idx')}[{slot.get('role')}|{slot.get('status')}]"
+            f" {float(source.get('start_s') or 0):.0f}~{float(source.get('end_s') or 0):.0f}s"
+            f"：{str(source.get('caption') or '')[:60]}（人物：{entities}）")
+    return "\n".join(lines)[:2000]
 
 
 def parse_narrative_critique(raw: str) -> dict | None:
@@ -163,6 +183,11 @@ def parse_narrative_critique(raw: str) -> dict | None:
         except (TypeError, ValueError):
             value[key] = 0.0
     value["comprehension"] = score_comprehension_answers(value["answers"])
+    # V3 P4：answers[].correct 自评字段作废——看过槽位事实的模型自报答对不可信
+    # （C2 实锤 5/5 vs coherence 0）。comprehension 只保留答案文本供盲看协议
+    # 独立比对；passes 一律 False，通过与否由 blind_video_check 决定。
+    value["comprehension"] = {**value["comprehension"], "passes": False,
+                              "note": "self_grading_disabled_v3"}
     value["patches"] = [patch for patch in value.get("patches") or []
                         if isinstance(patch, dict)]
     # P3 重搜指令通道：{slot_idx, reason, need_hint?}，槽号必须是整数下标
@@ -183,8 +208,7 @@ def run_narrative_critic(video, narrative: dict, story_plan: dict, *, runner) ->
     replacements = {
         "{questions}": "；".join(f"{idx}. {question}"
                                 for idx, question in enumerate(COMPREHENSION_QUESTIONS)),
-        "{narrative}": json.dumps(narrative, ensure_ascii=False)[:12000],
-        "{story_plan}": json.dumps(story_plan, ensure_ascii=False)[:10000],
+        "{slot_facts}": _slot_facts_summary(story_plan, narrative),
     }
     for placeholder, value in replacements.items():
         prompt = prompt.replace(placeholder, value)

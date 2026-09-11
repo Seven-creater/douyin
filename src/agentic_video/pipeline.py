@@ -20,6 +20,8 @@ from src.agentic_video.report import write_run_report
 from src.agentic_video.story_planner import (build_story_plan_from_index,
                                                story_plan_execution_inputs,
                                                write_story_plan)
+from src.agentic_video.verify_slots import (blind_video_check,
+                                            deterministic_story_check)
 from src.config import AppConfig, repo_root
 from src.library.signals import run_signals
 from src.perception.detect_beats import run_for_video as run_beats
@@ -178,13 +180,9 @@ def run_rendering(cfg: AppConfig, recipe: dict, *, theme: str, library: str,
                 target_duration_s=target_duration_s)
             (output_dir / "story_candidates.json").write_text(
                 json.dumps(candidate_groups, ensure_ascii=False, indent=2), encoding="utf-8")
-        # 文案轨（2026-09-10 MVP，7682 型模板）：钩子/成就卡/反转梗 + BGM 模式。
-        # setdefault 语义：critic 轮传入的 current_story 已带 copy 则不重生成，
-        # 文案跨轮稳定；人工改 story_plan.json 的 copy 后走 render 子命令可重渲。
-        if "copy" not in story_plan:
-            from src.agentic_video.copywriter import build_copy_cues
-
-            story_plan["copy"] = build_copy_cues(story_plan, runner=runner)
+        # V3 P4：文案不再在渲染前生成——critic 轮看的是无文案的干净素材，
+        # copy 在验证收敛后最后生成并逐句绑定证据（run_full 尾部）。
+        # 传入的 story_plan 自带 copy（人工改写/render 子命令）则照用。
         write_story_plan(story_plan, output_dir / "story_plan.json")
         asset_plan, retrieval = story_plan_execution_inputs(story_plan, recipe)
         retrieval_path = output_dir / "retrieval_results.json"
@@ -295,13 +293,23 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
         # （P4 的 B/C 对照开关：B=关，C=开）。
         round_reports = []
         if verification_enabled:
-            from src.agentic_video.verify_slots import verify_slots
+            from src.agentic_video.verify_slots import (deterministic_story_check,
+                                                        verify_slots)
             from src.agentic_video.story_planner import re_search_slot
 
             verification = verify_slots(cfg, current_story, runner=runner)
             (output_dir / f"verification_round_{round_idx}.json").write_text(
                 json.dumps(verification, ensure_ascii=False, indent=2), encoding="utf-8")
-            for failed_idx in verification["failed_slots"]:
+            # V3 P3 全局确定性检查（零模型）：主角锁定槽缺人/未解释主体切换
+            # → 与槽级失败槽一起进分层重搜。Slot0=小黑、Slot1=无限在这里就被拦。
+            det_check = deterministic_story_check(current_story)
+            (output_dir / f"deterministic_check_round_{round_idx}.json").write_text(
+                json.dumps(det_check, ensure_ascii=False, indent=2), encoding="utf-8")
+            failed_idxs = list(verification["failed_slots"])
+            for det_idx in det_check["re_search_slots"]:
+                if det_idx not in failed_idxs:
+                    failed_idxs.append(det_idx)
+            for failed_idx in failed_idxs:
                 old_source = current_story["slots"][failed_idx].get("source") or {}
                 if old_source.get("video"):
                     rejected_sources.append({
@@ -315,11 +323,15 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                     rejected=rejected_sources))
             if any(row.get("status") == "replaced" for row in round_reports):
                 _re_render(f"verify_render_{round_idx}")      # 重搜生效先重渲再给 critic 看
+                det_check = deterministic_story_check(current_story)
+                (output_dir / f"deterministic_check_round_{round_idx}.json").write_text(
+                    json.dumps(det_check, ensure_ascii=False, indent=2), encoding="utf-8")
 
         narrative_critique = run_narrative_critic(
             current_video, narrative, current_story, runner=runner)
         edit_critique = run_structured_critic(
-            current_video, current_recipe, asset_plan, retrieval, runner=runner)
+            current_video, current_recipe, asset_plan, retrieval, runner=runner,
+            narrative=narrative)
         narrative_critiques.append(narrative_critique)
         edit_critiques.append(edit_critique)
         (output_dir / f"narrative_critic_round_{round_idx}.json").write_text(
@@ -396,25 +408,37 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                        stop_reason="max_rounds")
         last_round_modified = max_rounds > 0
 
-    # ③ 终版必再审（V1 P3 红线）：最后一轮发生过修改时，重渲后的版本从未被审过。
-    # 只读终审（不再修改）——观众五问 + 槽级验证落在 final_review.json，
-    # 作为 P4 的机器指标；有界循环只保证停下来，不保证停在正确结果上。
-    final_review = None
-    if last_round_modified:
-        final_review = {"narrative_critic": run_narrative_critic(
-            current_video, narrative, current_story, runner=runner)}
-        if verification_enabled:
-            from src.agentic_video.verify_slots import verify_slots as _verify
+    # ③ V3 终版流水线（红线升级）：收敛后的素材先过确定性检查 + 盲看（零文案
+    # 干净画面），文案最后生成并逐句绑定证据，带文案重渲出终版成片——
+    # 每句字幕都有画面支持，裁判不再自评理解题。
+    final_review: dict = {}
+    det_final = deterministic_story_check(current_story)   # 零模型，恒跑
+    final_review["deterministic"] = det_final
+    blind = None
+    if verification_enabled:                                # B 档关（对照开关）
+        blind = blind_video_check(current_video, runner=runner)
+        (output_dir / "blind_review.json").write_text(
+            json.dumps(blind, ensure_ascii=False, indent=2), encoding="utf-8")
+        final_review["blind"] = {
+            "consistent_protagonist": blind.get("consistent_protagonist"),
+            "main_character": blind.get("main_character"),
+            "story_in_one_sentence": blind.get("story_in_one_sentence"),
+        }
+    # 文案轨最后生成（V3 P4）：无画面证据的句子在 grounding 里被丢弃/替换
+    from src.agentic_video.copywriter import build_copy_cues, validate_copy_grounding
 
-            final_review["verification"] = _verify(cfg, current_story, runner=runner)
-        (output_dir / "final_review.json").write_text(
-            json.dumps(final_review, ensure_ascii=False, indent=2), encoding="utf-8")
-        manifest.stage("final_review", "complete",
-                       comprehension_pass=bool(
-                           (final_review["narrative_critic"].get("comprehension") or {}
-                            ).get("passes")),
-                       failed_slots=(final_review.get("verification") or {})
-                       .get("failed_slots", []))
+    current_story["copy"] = build_copy_cues(current_story, runner=runner)
+    grounding = validate_copy_grounding(current_story["copy"], current_story)
+    (output_dir / "copy_grounding.json").write_text(
+        json.dumps(grounding, ensure_ascii=False, indent=2), encoding="utf-8")
+    final_review["copy_grounding"] = grounding
+    _re_render("final_render")                            # 带文案终渲
+    manifest.stage("final_review", "complete",
+                   det_passed=det_final.get("passed"),
+                   blind_consistent=(blind or {}).get("consistent_protagonist"),
+                   copy_dropped=len(grounding.get("dropped") or []))
+    (output_dir / "final_review.json").write_text(
+        json.dumps(final_review, ensure_ascii=False, indent=2), encoding="utf-8")
     if re_search_log:
         (output_dir / "re_search_log.json").write_text(
             json.dumps(re_search_log, ensure_ascii=False, indent=2), encoding="utf-8")
