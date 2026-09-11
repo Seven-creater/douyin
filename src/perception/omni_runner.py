@@ -41,8 +41,13 @@ def set_visible_gpus(spec: str) -> None:
 
 
 def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
-             start_s: float, end_s: float) -> Path:
-    """切片段（重编码保证帧精确）；已存在且时长匹配则复用。"""
+             start_s: float, end_s: float, max_width: int = 1280) -> Path:
+    """切片段（重编码保证帧精确）；已存在且时长匹配则复用。
+
+    4K 源必须降采样（2026-09-11 罗小黑 2160p 实锤：2160p 切片喂 Omni，
+    视觉 token 把进程顶到 46GB/卡 OOM；1280 宽对 fps=2 的理解/标注绰绰有余，
+    1080p 及以下源不受影响——scale=min 不放大）。
+    """
     clip = clip_dir / "clip.mp4"
     if clip.exists():
         try:
@@ -53,6 +58,7 @@ def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
             pass
     common.run_ffmpeg(ffmpeg_bin, [
         "-y", "-ss", f"{start_s}", "-to", f"{end_s}", "-i", str(video_path),
+        "-vf", f"scale='min({max_width},iw)':-2",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-c:a", "aac", "-movflags", "+faststart",
         str(clip),
