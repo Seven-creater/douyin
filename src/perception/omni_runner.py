@@ -41,12 +41,13 @@ def set_visible_gpus(spec: str) -> None:
 
 
 def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
-             start_s: float, end_s: float, max_width: int = 1280) -> Path:
+             start_s: float, end_s: float, max_width: int = 1920) -> Path:
     """切片段（重编码保证帧精确）；已存在且时长匹配则复用。
 
-    4K 源必须降采样（2026-09-11 罗小黑 2160p 实锤：2160p 切片喂 Omni，
-    视觉 token 把进程顶到 46GB/卡 OOM；1280 宽对 fps=2 的理解/标注绰绰有余，
-    1080p 及以下源不受影响——scale=min 不放大）。5.1 声源必须下混立体声
+    分辨率策略（用户拍板 2026-09-11 晚：1K/1080p）：2160p 原生切片视觉 token
+    会把 2 卡 Omni 顶到 46GB OOM（当日实锤）；1080p 在 gc.collect + 窗间
+    empty_cache 修复后可稳定容纳，角色识别/画面小字远比 720p 清晰。
+    1080p 及以下源不受影响（scale=min 不放大）。5.1 声源必须下混立体声
     （同日实锤：杜比/DTS 6 声道让 librosa audioread reshape 直接 ValueError）。
     """
     clip = clip_dir / "clip.mp4"
