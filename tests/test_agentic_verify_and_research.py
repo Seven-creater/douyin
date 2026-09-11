@@ -34,9 +34,11 @@ class _VerifyRunner:
         self.verdict = verdict
         self.needs_context = needs_context
         self.watches = 0
+        self.saw_clip_dir = False
 
     def watch(self, video, prompt, **kwargs):
         self.watches += 1
+        self.saw_clip_dir = kwargs.get("clip_dir") is not None
         return SimpleNamespace(text=json.dumps({
             "verdict": self.verdict,
             "conditions": [{"condition": "主角在场", "met": self.verdict == "pass",
@@ -51,6 +53,7 @@ def test_verify_slots_structured_verdicts(tmp_path):
     plan = _verify_plan(tmp_path)
     runner = _VerifyRunner("fail")
     report = verify_slots(None, plan, runner=runner)
+    assert runner.saw_clip_dir is True                # watch 必须带 clip_dir（夜间实锤坑）
     assert report["failed_slots"] and report["results"][0]["verdict"] == "fail"
     assert report["results"][0]["missing"] == ["冲突/危险可见"]
     assert report["results"][0]["conditions"][0]["met"] is False

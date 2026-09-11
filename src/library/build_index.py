@@ -184,7 +184,10 @@ def collect_rows(cfg: AppConfig) -> list[dict]:
                                              annotation.get("dialogue") or [])
             row["causal_predecessors"] = causal_predecessors.get(
                 str(row.get("event_id") or ""), [])
-            facets = _shot_facets(s, window_facets.get(int(s["window_idx"])) or [])
+            # 老格式镜头行（预告片时代）没有 window_idx 键——取不到就不做 facet 映射
+            facets = _shot_facets(
+                s, window_facets.get(int(s["window_idx"])) or []
+                if s.get("window_idx") is not None else [])
             if window_facets:
                 row["facets"] = facets
             emotion = str(row.get("emotion") or "")

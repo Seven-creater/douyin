@@ -75,13 +75,19 @@ def parse_verification(raw: str) -> dict | None:
 
 
 def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
-                 context_pad_s: float = 5.0) -> dict:
+                 context_pad_s: float = 5.0, clip_root=None) -> dict:
     """对 supported 槽逐个看实际区间验证。needs_context 时有界扩展重看一次。
 
     返回 {"results": [...], "failed_slots": [...], "uncertain_slots": [...]}，
     由 pipeline 决定是否触发 re_search（每轮限一次验证 pass）。
+    clip_root：切片缓存目录（watch 带 start/end 必须给 clip_dir，否则
+    cut_clip 里 None/"clip.mp4" 直接 TypeError——2026-09-11 C 档夜间首跑实锤）。
     """
+    import tempfile
+
     results = []
+    clip_root = Path(clip_root) if clip_root else Path(
+        tempfile.mkdtemp(prefix="verify_slots_"))
     for slot in story_plan.get("slots") or []:
         idx = int(slot.get("slot_idx", 0))
         if slot_idxs is not None and idx not in set(slot_idxs):
@@ -104,8 +110,11 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
                 must_have="；".join(spec.get("must_have") or []),
                 must_not="；".join(spec.get("must_not") or []),
                 evidence_mode=spec.get("evidence_mode") or "visual")
+            clip_dir = clip_root / f"slot_{idx:02d}"
+            clip_dir.mkdir(parents=True, exist_ok=True)
             answer = runner.watch(video, prompt, start_s=start_s, end_s=end_s,
-                                  max_new_tokens=1024, duration_s=end_s - start_s)
+                                  clip_dir=clip_dir, max_new_tokens=1024,
+                                  duration_s=end_s - start_s)
             return parse_verification(answer.text)
 
         verdict = _ask(start, end)

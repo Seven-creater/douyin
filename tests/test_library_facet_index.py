@@ -69,15 +69,19 @@ def test_facets_bind_to_shot_intervals_not_whole_window(tmp_path):
 
 
 def test_index_unchanged_without_facets_file(tmp_path):
-    """加性约束：没有 type_facets.json 时行结构零变化（不新增 facets 键）。"""
+    """加性约束：没有 type_facets.json 时行结构零变化（不新增 facets 键）；
+    老格式镜头行（预告片时代，无 window_idx 键）不炸（2026-09-11 夜间实锤）。"""
     shots_dir = _env(tmp_path, [
         {"shot_idx": 0, "window_idx": 0, "start_s": 0.0, "end_s": 4.0, "video": "m.mp4",
          "video_stem": "src__narrative", "duration_s": 4.0, "source": "src",
          "action_score": 0.5, "dialogue": []},
+        {"shot_idx": 1, "start_s": 10.0, "end_s": 12.0, "video": "old.mp4",
+         "video_stem": "trailer", "duration_s": 2.0, "source": "trailer",
+         "action_score": 0.4, "dialogue": []},          # 无 window_idx 的老行
     ])
     (shots_dir / "captions.json").write_text(
-        json.dumps({"0": "训练"}), encoding="utf-8")
+        json.dumps({"0": "训练", "1": "旧预告"}), encoding="utf-8")
     rows = collect_rows(SimpleNamespace(
         paths=SimpleNamespace(library_dir=tmp_path / "library")))
-    assert len(rows) == 1 and "facets" not in rows[0]
+    assert len(rows) == 2 and "facets" not in rows[0]
     assert rows[0]["search_text"].startswith("训练")
