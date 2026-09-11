@@ -84,7 +84,13 @@ def write_result_json(tool_dir: Path, *, tool: str, aweme_id: str, params: dict,
     path = Path(tool_dir) / "result.json"
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except FileNotFoundError:
+        # 并发同写竞态（2026-09-11 鬼灭 B∥C 同参考同 inspect 实锤：一方 rename
+        # 后另一方的 tmp 已不存在）——目标已在即视为写入成功，不崩整跑
+        if not path.exists():
+            raise
     return path
 
 

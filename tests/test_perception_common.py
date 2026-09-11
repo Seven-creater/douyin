@@ -76,3 +76,28 @@ def test_load_config_has_perception_dir():
     assert cfg.paths.perception_dir.is_absolute()
     assert isinstance(cfg.perception, dict)
     assert cfg.perception["omni"]["model_path"].endswith("qwen3-omni-30b-a3b-instruct")
+
+
+def test_write_result_json_tolerates_concurrent_rename(tmp_path, monkeypatch):
+    """2026-09-11 鬼灭 B∥C 同参考同 inspect 实锤：一方 os.replace 后另一方
+    的 tmp 已不存在——目标已在即视为写入成功，不崩整跑。"""
+    import os as os_mod
+
+    import src.perception.common as common_mod
+
+    calls = {"n": 0}
+    real_replace = os_mod.replace
+
+    def flaky_replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            from pathlib import Path
+
+            Path(dst).touch()                      # 模拟并发方已写完目标
+            raise FileNotFoundError
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(common_mod.os, "replace", flaky_replace)
+    path = common_mod.write_result_json(tmp_path, tool="t", aweme_id="a",
+                                        params={}, output={"ok": 1})
+    assert calls["n"] == 1 and path.exists()       # 未重试也未抛

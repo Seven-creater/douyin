@@ -175,9 +175,13 @@ def scan_sparse_features(video: Path, *, ffmpeg_bin: str = "ffmpeg",
 
 def _window_boundaries(video: Path, start_s: float, duration_s: float, *,
                        ffmpeg_bin: str, threshold: float) -> list[float]:
+    # scene 检测前先降采样（2026-09-11 罗小黑 4K60 10bit MKV 实锤：全分辨率
+    # select=gt(scene) 45s 窗解码+打分 600s 超时；scene 分数不需要 4K，
+    # 预降到 640 宽后 4K 源与 1080p 源的检测成本同量级，边界几乎不变）
     proc = subprocess.run(
         [ffmpeg_bin, "-ss", f"{start_s:g}", "-i", str(video), "-t", f"{duration_s:g}",
-         "-filter:v", f"select='gt(scene,{threshold})',showinfo", "-f", "null", "-"],
+         "-filter:v", f"scale=640:-2,select='gt(scene,{threshold})',showinfo",
+         "-f", "null", "-"],
         capture_output=True, text=True, timeout=max(600, int(duration_s * 8)))
     if proc.returncode != 0:
         raise common.FFmpegError(f"window scene detection failed: {(proc.stderr or '')[-300:]}")
