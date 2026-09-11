@@ -162,7 +162,7 @@ def test_source_transcript_language_from_source_config(tmp_path, monkeypatch):
                           perception={}, paths=SimpleNamespace(library_dir=tmp_path))
     run_source_transcript(cfg, "lxh", Path("v.mp4"), model=object())
     assert captured["language"] == "zh"
-    result = json.loads((tmp_path / "lxh" / "narrative_transcript.json")
+    result = json.loads((tmp_path / "sources" / "lxh" / "narrative_transcript.json")
                         .read_text(encoding="utf-8"))
     assert result["language"] == "zh"
 
