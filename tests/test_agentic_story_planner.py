@@ -271,3 +271,19 @@ def test_emotion_peak_hint_from_climax():
     hint = _emotion_peak_hint(program)
     assert hint and hint["source"] == "climax"
     assert 0.0 <= hint["peak_ratio"] <= 1.0
+
+
+def test_library_scope_matches_multiple_film_sources():
+    """2026-09-11 罗小黑库：两部电影（luoxiaohei1/2）共用一个检索池
+    （--library luoxiaohei1,luoxiaohei2），别名 luoxiaohei 不得误伤。"""
+    from src.agentic_video.story_planner import _row_in_library
+    rows = [
+        {"source": "luoxiaohei1", "video_stem": "luoxiaohei1__narrative"},
+        {"source": "luoxiaohei2", "video_stem": "luoxiaohei2__narrative"},
+        {"source": "guimie", "video_stem": "guimie__narrative"},
+    ]
+    assert _row_in_library(rows[0], "luoxiaohei1,luoxiaohei2")
+    assert _row_in_library(rows[1], "luoxiaohei1,luoxiaohei2")
+    assert not _row_in_library(rows[2], "luoxiaohei1,luoxiaohei2")
+    assert not _row_in_library(rows[1], "luoxiaohei1")   # 单源不含片2
+    assert _row_in_library(rows[2], "guimie")

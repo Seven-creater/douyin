@@ -548,6 +548,20 @@ COMPATIBLE_ROLES = {
 }
 
 
+def _library_scope(library: str) -> tuple[set[str], set[str]]:
+    """素材池解析：支持逗号分隔多源（罗小黑 = luoxiaohei1,luoxiaohei2 两部电影
+    共用一个池）。返回 (源名集合, video_stem 前缀集合)。"""
+    names = {part.strip() for part in str(library).split(",") if part.strip()}
+    return names, {f"{name}__" for name in names}
+
+
+def _row_in_library(row: dict, library: str) -> bool:
+    names, prefixes = _library_scope(library)
+    return str(row.get("source") or "") in names \
+        or any(str(row.get("video_stem") or "").startswith(prefix)
+               for prefix in prefixes)
+
+
 def score_slot_candidates(cfg, rows, embeddings, *, query, query_embedding, role,
                           library, slot_budget_s, top_k=12,
                           used_rows=None) -> list[dict]:
@@ -556,9 +570,7 @@ def score_slot_candidates(cfg, rows, embeddings, *, query, query_embedding, role
     返回按 semantic_score 降序的合并事件候选；used_rows 中的行（其它槽已选）
     被排除，重搜不会换汤不换药地撞回同一段素材。
     """
-    scoped = [(idx, row) for idx, row in enumerate(rows)
-              if row.get("source") == library
-              or str(row.get("video_stem") or "").startswith(f"{library}__")]
+    scoped = [(idx, row) for idx, row in enumerate(rows) if _row_in_library(row, library)]
     excluded = zones.excluded_row_indices([row for _idx, row in scoped], cfg)
     allowed = [pair for pair_idx, pair in enumerate(scoped) if pair_idx not in excluded]
     cosine = (embeddings @ query_embedding.reshape(-1)).ravel()
