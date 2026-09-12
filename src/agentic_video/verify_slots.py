@@ -195,43 +195,72 @@ LOCALIZE_PROMPT = """你是素材证据定位员。观看影片 {video} 的 {sta
 
 叙事需求：{need}
 
-只输出 JSON：
-{{"found": true, "start": 窗口内起始秒数, "end": 窗口内结束秒数,
+输出格式（铁律）：**只输出一个 JSON 对象，之后不得再输出任何内容**——
+不要输出多个候选、不要重复输出、不要附加任何文字：
+{{"found": true, "start": {start:g}, "end": {end:g},
 "evidence": "该片段内可见/可听内容的一句话（写实，不外推）", "confidence": 0.0}}
+start/end 用影片**绝对时间**（即 {start:g}~{end:g} 范围内的秒数）。
 
 判定纪律：
-- 区间不得小于 2 秒，不得超出窗口范围。
-- 只依据窗口内可见/可听内容定位；窗口内没有承载该需求的片段 → found=false，
-  禁止"差不多在前半段"式的猜测定位。
+- 只依据窗口内可见/可听内容定位；窗口内没有承载该需求的片段 → found=false
+  且 start/end 置 0，禁止"差不多在前半段"式的猜测定位。
 """
 
-LOCALIZE_PROMPT_VERSION = "localize_v1"
+LOCALIZE_PROMPT_VERSION = "localize_v2"
 
 
 def parse_localization(raw: str) -> dict | None:
-    block = extract_json_block(raw)
-    try:
-        payload = json.loads(block) if block else None
-    except ValueError:
-        payload = None
-    if not isinstance(payload, dict):
+    """V4 探针实锤的解析硬化：Omni 常输出**一串** JSON 对象（多个候选片段
+    + 垃圾后缀）而非单个——逐个抓取，取第一个 found=true 且区间合法的；
+    全 false 才返回 false。单一对象路径保持兼容。"""
+    import re
+
+    def _payloads(text: str) -> list[dict]:
+        found: list[dict] = []
+        block = extract_json_block(text)
+        candidates = re.findall(r"\{[^{}]*\}", str(text or ""))
+        for chunk in ([block] if block else []) + candidates:
+            try:
+                obj = json.loads(chunk)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                found.append(obj)
+        # 去重保序
+        seen, unique = set(), []
+        for obj in found:
+            token = json.dumps(obj, sort_keys=True, ensure_ascii=False)
+            if token not in seen:
+                seen.add(token)
+                unique.append(obj)
+        return unique
+
+    def _normalize(payload: dict) -> dict | None:
+        try:
+            confidence = min(1.0, max(0.0, float(payload.get("confidence", 0))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        interval = payload.get("interval")
+        if interval is None and payload.get("start") is not None:
+            interval = [payload.get("start"), payload.get("end")]
+        if not (isinstance(interval, list) and len(interval) == 2
+                and all(isinstance(v, (int, float)) for v in interval)):
+            interval = None
+        return {
+            "found": bool(payload.get("found")),
+            "interval": [float(v) for v in interval] if interval else None,
+            "evidence": str(payload.get("evidence") or "")[:160],
+            "confidence": confidence,
+        }
+
+    payloads = _payloads(raw)
+    if not payloads:
         return None
-    try:
-        confidence = min(1.0, max(0.0, float(payload.get("confidence", 0))))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    interval = payload.get("interval")
-    if interval is None and payload.get("start") is not None:
-        interval = [payload.get("start"), payload.get("end")]
-    if not (isinstance(interval, list) and len(interval) == 2):
-        interval = None
-    return {
-        "found": bool(payload.get("found")),
-        "interval": [float(value) for value in interval]
-        if interval and all(isinstance(v, (int, float)) for v in interval) else None,
-        "evidence": str(payload.get("evidence") or "")[:160],
-        "confidence": confidence,
-    }
+    normalized = [n for n in (_normalize(p) for p in payloads) if n]
+    for item in normalized:
+        if item["found"] and item["interval"]:
+            return item                      # 第一个 found=true 的候选
+    return normalized[0] if normalized else None
 
 
 def localize_coarse_slots(cfg, story_plan: dict, *, runner,
@@ -283,14 +312,25 @@ def localize_coarse_slots(cfg, story_plan: dict, *, runner,
             slot["reason"] = "coarse_unlocalizable(not_found)"
             entry["outcome"] = "rejected"
             entry["parsed"] = parsed
+            if parsed is None:
+                entry["raw_head"] = str(answer.text)[:200]   # 可观测性：拒因落档
             log.append(entry)
             continue
         rel_start, rel_end = parsed["interval"]
-        abs_start = min(win_end, max(win_start, win_start + rel_start))
-        abs_end = min(win_end, abs_start + budget)
+        # 探针实锤：模型常报**绝对时间**（窗口 4095-4140 里答 start=4121）——
+        # 旧代码按相对秒处理 → 4095+4121 越界夹到窗尾 → 区间零长 → 4/4
+        # "too_short" 拒绝（窗口明明有内容，模型也明明找到了）。判定：区间
+        # 值落在窗口绝对范围内 → 直接当绝对坐标用。
+        clip_duration = win_end - win_start
+        if rel_start > clip_duration and win_start <= rel_start < win_end:
+            abs_start = rel_start                       # 绝对时间制式
+        else:
+            abs_start = min(win_end, max(win_start, win_start + rel_start))
+        abs_end = min(win_end, abs_start + budget)      # 锚点定起点，长度=预算
         if abs_end - abs_start < min(budget, 2.0) - 1e-6:
             slot["status"], slot["reason"] = "unsupported", "coarse_unlocalizable(too_short)"
             entry["outcome"] = "rejected"
+            entry["raw_head"] = str(parsed)[:200]
             log.append(entry)
             continue
         source["start_s"], source["end_s"] = round(abs_start, 3), round(abs_end, 3)

@@ -382,6 +382,13 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                 report["round"] = round_idx
                 round_reports.append(report)
             if any(row.get("status") == "replaced" for row in round_reports):
+                # V4 补修：重搜换件引入的新 coarse 槽补跑 localize（初始
+                # localize 只在首次规划后跑，换件的粗窗此前无人接管——
+                # V4_C2 实锤：重搜后 4 槽 anchor=coarse 全裸奔进渲染）
+                from src.agentic_video.verify_slots import localize_coarse_slots
+
+                localize_coarse_slots(cfg, current_story, runner=runner,
+                                      output_dir=output_dir)
                 _re_render(f"verify_render_{round_idx}")      # 重搜生效先重渲再给 critic 看
                 det_check = deterministic_story_check(current_story)
                 (output_dir / f"deterministic_check_round_{round_idx}.json").write_text(

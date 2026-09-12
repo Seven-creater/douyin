@@ -466,6 +466,14 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                  if row.get("row_idx") is not None
                  and row.get("row_idx") not in used_rows
                  and _contract_ok(row) and _no_overlap(row)), None)
+            if replacement is None:
+                # V4_C2 实锤：槽 0/1 选了同窗不同行（组内候选全撞）——换件池
+                # 扩到全部候选组并集（契约与不重叠约束不变），跨组借件
+                replacement = next(
+                    (row for group in candidate_groups for row in group
+                     if row.get("row_idx") is not None
+                     and row.get("row_idx") not in used_rows
+                     and _contract_ok(row) and _no_overlap(row)), None)
             if replacement is not None:
                 path[idx] = replacement
         used_rows.add(path[idx].get("row_idx"))

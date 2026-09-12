@@ -285,3 +285,21 @@ def test_overall_verdict_truth_table():
                                blind_required=False)["reasons"]
     assert any(r.startswith("plan_incomplete") for r in reasons)
     assert any(r.startswith("copy_track_empty") for r in reasons)
+
+
+def test_parse_localization_multi_object_and_absolute_time():
+    """V4 探针实锤：Omni 输出一串 JSON 对象+垃圾后缀；且报绝对时间
+    （窗口 4095-4140 里 start=4121）。解析取第一个 found=true；绝对时间
+    由 localize 主循环判别（此处只测解析层）。"""
+    from src.agentic_video.verify_slots import parse_localization
+    raw = ('{"found": true, "start": 4121, "end": 4123, "evidence": "你可能还不了解", "confidence": 1.0} ant\n'
+           '{"found": true, "start": 4128, "end": 4131, "evidence": "所到之处就是属于你的世界", "confidence": 1.0} ant\n'
+           '{"found": false, "start": 0, "end": 0, "evidence": "", "confidence": 0.0} ant')
+    parsed = parse_localization(raw)
+    assert parsed is not None and parsed["found"] is True
+    assert parsed["interval"] == [4121.0, 4123.0]          # 第一个真候选
+    assert "你可能还不了解" in parsed["evidence"]
+    # 单对象路径兼容
+    single = parse_localization('{"found": false, "start": 0, "end": 0, "evidence": "", "confidence": 0.0}')
+    assert single["found"] is False
+    assert parse_localization("完全不是 JSON") is None
