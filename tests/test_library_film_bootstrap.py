@@ -188,10 +188,10 @@ def test_binding_state_machine_and_auto_registry_backfill(tmp_path):
 
     auto = json.loads((tmp_path / "entity_registry.auto.json").read_text(encoding="utf-8"))
     refs = auto["char:luoxiaohei:wuxian"]["source_entities"]
-    aliases, source_map = build_alias_maps(auto)
-    assert source_map[("luoxiaohei2", "vis_021")] == "char:luoxiaohei:wuxian"
-    assert source_map[("luoxiaohei2", "vis_007")] == "char:luoxiaohei:wuxian"
-    assert set(refs) == {"luoxiaohei2/vis_021", "luoxiaohei2/vis_007"}
+    aliases, source_map, windowed = build_alias_maps(auto)
+    assert windowed[("luoxiaohei2", "w3", "vis_021")] == "char:luoxiaohei:wuxian"
+    assert windowed[("luoxiaohei2", "w9", "vis_007")] == "char:luoxiaohei:wuxian"
+    assert set(refs) == {"luoxiaohei2/w3/vis_021", "luoxiaohei2/w9/vis_007"}
 
 
 def test_auto_registry_merges_without_overwriting_handwritten(tmp_path):

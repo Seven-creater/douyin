@@ -382,11 +382,18 @@ def test_entity_registry_unifies_cross_film_entities():
 
 
 def test_identity_keys_are_window_scoped_and_alias_fuzzy():
-    """V3 晨跑实锤的两连修：①e001 是窗口级编号——窗1 的 e001（黑发少年）≠
-    窗7 的 e001（小女孩），id 键必须带窗口，否则三槽三主角假等价、det 假绿；
-    ②库标注「黑发持刀少年」vs 注册表「黑发持刀」——子串匹配接住跨片归一。"""
+    """V3 晨跑实锤 + V4 外审三轮修订：
+    ①e001 是窗口级编号——窗1 的 e001（黑发少年）≠ 窗7 的 e001（小女孩），
+    id 键必须带窗口，否则三槽三主角假等价、det 假绿；
+    ②外观描述（黑发持刀）不产生 canonical 键——V3_C3 假绿的直接根因
+    （外审反例：删该别名后必选槽主角存在率 100%→0%）；跨片同人的正路是
+    身份别名/source_entities/supported bindings；
+    ③身份别名子串仍接住同真名的标注变体；proposed binding 不进硬约束。"""
     from src.library.entity_registry import row_identity_keys
-    registry = {"char:wuxian": {"aliases": ["黑发持刀"]}}
+    registry = {"char:wuxian": {"aliases": ["无限"],
+                                "appearance_aliases": ["黑发持刀"],
+                                "source_entities": ["luoxiaohei1/w1/e001",
+                                                    "luoxiaohei2/w3/e017"]}}
     w1 = {"video_stem": "luoxiaohei1__narrative", "window_idx": 1,
           "entity_ids": ["e001"], "entity_names": ["黑发持刀少年"]}
     w7 = {"video_stem": "luoxiaohei1__narrative", "window_idx": 7,
@@ -394,10 +401,39 @@ def test_identity_keys_are_window_scoped_and_alias_fuzzy():
     k1, k7 = row_identity_keys(w1, registry), row_identity_keys(w7, registry)
     assert "id:luoxiaohei1/w1/e001" in k1 and "id:luoxiaohei1/w7/e001" in k7
     assert k1 & k7 == set()                        # 窗口隔离：不再假等价
-    assert "char:wuxian" in k1                     # 子串别名归一
+    # 外观别名不进等价表：靠"黑发持刀"绝不能证明是 char:wuxian
+    assert "char:wuxian" not in row_identity_keys(
+        {"video_stem": "luoxiaohei1__narrative", "window_idx": 2,
+         "entity_ids": ["e009"], "entity_names": ["黑发持刀少年"]}, registry)
+    # source_entities 是跨片同人的正路（film1/e001 与 film2/e017 同 canonical）
+    assert "char:wuxian" in k1                     # 经 source_entities
     film2 = {"video_stem": "luoxiaohei2__narrative", "window_idx": 3,
              "entity_ids": ["e017"], "entity_names": ["黑发持刀男子"]}
-    assert "char:wuxian" in row_identity_keys(film2, registry)   # 跨片同人
+    assert "char:wuxian" in row_identity_keys(film2, registry)
+    # 身份别名子串：≥3 字的身份别名接住标注变体；2 字别名只保精确命中
+    # （len≥3 门槛是防误匹配的设计底线——「小黑」in「小黑猫」这种不能放开）
+    assert "char:wuxian" in row_identity_keys(
+        {"video_stem": "luoxiaohei2__narrative", "window_idx": 5,
+         "entity_ids": ["e021"], "entity_names": ["无限"]}, registry)
+    registry3 = {"char:xiaohei": {"aliases": ["罗小黑"]}}
+    assert "char:xiaohei" in row_identity_keys(
+        {"video_stem": "luoxiaohei1__narrative", "window_idx": 5,
+         "entity_ids": ["e021"], "entity_names": ["罗小黑少年"]}, registry3)
+    # proposed binding 不进硬约束（外审必改：知识包猜测不能当身份真值）
+    assert "char:wuxian" not in row_identity_keys(
+        {"video_stem": "luoxiaohei2__narrative", "window_idx": 5,
+         "entity_ids": ["e030"],
+         "bindings": [{"local_entity_id": "e030",
+                       "canonical_entity_id": "char:wuxian",
+                       "binding_status": "proposed", "binding_confidence": 0.82}]},
+        registry)
+    assert "char:wuxian" in row_identity_keys(
+        {"video_stem": "luoxiaohei2__narrative", "window_idx": 6,
+         "entity_ids": ["e031"],
+         "bindings": [{"local_entity_id": "e031",
+                       "canonical_entity_id": "char:wuxian",
+                       "binding_status": "supported", "binding_confidence": 0.86}]},
+        registry)
 
 
 def test_evidence_window_follows_relevant_shot_not_event_start():

@@ -12,15 +12,26 @@ from src.agentic_video.narrative_form import (ROLE_ENTITY_REQUIREMENTS,
                                               protagonist_required,
                                               resolve_slot_sequence)
 from src.agentic_video import zones
-from src.library.entity_registry import load_entity_registry, row_identity_keys
+from src.library.entity_registry import (load_entity_registry, row_identity_keys,
+                                         shared_identity_keys)
 
-STORY_PLAN_VERSION = "1.0"   # 结构兼容旧计划（新字段 entity_contract 等可选）
+STORY_PLAN_VERSION = "1.1"   # V4（外审三轮）：转移分类学（cutaway）+ bindings/
+# anchor 透传 + form 编译变更已非加性语义。1.0 旧计划只读兼容（validate
+# 双版本放行），新计划一律 1.1——story plan 每 run 重算，升版零缓存代价；
+# 贵的 36 窗标注断点不受影响。
 # 目标时长界（2026-09-10 放宽下界 45→20）：7682 型情感叙事模板天然 20-35s，
 # 旧 45..75 把整类模板挡在门外。上界 75 保持不动（全部现有测试时长都在区间内）。
 STORY_MIN_TARGET_DURATION_S = 20.0
 STORY_MAX_TARGET_DURATION_S = 75.0
 # 必选弧角色（厚参考弧路径用；薄弧路径的 required 由 Narrative Form 模板提供）
 REQUIRED_ROLES = frozenset({"hook", "conflict", "climax", "resolution"})
+
+# V4 A4：主角可选槽的切走理由（外审 enum：reaction/antagonist_action/
+# establishing/object_detail/parallel_event）。V4 为确定性角色映射。
+_CUTAWAY_BY_ROLE = {
+    "context": "establishing",
+    "consequence": "reaction",
+}
 
 # 角色级证据规格模板：need 是观众必须获得的信息，must_have/must_not 是
 # 可核验的证据约束——检索和 P3 验证器都以这里为准，角色标签本身不是需求。
@@ -32,9 +43,13 @@ _ROLE_NEED_TEMPLATES = {
         "evidence_mode": "visual",
     },
     "context": {
+        # V4 A4（外审三轮）：旧 must_not「完全不含主角的镜头」与
+        # ROLE_ENTITY_REQUIREMENTS.context=optional 自相矛盾——一边说主角
+        # 可选、一边说不能没有主角。改为关系约束：可以切走，但画面必须
+        # 承载与主线可关联的信息（切走理由由 transition 分类学另行守门）。
         "need": "让观众理解主角与关键他人/环境的关系背景",
-        "must_have": ["主角与至少一个关键对象同框或明确指向"],
-        "must_not": ["完全不含主角的镜头"],
+        "must_have": ["关键人物关系或环境背景的可见信息"],
+        "must_not": ["与故事完全无关的纯空镜"],
         "evidence_mode": "visual",
     },
     "conflict": {
@@ -125,6 +140,11 @@ def slot_need_spec(narrative: dict, segment: dict, idx: int) -> dict:
         "form_function": str(segment.get("form_function") or ""),
         "depends_on": None,
     }
+    # V4 A4 转移分类学：主角可选槽声明 cutaway_function——自由槽切走必须有
+    # 叙事理由（外审三轮：否则「只要不是主角槽，什么人都能塞」被合法化）。
+    # V4 由角色确定性赋予；enum 留给后续 planner 智能选择。
+    if spec["entity_requirements"].get("protagonist") != "required":
+        spec["cutaway_function"] = _CUTAWAY_BY_ROLE.get(role, "parallel_event")
     return spec
 
 
@@ -155,9 +175,17 @@ def _build_specs(narrative: dict) -> list[dict]:
     return specs
 
 
-def _transition_score(left: dict, right: dict) -> float:
+def _transition_score(left: dict, right: dict,
+                      keys_left: set[str] | None = None,
+                      keys_right: set[str] | None = None) -> float:
+    """V4 A2：实体连续加分走 row_identity_keys（窗口域+canonical）——裸
+    entity_ids 交集在跨窗同号（各自 e001 起）时假相交，正是 V3_C3 重搜日志
+    里 entity_continuity 的假来源。keys 未提供时降级为旧行为（裸交集）。"""
     score = 0.0
-    if set(left.get("entity_ids") or []) & set(right.get("entity_ids") or []):
+    if keys_left is not None and keys_right is not None:
+        if keys_left & keys_right:
+            score += 0.25
+    elif set(left.get("entity_ids") or []) & set(right.get("entity_ids") or []):
         score += 0.25
     if left.get("video_stem") == right.get("video_stem"):
         score += 0.05
@@ -178,10 +206,12 @@ def _transition_score(left: dict, right: dict) -> float:
 
 def rank_story_path(candidate_groups: list[list[dict]],
                     hard_continuity: list[bool] | None = None,
-                    allowed: list[set[int]] | None = None) -> list[dict | None]:
+                    allowed: list[set[int]] | None = None,
+                    identity_keys: list[list[set[str]]] | None = None
+                    ) -> list[dict | None]:
     """Viterbi-like path ranking with explicit entity/time continuity bonuses.
 
-    hard_continuity[i] 为真时，组 i-1 → i 的转移要求两组实体集有交集——这是
+    hard_continuity[i] 为真时，组 i-1 → i 的转移要求两组身份键有交集——这是
     可行性约束（非法转移不进图），不是加分项；某组全部候选都不可达时该槽
     返回 None（由上层按必选/可选决定 unsupported 或跳过），链条在该槽重启：
     重启组的候选以链头身份入图（parent=None），不再受与前组的连续约束。
@@ -189,7 +219,10 @@ def rank_story_path(candidate_groups: list[list[dict]],
     allowed[i]（V3 P3 Entity Continuity Contract）：主角必需槽只允许含锁定
     主角的候选——**身份约束先于相似度**（违反 = 候选不存在，不是 -0.25 加权，
     embedding 再高也赢不过换主角）。None = 无契约约束。
-    """
+
+    identity_keys（V4 A2）：每组每候选的 row_identity_keys 预计算结果；
+    连续性加分与硬连续约束都走它（裸 entity_ids 跨窗同号假相交）。None 时
+    降级旧行为（既有直调测试兼容）。"""
     if not candidate_groups or any(not group for group in candidate_groups):
         return []
     hard = list(hard_continuity or [False] * len(candidate_groups))
@@ -199,6 +232,14 @@ def rank_story_path(candidate_groups: list[list[dict]],
 
     def _permitted(group_idx: int, row_idx: int) -> bool:
         return allowed is None or row_idx in allowed[group_idx]
+
+    def _keys(group_idx: int, row_idx: int) -> set[str] | None:
+        if identity_keys is None:
+            return None
+        try:
+            return identity_keys[group_idx][row_idx]
+        except IndexError:
+            return None
 
     scores: list[dict[int, float]] = [{idx: _self_score(row)
                                        for idx, row in enumerate(candidate_groups[0])
@@ -214,13 +255,20 @@ def rank_story_path(candidate_groups: list[list[dict]],
             if not _permitted(group_idx, idx):
                 continue                                       # 契约禁入：边不存在
             if previous_alive:
+                keys_right = _keys(group_idx, idx)
                 options: list[tuple[float, int]] = []
                 for prev_idx, prev_score in scores[-1].items():
                     prev = previous[prev_idx]
-                    if hard[group_idx] and not (set(prev.get("entity_ids") or [])
-                                                & set(row.get("entity_ids") or [])):
-                        continue                               # 非法转移：不进图
-                    options.append((prev_score + _transition_score(prev, row), prev_idx))
+                    keys_left = _keys(group_idx - 1, prev_idx)
+                    if hard[group_idx]:
+                        if keys_left is not None and keys_right is not None:
+                            if not keys_left & keys_right:
+                                continue                       # 非法转移：不进图
+                        elif not (set(prev.get("entity_ids") or [])
+                                  & set(row.get("entity_ids") or [])):
+                            continue                           # 降级路径：裸交集
+                    options.append((prev_score + _transition_score(
+                        prev, row, keys_left, keys_right), prev_idx))
                 if not options:
                     continue                                   # 该候选不可达
             else:
@@ -312,7 +360,7 @@ def _rank_under_contract(specs: list[dict], candidate_groups: list[list[dict]],
     first_req = next((idx for idx, spec in enumerate(specs)
                       if protagonist_required(spec) and candidate_groups[idx]), None)
     if first_req is None:
-        path = _rank_runs(candidate_groups, hard)
+        path = _rank_runs(candidate_groups, hard, identity_keys=identities)
         return path, contract
     hypotheses: list[tuple[str, str]] = []      # (身份键, 展示名)
     for row, keys in zip(candidate_groups[first_req], identities[first_req]):
@@ -321,7 +369,8 @@ def _rank_under_contract(specs: list[dict], candidate_groups: list[list[dict]],
                 name = _identity_display_name(key, row)
                 hypotheses.append((key, name))
     if not hypotheses:
-        path = _rank_runs(candidate_groups, hard)      # 无实体信息：如实不锁
+        path = _rank_runs(candidate_groups, hard,
+                          identity_keys=identities)   # 无实体信息：如实不锁
         return path, contract
     best_key, best = None, None
     for hypothesis, display in hypotheses:
@@ -332,7 +381,8 @@ def _rank_under_contract(specs: list[dict], candidate_groups: list[list[dict]],
                                 if hypothesis in identities[idx][j]})
             else:
                 allowed.append(set(range(len(group))))
-        path = _rank_runs(candidate_groups, hard, allowed=allowed)
+        path = _rank_runs(candidate_groups, hard, allowed=allowed,
+                          identity_keys=identities)
         covered = sum(1 for row in path if row is not None)
         score = sum(float((row or {}).get("semantic_score", 0)) for row in path)
         # 平局判定：canonical 假设优先——池更宽（同人多窗），去重/换件有余地；
@@ -353,7 +403,9 @@ def _identity_display_name(key: str, row: dict) -> str:
 
 
 def _rank_runs(candidate_groups: list[list[dict]], hard: list[bool],
-               allowed: list[set[int]] | None = None) -> list[dict | None]:
+               allowed: list[set[int]] | None = None,
+               identity_keys: list[list[set[str]]] | None = None
+               ) -> list[dict | None]:
     """非空候选段各自排序，空组保持 None（断链槽由上层定 unsupported/跳过）。"""
     path: list[dict | None] = [None] * len(candidate_groups)
     run_start = 0
@@ -367,7 +419,9 @@ def _rank_runs(candidate_groups: list[list[dict]], hard: list[bool],
         path[run_start:run_end] = rank_story_path(
             candidate_groups[run_start:run_end],
             hard_continuity=hard[run_start:run_end],
-            allowed=(allowed[run_start:run_end] if allowed is not None else None))
+            allowed=(allowed[run_start:run_end] if allowed is not None else None),
+            identity_keys=(identity_keys[run_start:run_end]
+                           if identity_keys is not None else None))
         run_start = run_end
     return path
 
@@ -436,6 +490,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
         source_trimmed = False
         evidence_caption = None
         evidence_shots = None
+        evidence_anchor = None
         if picked:
             evidence = _select_evidence_window(
                 picked.get("member_shots") or [], slot_budget,
@@ -452,6 +507,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                     source_end = source_start + slot_budget   # 单镜头超预算兜底截断
                 evidence_caption = evidence["caption"] or None
                 evidence_shots = evidence.get("shot_indices")
+                evidence_anchor = evidence.get("anchor")
             elif source_end - source_start > slot_budget + 1e-6:
                 source_end = source_start + slot_budget
                 source_trimmed = True
@@ -471,16 +527,28 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "caption": str(evidence_caption or (picked or {}).get("caption") or ""),
             "entity_ids": list((picked or {}).get("entity_ids") or []),
             "entity_names": list((picked or {}).get("entity_names") or []),
+            # V4 A3：bindings 透传进槽 source——deterministic_story_check 经
+            # row_identity_keys 消费 supported/verified 绑定（V3 死路径复活）；
+            # anchor 记录证据子窗的锚定来源（dialogue/event_start/coarse/
+            # localized），供 localize 步骤与人工验收核对 -ss。
+            "bindings": [dict(binding) for binding in (picked or {}).get("bindings") or []
+                         if isinstance(binding, dict)],
+            "anchor": evidence_anchor,
+            "kfs": list((picked or {}).get("kfs") or []),
             "focus_x": min(1.0, max(0.0, float((picked or {}).get("focus_x", 0.5)))),
             "dialogue": dialogue,
         }
         transition_reason = "opening"
         if idx and picked and path[idx - 1]:
             previous = path[idx - 1]
-            if set(previous.get("entity_ids") or []) & set(picked.get("entity_ids") or []):
+            if shared_identity_keys(previous, picked, registry):
                 transition_reason = "entity_continuity"
             elif previous.get("event_id") in set(picked.get("causal_predecessors") or []):
                 transition_reason = "causal_transition"
+            elif specs[idx].get("cutaway_function"):
+                # V4 A4 转移分类学：自由槽切走不假装连续——带声明理由的
+                # cutaway（不门控、显式上报），无声明的主角槽才 unexplained。
+                transition_reason = "cutaway"
             else:
                 transition_reason = "unexplained"
         slot_status = ("supported" if picked and transition_reason != "unexplained"
@@ -842,23 +910,25 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
               if idx != slot_idx and other.get("status") in {"supported", "uncertain"}
               and other.get("source", {}).get("video")]
     rejected = list(rejected or [])
-    # 硬连续约束在重搜里同样生效：depends_on 槽的替换件必须与被依赖槽实体相交
-    depends_on = spec.get("depends_on")
-    anchor_entities = set()
-    if depends_on is not None and 0 <= int(depends_on) < len(story_plan["slots"]):
-        anchor_entities = set(story_plan["slots"][int(depends_on)]
-                              .get("source", {}).get("entity_ids") or [])
-    # V3 P3 主角契约在重搜同样生效：protagonist 槽的替换件必须还是锁定的主角
-    # （换件不换人）；主角素材枯竭 → 分层搜完仍无 → failed/unsupported，绝不
-    # 拿别的角色顶班。
     contract = story_plan.get("entity_contract") or {}
     protagonist = contract.get("protagonist")
     registry = load_entity_registry(cfg)
+    # 硬连续约束在重搜里同样生效：depends_on 槽的替换件必须与被依赖槽身份键
+    # 相交（V4 A2：裸 entity_ids 跨窗同号假相交——重搜后连续性判定正是
+    # V3_C3 re_search_log 假 entity_continuity 的出处）
+    depends_on = spec.get("depends_on")
+    anchor_keys = set()
+    if depends_on is not None and 0 <= int(depends_on) < len(story_plan["slots"]):
+        anchor_slot_source = story_plan["slots"][int(depends_on)].get("source") or {}
+        anchor_keys = (row_identity_keys(anchor_slot_source, registry)
+                       if (anchor_slot_source.get("entity_ids")
+                           or anchor_slot_source.get("entity_names")
+                           or anchor_slot_source.get("bindings")) else set())
 
     def _eligible(row: dict) -> bool:
         if not str(row.get("video") or ""):
             return False
-        if anchor_entities and not (anchor_entities & set(row.get("entity_ids") or [])):
+        if anchor_keys and not (anchor_keys & row_identity_keys(row, registry)):
             return False
         if protagonist and protagonist_required(spec) \
                 and protagonist not in row_identity_keys(row, registry):
@@ -929,6 +999,11 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
         "event_id": str(picked.get("event_id") or ""), "caption": caption,
         "causal_predecessors": list(picked.get("causal_predecessors") or []),
         "entity_ids": list(picked.get("entity_ids") or []),
+        # V4 A3：重搜换件同样透传 bindings（det check 的 binding 路径不因
+        # 换件而断）与 anchor（粗槽留给 localize 步骤处理）
+        "bindings": [dict(binding) for binding in picked.get("bindings") or []
+                     if isinstance(binding, dict)],
+        "anchor": (evidence or {}).get("anchor"),
         "focus_x": min(1.0, max(0.0, float(picked.get("focus_x", 0.5)))),
         "dialogue": [line for line in (picked.get("dialogue") or [])
                      if float(line.get("start_s", source_start)) >= source_start - 1e-6
@@ -940,9 +1015,13 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
                 "reason": "candidate breaks plan: " + "; ".join(errors[:3]),
                 "levels_tried": [attempts[0]["level"]]}
     previous = trial["slots"][slot_idx - 1] if slot_idx else None
-    if previous and previous.get("source", {}).get("entity_ids") \
-            and set(previous["source"]["entity_ids"]) & set(trial_slot["source"]["entity_ids"]):
+    if previous and shared_identity_keys(previous.get("source") or {},
+                                         trial_slot["source"], registry):
         trial_slot["transition_reason"] = "entity_continuity"
+        trial_slot["status"] = "supported"
+    elif slot_idx and spec.get("cutaway_function"):
+        # V4 A4：重搜换件后的转移同样走 cutaway 分类学
+        trial_slot["transition_reason"] = "cutaway"
         trial_slot["status"] = "supported"
     else:
         trial_slot["transition_reason"] = "unexplained" if slot_idx else "opening"
@@ -1043,7 +1122,9 @@ def validate_story_plan(plan: dict) -> list[str]:
     if not isinstance(plan, dict):
         return ["story plan must be an object"]
     errors = []
-    if plan.get("story_plan_version") != STORY_PLAN_VERSION:
+    if plan.get("story_plan_version") not in {STORY_PLAN_VERSION, "1.0"}:
+        # 1.0 只读兼容（render 子命令重渲旧产物）；新轮规划一律 1.1——V4
+        # 转移分类学与 bindings 透传在旧计划上不生效，不能混用语义。
         errors.append(f"story_plan_version must be {STORY_PLAN_VERSION}")
     if not str(plan.get("theme") or "").strip():
         errors.append("theme missing")

@@ -140,7 +140,7 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
     }
 
 
-DETERMINISTIC_CHECK_VERSION = "det_check_v1"
+DETERMINISTIC_CHECK_VERSION = "det_check_v2"   # V4：外观别名退出等价+bindings 生效+cutaway 分类学
 
 
 def deterministic_story_check(story_plan: dict, *, registry: dict | None = None) -> dict:
@@ -179,6 +179,14 @@ def deterministic_story_check(story_plan: dict, *, registry: dict | None = None)
             seen_present, seen_absent = True, False
         elif seen_present:
             seen_absent = True
+    # V4 A4 转移分类学：cutaway = 自由槽带声明理由的切走（不门控，显式上报
+    # 供人工/盲看复核）；unexplained 只门控主角必选槽的断链——身份键收紧后
+    # 若不分类，每个合法配角镜头都会被判违规（外审三轮：配角镜头可以存在，
+    # 但不能假装连续，也不能什么都不声明就切走）。
+    cutaways = [{"slot_idx": int(slot["slot_idx"]),
+                 "cutaway_function": (slot.get("need_spec") or {})
+                 .get("cutaway_function")}
+                for slot in live if slot.get("transition_reason") == "cutaway"]
     unexplained = [int(slot["slot_idx"]) for slot in live
                    if slot.get("transition_reason") == "unexplained"]
     reversals: list[list[int]] = []          # 信息项：同片时间倒流（倒叙须有理由）
@@ -196,6 +204,7 @@ def deterministic_story_check(story_plan: dict, *, registry: dict | None = None)
             if presence else None,
         "unexplained_entity_transition_rate":
             round(len(unexplained) / max(1, len(live) - 1), 4),
+        "cutaway_slots": cutaways,
         "time_reversals": reversals,
     }
     violations = []

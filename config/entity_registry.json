@@ -1,22 +1,32 @@
 {
   "char:xiaohei": {
-    "aliases": ["小黑", "罗小黑", "Xiaohei", "黑猫", "猫妖", "妖灵小黑"],
+    "aliases": ["小黑", "罗小黑", "Xiaohei"],
+    "role_labels": [],
+    "appearance_aliases": ["黑猫", "猫妖", "妖灵小黑"],
     "source_entities": []
   },
   "char:wuxian": {
-    "aliases": ["无限", "Wuxian", "执行人", "黑发持刀"],
+    "aliases": ["无限", "Wuxian"],
+    "role_labels": ["执行人"],
+    "appearance_aliases": ["黑发持刀"],
     "source_entities": []
   },
   "char:fengxi": {
-    "aliases": ["风息", "Fengxi", "木属性妖灵"],
+    "aliases": ["风息", "Fengxi"],
+    "role_labels": [],
+    "appearance_aliases": ["木属性妖灵"],
     "source_entities": []
   },
   "char:xuhuai": {
-    "aliases": ["虚淮", "Xuhuai", "蓝皮肤角色", "蓝角角色"],
+    "aliases": ["虚淮", "Xuhuai"],
+    "role_labels": [],
+    "appearance_aliases": ["蓝皮肤角色", "蓝角角色"],
     "source_entities": []
   },
   "char:laohu": {
-    "aliases": ["虎妖", "胖虎妖", "虎形生物", "山神"],
+    "aliases": ["虎妖", "山神"],
+    "role_labels": [],
+    "appearance_aliases": ["胖虎妖", "虎形生物"],
     "source_entities": []
   }
 }

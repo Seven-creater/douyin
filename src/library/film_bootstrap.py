@@ -645,13 +645,17 @@ def update_pack_from_annotations(cfg: AppConfig, source: str,
             if status == "conflict":
                 entry["conflicts"] += 1
             elif status == "supported":
-                entry["windows"].add(str(row.get("window_idx", "")))
+                row_window = row.get("window_idx")
+                entry["windows"].add(str(row_window))
                 entry["confidences"].append(
                     float(binding.get("binding_confidence") or 0))
                 local = str(binding.get("local_entity_id") or "")
                 if local:
+                    # V4：窗口作用域引用（库侧 id 各窗各自编号，不带窗口的
+                    # 引用会把别的窗口同号 id 也归到同一 canonical）
+                    scope = f"/w{int(row_window)}" if isinstance(row_window, int) else ""
                     source_entities.setdefault(canonical, set()).add(
-                        f"{source}/{local}")
+                        f"{source}{scope}/{local}")
     gt = {}
     if gt_path is not None and Path(gt_path).exists():
         gt = json.loads(Path(gt_path).read_text(encoding="utf-8"))

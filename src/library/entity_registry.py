@@ -64,31 +64,56 @@ def load_entity_registry(cfg=None) -> dict:
     return registry
 
 
-def build_alias_maps(registry: dict) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
-    """→ (norm 别名 → canonical, (源名, entity_id) → canonical)。"""
+def build_alias_maps(registry: dict) -> tuple[dict[str, str],
+                                              dict[tuple[str, str], str],
+                                              dict[tuple[str, str, str], str]]:
+    """→ (norm 别名 → canonical, (源名, entity_id) → canonical,
+    (源名, wN, entity_id) → canonical)。
+
+    V4（外审三轮必改精神）：只有 `aliases`（身份名：专名/罗马音）进等价
+    map。`appearance_aliases`（黑发持刀——只是长什么样）与 `role_labels`
+    （执行人——组织头衔，film2 有多名执行人）完全移出——外观/头衔撞型的
+    不同角色被合成同一 canonical 是 V3_C3 假绿的直接根因（外审反例：删
+    "黑发持刀"别名后必选槽主角存在率 100%→0%）。
+
+    source_entities 支持 `source/w{N}/{id}` 窗口作用域引用——库侧 entity_id
+    是窗口级编号（各窗各自 e001 起），不带窗口的引用会把别的窗口同号 id
+    也归到同一 canonical（V4 实锤：测试夹具里 w7/e001 撞上 w1/e001）。
+    无窗口引用按旧语义（源内任意窗口）匹配，向后兼容。"""
     aliases: dict[str, str] = {}
     source_map: dict[tuple[str, str], str] = {}
+    windowed_map: dict[tuple[str, str, str], str] = {}
     for canon, entry in registry.items():
         if not isinstance(entry, dict):
             continue
         for alias in entry.get("aliases") or []:
             aliases[_norm(alias)] = canon
         for reference in entry.get("source_entities") or []:
-            source, _, entity_id = str(reference).partition("/")
-            source_map[(source.split("__")[0], entity_id)] = canon
-    return aliases, source_map
+            parts = [part for part in str(reference).split("/") if part]
+            if not parts:
+                continue
+            source = parts[0].split("__")[0]
+            if len(parts) == 3 and parts[1].startswith("w"):
+                windowed_map[(source, parts[1], parts[2])] = canon
+            else:
+                source_map[(source, parts[-1])] = canon
+    return aliases, source_map, windowed_map
 
 
 def canonical_entities(row: dict, registry: dict) -> set[str]:
-    """行实体 → canonical id 集合（别名 + 源内 ID 双路）。
+    """行实体 → canonical id 集合（身份别名 + 源内 ID 双路）。
 
-    别名匹配含子串（alias≥3 字）：库标注写「黑发持刀少年」、注册表写
-    「黑发持刀男子」——一字之差不能丢掉跨片归一（V3 晨跑实锤）。"""
-    aliases, source_map = build_alias_maps(registry)
+    别名匹配含子串（alias≥3 字）——V4 起 alias 表只含身份名，「黑发持刀
+    少年」这类外观串匹配不上任何键（外观/头衔在 build_alias_maps 就没进表）。"""
+    aliases, source_map, windowed_map = build_alias_maps(registry)
     found = set()
     source = str(row.get("video_stem") or row.get("source") or "").split("__")[0]
+    window = row.get("window_idx")
+    window_key = f"w{int(window)}" if isinstance(window, int) else None
     for entity_id in row.get("entity_ids") or []:
-        canon = source_map.get((source, str(entity_id)))
+        canon = ((windowed_map.get((source, window_key, str(entity_id)))
+                  if window_key else None)
+                 or source_map.get((source, str(entity_id))))
         if canon:
             found.add(canon)
     for name in row.get("entity_names") or []:
@@ -136,3 +161,12 @@ def row_identity_keys(row: dict, registry: dict) -> set[str]:
             if norm:
                 keys.add(f"name:{norm}")
     return keys
+
+
+def shared_identity_keys(left: dict, right: dict, registry: dict) -> set[str]:
+    """两行的共享身份键（V4 单一事实源：story_planner 五处连续性判定共用）。
+
+    硬身份不变式（外审三轮）：只有 身份别名 exact/子串、manual
+    source_entities、supported/verified bindings 参与判等——proposed/
+    uncertain/conflict binding 与一切 canonical guess 不进硬约束。"""
+    return row_identity_keys(left, registry) & row_identity_keys(right, registry)
