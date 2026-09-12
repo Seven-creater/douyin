@@ -164,10 +164,14 @@ def build_slideshow(video: Path, work_dir: Path, *, timestamps: list[float],
         "-y", "-loglevel", "error", "-pattern_type", "glob", "-i",
         str(norm_dir / "*.jpg"), "-vf", f"tile={grid}", str(audit)], timeout_s=120)
     slideshow = work_dir / "slideshow.mp4"
+    # 静音轨必带：OmniRunner.watch 的 use_audio_in_video=True 断言视频有音轨
+    # （冒烟实锤），与 renderer 无声槽同款 anullsrc 方案
     common.run_ffmpeg(ffmpeg_bin, [
         "-y", "-loglevel", "error", "-framerate", "1", "-pattern_type", "glob",
-        "-i", str(norm_dir / "*.jpg"), "-pix_fmt", "yuv420p", "-c:v", "libx264",
-        "-preset", "veryfast", str(slideshow)], timeout_s=120)
+        "-i", str(norm_dir / "*.jpg"),
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-pix_fmt", "yuv420p", "-c:v", "libx264", "-preset", "veryfast",
+        "-c:a", "aac", "-shortest", str(slideshow)], timeout_s=120)
     return audit, slideshow, normalized
 
 
