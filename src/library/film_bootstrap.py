@@ -173,6 +173,17 @@ def build_slideshow(video: Path, work_dir: Path, *, timestamps: list[float],
     common.run_ffmpeg(ffmpeg_bin, [
         "-y", "-loglevel", "error", "-pattern_type", "glob", "-i",
         str(norm_dir / "*.jpg"), "-vf", f"tile={grid}", str(audit)], timeout_s=120)
+    # 交错排序（冒烟二轮实锤：A/B 按顺序切半把均匀风景帧全分给 A、人物帧全给
+    # B——A 拒认拉低整门控）。交错后每组都是 均匀+人物 混合。
+    uniform = [p for p in normalized if p.name.startswith("u")]
+    informative = [p for p in normalized if p.name.startswith("i")]
+    shuffled: list[Path] = []
+    for idx in range(max(len(uniform), len(informative))):
+        if idx < len(uniform):
+            shuffled.append(uniform[idx])
+        if idx < len(informative):
+            shuffled.append(informative[idx])
+    normalized = shuffled or normalized
     slideshow = work_dir / "slideshow.mp4"
     # 静音轨必带：OmniRunner.watch 的 use_audio_in_video=True 断言视频有音轨
     # （冒烟实锤），与 renderer 无声槽同款 anullsrc 方案
