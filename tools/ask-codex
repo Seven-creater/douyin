@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Claude → Codex 高成本专家调用入口（窄问题专用；额度稀缺，别用来做日常活）。
+# Claude → Codex 高成本专家调用入口（窄问题专用）。
+# 硬规则（用户 2026-09-13）：**任何调用前必须先获用户明确同意**——额度稀缺，常规活自己干。
 # 用法: tools/ask-codex '<窄问题 prompt>'
 set -euo pipefail
 
