@@ -379,6 +379,7 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                 # V4 E2：验证通道直接改 current_story 且当场重渲 → 恒采用
                 report["channel"] = "verification"
                 report["adopted"] = True
+                report["round"] = round_idx
                 round_reports.append(report)
             if any(row.get("status") == "replaced" for row in round_reports):
                 _re_render(f"verify_render_{round_idx}")      # 重搜生效先重渲再给 critic 看
@@ -426,7 +427,8 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                     candidate_pool=candidate_pool.get(slot_idx),
                     need_hint=directive.get("need_hint"), rejected=rejected_sources)
                 report["channel"] = "critic"    # patched_story 是 deepcopy 副本——
-                round_reports.append(report)    # 采用与否在循环收敛判定之后回填
+                report["round"] = round_idx     # 采用与否在循环收敛判定之后回填
+                round_reports.append(report)
         re_search_log.extend(round_reports)   # 引用 dict：adopted 可事后回填
         (output_dir / f"recipe_patch_round_{round_idx}.json").write_text(
             json.dumps({"patches": edit_critique.get("patches") or [],

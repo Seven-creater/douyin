@@ -501,6 +501,8 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     filter_chain = final_filter(execution_recipe, font=Path(cfg.generation.get("assemble", {}).get(
         "font", "")))
     use_bgm = False
+    audio_mode = "source"              # 叙事分支按 asset_plan.audio_mode 覆盖
+    applied_audio_mode = "source"      # V4：manifest 记实际生效的终混模式
     if narrative_mode:
         subtitles = write_story_subtitles(asset_plan, retrieval, output_dir / "subtitles.srt")
         if subtitles.stat().st_size:
@@ -516,6 +518,8 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
                     else Path(bgm_setting) if bgm_setting else None)
         has_bgm = bgm_path is not None and bgm_path.exists()
         audio_mode = str(asset_plan.get("audio_mode") or "source")
+        applied_audio_mode = (audio_mode if audio_mode in {"mix", "bgm"} and has_bgm
+                              else "source")
         pre_inputs, filter_complex, map_args = _final_audio_args(
             audio_mode, render_duration,
             bgm_volume=float(render_cfg.get("bgm_volume", 0.9)),
@@ -572,8 +576,8 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     (output_dir / "render_manifest.json").write_text(json.dumps({
         "output": str(final), "commands": commands, "operations": runtime_status,
         "deterministic": True, "seed": recipe["provenance"]["seed"],
-        "audio": {"mode": "bgm" if use_bgm else "source",
-                  "fallback": bool(asset_plan.get("audio_mode") == "bgm" and not use_bgm)},
+        "audio": {"mode": applied_audio_mode,
+                  "fallback": bool(audio_mode in {"mix", "bgm"} and applied_audio_mode == "source")},
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
                           encoding="utf-8")
