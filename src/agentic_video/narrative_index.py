@@ -203,24 +203,30 @@ WINDOW_ANNOTATION_PROMPT = """你是电影叙事素材标注 Agent。观看 {sta
 "event_summary":"主体做了什么并造成什么变化","story_role":"hook|context|conflict|choice|climax|consequence|resolution",
 "emotion":"情绪或uncertain","focus_x":0.5,"dialogue":[{{"start_s":0.0,"end_s":1.0,"original":"日语原文",
 "translation_zh":"忠实中文字幕","confidence":0.0}}],"confidence":0.0,
-"bindings":[{{"local_entity_id":"vis_..","canonical_entity_id":"候选表中的canonical id或null",
+"bindings":[{{"local_entity_id":"vis_..","canonical_entity_id":"char:franchise:name 或 null",
 "binding_status":"supported|uncertain|conflict","binding_confidence":0.0,
 "binding_evidence":["长发","黑衣","持刀"]}}]}}],
 "causal_links":[{{"from_event":"...","to_event":"...","relation":"causes|motivates|enables|prevents|reveals"}}]}}
-身份纪律（两层 Identity，永不合并）：
+实体纪律（门控三轮实锤修订）：
+- **列出镜头内所有可见人物实体**（含次要人物），每个实体一条 entity_id；
+  成人写成人（男子/女子/青年/成年男性），儿童才写少年/少女——不得把
+  成年角色写成少女。
 - entity_ids 永远写本地视觉身份（vis_ 前缀，同窗同人同 id）；同一人物跨镜头同 id。
 - 候选角色表只是**待验证假设**：只在画面特征（发色/服装/体型/标志物/动作）确实
   吻同时，在 bindings 里给出 canonical_entity_id 并列出 binding_evidence；
+  canonical_entity_id 必须**原样复制候选表里的 id 字符串**（形如
+  char:xxx:yyy），没有吻合的候选就写 null——绝不写描述文字。
   都不像就只留本地 vis_ 身份，禁止强行绑定。
 - 画面与候选明显矛盾（性别/年龄/体型不符）→ binding_status=conflict。
 - 候选表的剧情/关系知识不是画面证据，event_summary 只写本窗可见内容。
 不得根据 IP 常识补写镜头外剧情；没有可靠对白就保留空数组。
 只有当本窗画面特征支持时才能复用已有 entity_id；无法确认就新建可见身份 ID，不得强行合并。
+shot_idx 必须使用【镜头材料】里给出的编号原值，不得自行重新编号。
 本窗新事件 ID 必须以 {event_prefix} 开头。
 【候选角色表（待验证假设）+ 已观察实体注册表】{registry}
 【镜头材料】{material}
 """
-WINDOW_ANNOTATION_PROMPT_VERSION = "window_annot_v2"
+WINDOW_ANNOTATION_PROMPT_VERSION = "window_annot_v3"
 
 
 def build_entity_registry(shots: dict) -> list[dict]:
@@ -366,7 +372,14 @@ def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
 
 def _parse_bindings(items, valid_canonicals: set[str] | None) -> list[dict]:
     """canonical 必须来自候选表白名单（防模型自造 canonical）；local/canonical
-    缺失的条目丢弃；状态非法归 uncertain。"""
+    缺失的条目丢弃；状态非法归 uncertain。
+
+    valid_canonicals=None（pack-off 纯感知模式）→ 一律丢弃 bindings——
+    门控三轮实锤：无白名单时模型把提示词占位符原文（"候选表中的canonical
+    id或null"）当 canonical 写回，垃圾身份进索引。没有候选表就没有
+    canonical 概念，bindings 整层不适用。"""
+    if valid_canonicals is None:
+        return []
     bindings = []
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
@@ -376,7 +389,7 @@ def _parse_bindings(items, valid_canonicals: set[str] | None) -> list[dict]:
         status = str(item.get("binding_status") or "")
         if not local or not canonical:
             continue
-        if valid_canonicals is not None and canonical not in valid_canonicals:
+        if canonical not in valid_canonicals:
             continue
         if status not in {"supported", "uncertain", "conflict"}:
             status = "uncertain"
