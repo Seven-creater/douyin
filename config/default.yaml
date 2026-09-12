@@ -137,14 +137,17 @@ library:                   # 素材库（2026-09-11 起主力 = 罗小黑两部�
       language: zh
       # V3 P4：WEB-DL 内嵌中文字幕与成片文案同屏打架（C2 盲看实锤）——
       # 渲染侧裁掉底部字幕带；Omni 索引侧不裁（字幕是标注证据）。
-      # 2026-09-12 定量修正：OCR 实测字幕带在距底 16.7%~21.1%（源片为 2.39:1
-      # 镶 16:9 容器，上/下黑边 12.3%/12.7%，字幕骑在画面区底部）——0.12 只裁
-      # 黑边裁不到字；0.23 = 字幕顶缘 0.211 + 2% 余量（覆盖个别双行字幕）
-      subtitle_band: {crop_bottom: 0.23}
+      # 2026-09-12 定量修正（OCR+行亮度全分辨率实测）：此源是 16:9 容器镶
+      # 2.39:1 画面（顶黑边 12.4%/底黑边 12.8%），字幕带在距底 16.7%~21.1%
+      # ——旧 0.12 只裁到黑边裁不到字。crop_top 0.124 裁掉顶部黑边（否则
+      # 成片单边黑边）；crop_bottom 0.23 = 字幕顶缘 0.211 + 2% 余量。
+      subtitle_band: {crop_top: 0.124, crop_bottom: 0.23}
     luoxiaohei2:
       video: data/raw/luoxiaohei/罗小黑战记2.Ⅱ..2160p.WEB-DL.HQ.HDR.H265.DTS5.1.mp4
       language: zh
-      subtitle_band: {crop_bottom: 0.23}
+      # 此源原生 3840×1616（2.376:1 无黑边），字幕带顶缘 89.8%（距底
+      # 3.5%~10.2%，两个 OCR 样本一致）→ 只需 crop_bottom 0.11
+      subtitle_band: {crop_bottom: 0.11}
     guimie:                # 已退役（日语难人工核验）；保留产物供管线回归对照
       video: data/raw/guimie/Demon.Slayer.Infinity.Castle.2025.1080p.hevc.cq24.mp4
   source_zones:            # 片头/片尾职员表区不进检索池（2026-09-10 成片审核：首跑选中了 ED 段）

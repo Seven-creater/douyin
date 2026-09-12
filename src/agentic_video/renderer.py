@@ -275,13 +275,19 @@ def _has_audio_stream(ffprobe_bin: str, video: Path) -> bool:
 def source_subtitle_treatment(cfg: AppConfig, video_stem: str) -> str:
     """按源配置的内嵌字幕带裁切（V3 P4）：罗小黑 WEB-DL 源自带烧录中文字幕，
     与成片文案轨同屏打架（lxh_p4_C2 盲看实锤「你是要」抢戏）。渲染侧裁掉
-    底部字幕带；Omni 索引侧不裁（字幕是标注证据）。返回前置 crop 滤镜或空串。"""
+    底部字幕带；Omni 索引侧不裁（字幕是标注证据）。返回前置 crop 滤镜或空串。
+
+    crop_top（2026-09-12 二轮）：film1 是 16:9 容器镶 2.39:1 画面（顶黑边
+    12.4%），只裁底部会把顶部黑边整段保留 → 成片单边黑边；film2 原生
+    3840×1616 无黑边。两源几何不同，crop_top/crop_bottom 各自按实测配。"""
     name = str(video_stem or "").split("__")[0]
     band = ((cfg.library.get("sources") or {}).get(name) or {}).get("subtitle_band") or {}
-    ratio = float(band.get("crop_bottom") or 0)
-    if not 0 < ratio < 0.4:
+    top = float(band.get("crop_top") or 0)
+    bottom = float(band.get("crop_bottom") or 0)
+    if top < 0 or bottom < 0 or not 0 < top + bottom < 0.4:
         return ""
-    return f"crop=iw:ih*{1 - ratio:g}:0:0"
+    y_expr = f"ih*{top:g}" if top else "0"
+    return f"crop=iw:ih*{1 - top - bottom:g}:0:{y_expr}"
 
 
 def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,

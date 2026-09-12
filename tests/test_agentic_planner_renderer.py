@@ -337,17 +337,21 @@ def test_render_cache_key_is_sensitive_to_theme_and_canvas():
 
 def test_source_subtitle_band_crop_applies_to_luoxiaohei_only():
     """V3 P4：罗小黑 WEB-DL 内嵌字幕带按源配置裁切（Omni 索引侧不裁），
-    未配置的源不受影响。0.23 = OCR 定量（2026-09-12）：字幕带距底
-    16.7%~21.1%，0.12 只裁到黑边裁不到字。"""
+    未配置的源不受影响。2026-09-12 定量：film1 顶黑边 0.124 + 字幕带 0.23；
+    film2 原生 2.376:1 无黑边，字幕带 0.11。"""
     from src.agentic_video.renderer import source_subtitle_treatment
     cfg = AppConfig(
         wellbyte={}, ranking={}, download={}, template={}, generation={},
         logging_level="INFO", perception={},
-        library={"sources": {"luoxiaohei1": {"subtitle_band": {"crop_bottom": 0.23}}}},
+        library={"sources": {
+            "luoxiaohei1": {"subtitle_band": {"crop_top": 0.124, "crop_bottom": 0.23}},
+            "luoxiaohei2": {"subtitle_band": {"crop_bottom": 0.11}}}},
         paths=PathsCfg(raw_dir="r", processed_dir="p", videos_dir="v", logs_dir="l",
                        perception_dir="per", generation_dir="g", library_dir="lib"))
     crop = source_subtitle_treatment(cfg, "luoxiaohei1__narrative")
-    assert crop == "crop=iw:ih*0.77:0:0"
+    assert crop == "crop=iw:ih*0.646:0:ih*0.124"       # 顶黑边+底部字幕带都裁
+    assert source_subtitle_treatment(cfg, "luoxiaohei2__narrative") \
+        == "crop=iw:ih*0.89:0:0"
     assert source_subtitle_treatment(cfg, "guimie") == ""      # 未配置不裁
     assert source_subtitle_treatment(cfg, "") == ""
 
