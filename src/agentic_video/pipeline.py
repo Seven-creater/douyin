@@ -293,8 +293,10 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
         # （P4 的 B/C 对照开关：B=关，C=开）。
         round_reports = []
         if verification_enabled:
-            from src.agentic_video.verify_slots import (deterministic_story_check,
-                                                        verify_slots)
+            # 注意：deterministic_story_check/blind_video_check 用模块级导入——
+            # 此处再局部 import 会让整个函数作用域里的同名绑定变成局部变量，
+            # verification 关闭时（B4 实锤）尾部调用直接 UnboundLocalError
+            from src.agentic_video.verify_slots import verify_slots
             from src.agentic_video.story_planner import re_search_slot
 
             verification = verify_slots(cfg, current_story, runner=runner)
