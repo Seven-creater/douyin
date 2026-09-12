@@ -442,7 +442,14 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
     for idx, picked in enumerate(path):
         if not picked or picked.get("row_idx") is None:
             continue
-        if picked.get("row_idx") in used_rows:
+        # V4 夜跑实锤：三个槽选了同一窗口的不同 event 行——row_idx 不同但
+        # 画面相同（film1 一窗一记录、窗内多事件行同区间）。撞段判定必须
+        # 按区间重叠，不能只看 row_idx 精确重复。
+        overlaps_existing = any(
+            _overlaps(picked, other or {})
+            for earlier, other in enumerate(path)
+            if earlier < idx and other is not None)
+        if picked.get("row_idx") in used_rows or overlaps_existing:
             def _contract_ok(row: dict) -> bool:
                 # 去重换件同样受主角契约约束（V3：换候选不得顺手换主角）
                 if not (contract.get("protagonist")

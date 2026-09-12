@@ -386,8 +386,12 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                 (output_dir / f"deterministic_check_round_{round_idx}.json").write_text(
                     json.dumps(det_check, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # V4 夜跑实锤：round-2 critic 的 watch 在显存累积后 OOM——每轮
+        # critic 前都清缓存（此前只在渲染/盲看前清）
+        _release_gpu_cache()
         narrative_critique = run_narrative_critic(
             current_video, narrative, current_story, runner=runner)
+        _release_gpu_cache()
         edit_critique = run_structured_critic(
             current_video, current_recipe, asset_plan, retrieval, runner=runner,
             narrative=narrative)
