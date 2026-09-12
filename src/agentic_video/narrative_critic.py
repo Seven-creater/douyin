@@ -212,7 +212,10 @@ def run_narrative_critic(video, narrative: dict, story_plan: dict, *, runner) ->
     }
     for placeholder, value in replacements.items():
         prompt = prompt.replace(placeholder, value)
-    answer = runner.watch(video, prompt, max_new_tokens=2048)
+    # V3 晨修：成片审看用 720p 副本——1080p 直喂在 critic 阶段 OOM（B/C2 实锤）
+    from src.perception.common import prepare_watch_copy
+
+    answer = runner.watch(prepare_watch_copy(video), prompt, max_new_tokens=2048)
     result = parse_narrative_critique(answer.text)
     if result is None:
         result = {

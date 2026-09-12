@@ -139,6 +139,30 @@ def run_ffmpeg(ffmpeg_bin: str, args: list[str], *, timeout_s: float = 300) -> N
         raise FFmpegError(f"ffmpeg 退出码 {proc.returncode}: {(proc.stderr or '')[-500:]}")
 
 
+def prepare_watch_copy(video_path, *, max_width: int = 768,
+                       ffmpeg_bin: str = "ffmpeg") -> Path:
+    """成片级审看（critic/盲看）的降采样观看副本（V3 晨修）。
+
+    1920×1080 成片直接喂 Omni 在 critic 阶段把单卡 activations 顶到 47GB
+    OOM（lxh_p4_V3_B/C2 双双实锤；夜间 C 侥幸过的同一形态）。审看判的是
+    叙事连贯不是画面细节，720p 足够；槽级验证切片保持 1080p 不经此函数。
+    失败时原样返回（降级不降级都比崩掉整轮强）。"""
+    import tempfile
+
+    video = Path(video_path)
+    work = Path(tempfile.mkdtemp(prefix="watch_copy_"))
+    out = work / "watch.mp4"
+    try:
+        run_ffmpeg(ffmpeg_bin, [
+            "-y", "-loglevel", "error", "-i", str(video),
+            "-vf", f"scale='min({max_width},iw)':-2",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-ac", "2", "-c:a", "aac", str(out)])
+        return out
+    except FFmpegError:
+        return video
+
+
 def run_ffprobe_json(ffprobe_bin: str, video_path: Path) -> dict:
     proc = subprocess.run(
         [ffprobe_bin, "-v", "error", "-show_format", "-show_streams",

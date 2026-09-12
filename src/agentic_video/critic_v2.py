@@ -233,7 +233,10 @@ def run_structured_critic(video: Path, recipe: dict, asset_plan: dict,
         recipe=recipe_skeleton(recipe),
         asset_plan=json.dumps(asset_plan, ensure_ascii=False)[:5000],
         retrieval=json.dumps(retrieval, ensure_ascii=False)[:5000])
-    answer = runner.watch(video, prompt, max_new_tokens=2048)
+    # V3 晨修：成片审看用 720p 副本——1080p 直喂在 critic 阶段 OOM（B/C2 实锤）
+    from src.perception.common import prepare_watch_copy
+
+    answer = runner.watch(prepare_watch_copy(video), prompt, max_new_tokens=2048)
     critique = parse_critique(answer.text)
     if critique is None:
         critique = {"score": 0.0, "aspects": {aspect: 0.0 for aspect in ASPECTS},

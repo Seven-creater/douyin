@@ -229,7 +229,10 @@ def blind_video_check(video_path, *, runner) -> dict:
     不给 Story Plan / 文案 / 参考语境（V1 红线3：看过计划的模型自报答对
     不可信——lxh_p4_C2 的 comprehension 5/5 与 coherence 0 同文件自相矛盾）。
     """
-    answer = runner.watch(Path(video_path), BLIND_VIDEO_PROMPT, max_new_tokens=1024)
+    from src.perception.common import prepare_watch_copy
+
+    answer = runner.watch(prepare_watch_copy(video_path), BLIND_VIDEO_PROMPT,
+                          max_new_tokens=1024)
     block = extract_json_block(answer.text)
     try:
         payload = json.loads(block) if block else None
