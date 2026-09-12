@@ -381,6 +381,25 @@ def test_entity_registry_unifies_cross_film_entities():
     assert row_identity_keys(film1, {})
 
 
+def test_identity_keys_are_window_scoped_and_alias_fuzzy():
+    """V3 晨跑实锤的两连修：①e001 是窗口级编号——窗1 的 e001（黑发少年）≠
+    窗7 的 e001（小女孩），id 键必须带窗口，否则三槽三主角假等价、det 假绿；
+    ②库标注「黑发持刀少年」vs 注册表「黑发持刀」——子串匹配接住跨片归一。"""
+    from src.library.entity_registry import row_identity_keys
+    registry = {"char:wuxian": {"aliases": ["黑发持刀"]}}
+    w1 = {"video_stem": "luoxiaohei1__narrative", "window_idx": 1,
+          "entity_ids": ["e001"], "entity_names": ["黑发持刀少年"]}
+    w7 = {"video_stem": "luoxiaohei1__narrative", "window_idx": 7,
+          "entity_ids": ["e001"], "entity_names": ["小女孩"]}
+    k1, k7 = row_identity_keys(w1, registry), row_identity_keys(w7, registry)
+    assert "id:luoxiaohei1/w1/e001" in k1 and "id:luoxiaohei1/w7/e001" in k7
+    assert k1 & k7 == set()                        # 窗口隔离：不再假等价
+    assert "char:wuxian" in k1                     # 子串别名归一
+    film2 = {"video_stem": "luoxiaohei2__narrative", "window_idx": 3,
+             "entity_ids": ["e017"], "entity_names": ["黑发持刀男子"]}
+    assert "char:wuxian" in row_identity_keys(film2, registry)   # 跨片同人
+
+
 def test_evidence_window_follows_relevant_shot_not_event_start():
     """V3 P2 断言（lxh_p4_C2 槽1）：事件聚合 caption 说"奔跑"，相关镜头在事件
     后段——裁剪窗口必须跟着证据走，不再从事件起点盲切 7.3s 放出开头的施法段；

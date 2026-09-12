@@ -454,6 +454,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
         source = {
             "video": str((picked or {}).get("video") or ""),
             "video_stem": str((picked or {}).get("video_stem") or ""),
+            "window_idx": (picked or {}).get("window_idx"),
             "shot_idx": (picked or {}).get("shot_idx"),
             "shot_indices": evidence_shots or list((picked or {}).get("shot_indices") or []),
             "start_s": source_start, "end_s": source_end,
@@ -909,6 +910,7 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
         trimmed = True
     trial_slot["source"] = {
         "video": str(picked.get("video") or ""), "video_stem": str(picked.get("video_stem") or ""),
+        "window_idx": picked.get("window_idx"),
         "shot_idx": picked.get("shot_idx"), "shot_indices": shot_indices,
         "start_s": source_start, "end_s": source_end,
         "event_id": str(picked.get("event_id") or ""), "caption": caption,

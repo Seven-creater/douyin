@@ -55,7 +55,10 @@ def build_alias_maps(registry: dict) -> tuple[dict[str, str], dict[tuple[str, st
 
 
 def canonical_entities(row: dict, registry: dict) -> set[str]:
-    """行实体 → canonical id 集合（别名 + 源内 ID 双路）。"""
+    """行实体 → canonical id 集合（别名 + 源内 ID 双路）。
+
+    别名匹配含子串（alias≥3 字）：库标注写「黑发持刀少年」、注册表写
+    「黑发持刀男子」——一字之差不能丢掉跨片归一（V3 晨跑实锤）。"""
     aliases, source_map = build_alias_maps(registry)
     found = set()
     source = str(row.get("video_stem") or row.get("source") or "").split("__")[0]
@@ -64,20 +67,32 @@ def canonical_entities(row: dict, registry: dict) -> set[str]:
         if canon:
             found.add(canon)
     for name in row.get("entity_names") or []:
-        canon = aliases.get(_norm(name))
+        norm = _norm(name)
+        canon = aliases.get(norm)
         if canon:
             found.add(canon)
+            continue
+        for alias, candidate in aliases.items():
+            if len(alias) >= 3 and (alias in norm or norm in alias):
+                found.add(candidate)
+                break
     return found
 
 
 def row_identity_keys(row: dict, registry: dict) -> set[str]:
     """身份键（Entity Continuity Contract 的判定基础）：
-    canonical > 源内 entity_id > 归一名字。未注册实体保留源内键——
-    同片约束仍生效，跨片归一依赖注册表补条目。"""
+    canonical > 窗口内 entity_id > 归一名字。
+
+    窗口作用域（V3 晨跑实锤的假等价 bug）：库侧 entity_id 是**窗口级编号**
+    ——每个 45s 窗各自从 e001 起，窗1 的 e001（黑发少年）≠ 窗7 的 e001
+    （小女孩）。id 键必须带 window_idx，否则三槽三主角被算成同人，
+    deterministic check 假绿（盲看抓到真相，det 没抓到）。"""
     keys = canonical_entities(row, registry)
     source = str(row.get("video_stem") or row.get("source") or "").split("__")[0]
+    window = row.get("window_idx")
+    scope = f"/w{int(window)}" if isinstance(window, int) else ""
     for entity_id in row.get("entity_ids") or []:
-        keys.add(f"id:{source}/{entity_id}")
+        keys.add(f"id:{source}{scope}/{entity_id}")
     if not keys:
         for name in row.get("entity_names") or []:
             norm = _norm(name)
