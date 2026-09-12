@@ -337,15 +337,33 @@ def test_render_cache_key_is_sensitive_to_theme_and_canvas():
 
 def test_source_subtitle_band_crop_applies_to_luoxiaohei_only():
     """V3 P4：罗小黑 WEB-DL 内嵌字幕带按源配置裁切（Omni 索引侧不裁），
-    未配置的源不受影响。"""
+    未配置的源不受影响。0.23 = OCR 定量（2026-09-12）：字幕带距底
+    16.7%~21.1%，0.12 只裁到黑边裁不到字。"""
     from src.agentic_video.renderer import source_subtitle_treatment
     cfg = AppConfig(
         wellbyte={}, ranking={}, download={}, template={}, generation={},
         logging_level="INFO", perception={},
-        library={"sources": {"luoxiaohei1": {"subtitle_band": {"crop_bottom": 0.12}}}},
+        library={"sources": {"luoxiaohei1": {"subtitle_band": {"crop_bottom": 0.23}}}},
         paths=PathsCfg(raw_dir="r", processed_dir="p", videos_dir="v", logs_dir="l",
                        perception_dir="per", generation_dir="g", library_dir="lib"))
     crop = source_subtitle_treatment(cfg, "luoxiaohei1__narrative")
-    assert crop == "crop=iw:ih*0.88:0:0"
+    assert crop == "crop=iw:ih*0.77:0:0"
     assert source_subtitle_treatment(cfg, "guimie") == ""      # 未配置不裁
     assert source_subtitle_treatment(cfg, "") == ""
+
+
+def test_render_cache_key_sensitive_to_subtitle_crop():
+    """C3 看片实锤：字幕裁切是 vf 链一部分——配置改裁切比例而缓存键不变，
+    旧段（带字幕）被静默复用。裁切串必须进键。"""
+    from src.agentic_video.renderer import render_cache_key
+    recipe = _recipe()
+    plan = {"theme": "守护", "slots": [{"slot_idx": 0, "start_s": 0,
+                                       "end_s": 2, "need_duration_s": 2}]}
+    retrieval = [{"slot_idx": 0, "picked": {"video": "g.mp4", "source_start_s": 10.0}}]
+    kwargs = dict(canvas_width=720, canvas_height=960, narrative_mode=True)
+    base = render_cache_key(recipe, plan, retrieval, **kwargs)
+    same = render_cache_key(recipe, plan, retrieval,
+                            subtitle_crops=[[0, "crop=iw:ih*0.77:0:0"]], **kwargs)
+    changed = render_cache_key(recipe, plan, retrieval,
+                               subtitle_crops=[[0, "crop=iw:ih*0.88:0:0"]], **kwargs)
+    assert base["sha256"] != same["sha256"] != changed["sha256"]

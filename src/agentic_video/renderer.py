@@ -286,9 +286,13 @@ def source_subtitle_treatment(cfg: AppConfig, video_stem: str) -> str:
 
 def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
                      canvas_width: int, canvas_height: int,
-                     narrative_mode: bool) -> dict:
-    """产物缓存键（H3）：recipe/theme/槽位/选材/画布/叙事模式全量参与——
-    旧逻辑只看 rendered.mp4 是否存在，改主题重跑会静默返回旧主题成片。"""
+                     narrative_mode: bool,
+                     subtitle_crops: list | None = None) -> dict:
+    """产物缓存键（H3）：recipe/theme/槽位/选材/画布/叙事模式/源字幕裁切全量
+    参与——旧逻辑只看 rendered.mp4 是否存在，改主题重跑会静默返回旧主题成片。
+    subtitle_crops=[[slot_idx, crop_filter]]：裁切是 vf 链一部分，配置改了
+    裁切比例而键不变 → 带字幕的旧段被静默复用（C3 看片实锤：0.12 裁不掉
+    距底 16.7~21.1% 的字幕带，改 0.23 后旧缓存差点直接命中）。"""
     import hashlib
 
     payload = json.dumps({
@@ -306,6 +310,7 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
                     (row.get("picked") or {}).get("source_start_s")]
                    for row in retrieval],
         "canvas": [canvas_width, canvas_height], "narrative": narrative_mode,
+        "subtitle_crops": subtitle_crops or [],
     }, ensure_ascii=False, sort_keys=True)
     return {"sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
 
@@ -335,9 +340,14 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     final = output_dir / "rendered.mp4"
     narrative_mode = bool(asset_plan.get("narrative_program_required"))
     canvas_width, canvas_height = render_canvas(cfg, narrative_mode)
-    cache = render_cache_key(recipe, asset_plan, retrieval,
-                             canvas_width=canvas_width, canvas_height=canvas_height,
-                             narrative_mode=narrative_mode)
+    cache = render_cache_key(
+        recipe, asset_plan, retrieval,
+        canvas_width=canvas_width, canvas_height=canvas_height,
+        narrative_mode=narrative_mode,
+        subtitle_crops=[[int(row["slot_idx"]),
+                         source_subtitle_treatment(
+                             cfg, str((row.get("picked") or {}).get("video_stem") or ""))]
+                        for row in retrieval])
     cache_path = output_dir / "render_cache.json"
     if final.exists() and not force:
         try:
