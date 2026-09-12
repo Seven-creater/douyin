@@ -303,3 +303,28 @@ def test_parse_localization_multi_object_and_absolute_time():
     single = parse_localization('{"found": false, "start": 0, "end": 0, "evidence": "", "confidence": 0.0}')
     assert single["found"] is False
     assert parse_localization("完全不是 JSON") is None
+
+
+def test_localize_coarse_slots_exception_path_no_crash(tmp_path, monkeypatch):
+    """C3 实锤回归：watch 抛异常时 except 路径不得引用未定义的 answer
+    （UnboundLocalError 崩整跑）——槽降级 unsupported、error 落档。"""
+    from src.agentic_video.verify_slots import localize_coarse_slots
+
+
+    class _Boom:
+        def watch(self, *a, **k):
+            raise RuntimeError("gpu hiccup")
+
+
+    story = {"slots": [{
+        "slot_idx": 0, "status": "supported", "role": "hook",
+        "target_interval": [0.0, 5.5],
+        "need_spec": {"need": "x"},
+        "source": {"video": str(tmp_path / "v.mp4"), "anchor": "coarse",
+                   "start_s": 100.0, "end_s": 145.0, "dialogue": []}}]}
+    (tmp_path / "v.mp4").write_bytes(b"0")
+    log = localize_coarse_slots(None, story, runner=_Boom(), output_dir=tmp_path)
+    slot = story["slots"][0]
+    assert slot["status"] == "unsupported"
+    assert slot["reason"] == "coarse_unlocalizable(not_found)"
+    assert log[0]["error"].startswith("RuntimeError")

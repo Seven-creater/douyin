@@ -302,18 +302,16 @@ def localize_coarse_slots(cfg, story_plan: dict, *, runner,
                                   clip_dir=clip_dir, max_new_tokens=768,
                                   duration_s=win_end - win_start)
             parsed = parse_localization(answer.text)
-            if parsed is None:                    # 夜跑实锤：parsed=null 无从排查
+            if parsed is None:                    # 可观测性：拒因落档
                 entry["raw_head"] = str(answer.text)[:200]
         except Exception as exc:                   # noqa: BLE001 - 定位失败=拒绝
             parsed = None
-            entry["error"] = repr(exc)[:200]       # 但原因必须落档
+            entry["error"] = repr(exc)[:200]       # 原因必须落档（answer 此路径不存在）
         if parsed is None or not parsed["found"] or parsed["interval"] is None:
             slot["status"] = "unsupported"
             slot["reason"] = "coarse_unlocalizable(not_found)"
             entry["outcome"] = "rejected"
             entry["parsed"] = parsed
-            if parsed is None:
-                entry["raw_head"] = str(answer.text)[:200]   # 可观测性：拒因落档
             log.append(entry)
             continue
         rel_start, rel_end = parsed["interval"]
