@@ -364,6 +364,7 @@ def _ground_roster_canonicals(entities: list[dict], franchise: str,
     from src.library.entity_registry import _norm, build_alias_maps
 
     aliases, _source_map, _windowed = build_alias_maps(registry)
+    truth_ids = set(aliases.values())
     grounded, id_map = [], {}
     for idx, entity in enumerate(entities):
         canonical = None
@@ -376,12 +377,25 @@ def _ground_roster_canonicals(entities: list[dict], franchise: str,
             canonical = sanitize_canonical_id(
                 f"char:{franchise or 'unknown'}:e{idx + 1}", franchise)
         id_map[str(entity.get("canonical_id") or "")] = canonical
-        grounded.append({**entity, "canonical_id": canonical,
-                         "model_slug": str(entity.get("canonical_id") or ""),
-                         # grounded=命中手写真值；未命中的是模型记忆候选
-                         # （metadata_prior 档幻觉高发：film1 roster 12 实体
-                         # 9 个是编造角色），annotation_view 据此过滤注入。
-                         "grounded": canonical in set(aliases.values())})
+        grounded_entity = {**entity, "canonical_id": canonical,
+                           "model_slug": str(entity.get("canonical_id") or ""),
+                           # grounded=命中手写真值；未命中的是模型记忆候选
+                           # （metadata_prior 档幻觉高发：film1 roster 12 实体
+                           # 9 个是编造角色），annotation_view 据此过滤注入。
+                           "grounded": canonical in truth_ids}
+        if grounded_entity["grounded"]:
+            # 门控四轮实锤：模型的 appearance 记忆不可靠（无限被写成"白发
+            # 长袍"，实际黑发青年）→ 标注器守纪律拒绝绑定，①判据永远过
+            # 不了。grounded 实体的绑定参考换成手写 registry 的
+            # role/appearance 提示——外观别名的正当用途（绑定引导），
+            # 与身份判等（build_alias_maps 只吃 aliases）分离不变。
+            entry = registry.get(canonical) or {}
+            hints = [*(entry.get("role_labels") or []),
+                     *(entry.get("appearance_aliases") or [])]
+            if hints:
+                grounded_entity["appearance"] = "；".join(
+                    str(hint) for hint in hints)[:40]
+        grounded.append(grounded_entity)
     return grounded, id_map
 
 
