@@ -392,11 +392,16 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                         and protagonist_required(specs[idx])):
                     return True
                 return contract["protagonist"] in row_identity_keys(row, registry)
+            def _no_overlap(row: dict) -> bool:
+                # V3 晨修（B3/C3 实锤）：同事件不同行 row_idx 不同但画面相同——
+                # 槽0/槽2 放了同一段 2775~2782s。换件必须排除区间重叠。
+                return not any(_overlaps(row, other or {})
+                               for other in path if other is not row)
             replacement = next(
                 (row for row in candidate_groups[idx]
                  if row.get("row_idx") is not None
                  and row.get("row_idx") not in used_rows
-                 and _contract_ok(row)), None)
+                 and _contract_ok(row) and _no_overlap(row)), None)
             if replacement is not None:
                 path[idx] = replacement
         used_rows.add(path[idx].get("row_idx"))

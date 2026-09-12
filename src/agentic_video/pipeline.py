@@ -416,6 +416,9 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
     final_review["deterministic"] = det_final
     blind = None
     if verification_enabled:                                # B 档关（对照开关）
+        # V3 晨修（B3/C3 实锤）：critic 两轮 + copy ask 后进程驻留 46.85GB，
+        # 盲看 watch 直接 OOM——盲看前必须清显存
+        _release_gpu_cache()
         blind = blind_video_check(current_video, runner=runner)
         (output_dir / "blind_review.json").write_text(
             json.dumps(blind, ensure_ascii=False, indent=2), encoding="utf-8")
