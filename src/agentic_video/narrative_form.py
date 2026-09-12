@@ -152,11 +152,20 @@ def resolve_slot_sequence(narrative: dict, *, form_name: str | None = None
             if requirements and requirements.get("protagonist") == "required" \
                     and not participants:
                 requirements["protagonist"] = "optional"
+            # V4 C：form_function 消费顺序 = canonical enum（narrative_agent
+            # 双字段输出）→ legacy 关键词归一 → 角色名回退。自由中文整句
+            # 直接当 form_function 是 V3 转换丢失的根因。
+            raw_enum = str(segment.get("form_function") or "").strip()
+            if raw_enum in _FORM_FUNCTION_NEEDS:
+                form_function = raw_enum
+            else:
+                form_function = (normalize_form_function(
+                    str(segment.get("function") or "")) or role)
             slots.append({
                 "role": role,
                 "required": role in {"hook", "conflict", "climax", "resolution"},
                 "entity_requirements": requirements,
-                "form_function": str(segment.get("function") or role),
+                "form_function": form_function,
                 "event_ids": list(segment.get("event_ids") or []),
             })
     else:
@@ -174,11 +183,53 @@ def resolve_slot_sequence(narrative: dict, *, form_name: str | None = None
 
 
 def compile_form_need(form_function: str) -> dict:
-    """按 form_function 编译零参考事实的证据需求（need/must_have/must_not）。"""
-    template = _FORM_FUNCTION_NEEDS.get(form_function)
-    if template is None:
-        return {"need": "", "must_have": [], "must_not": [], "evidence_mode": "visual"}
-    return deepcopy(template)
+    """按 form_function 编译零参考事实的证据需求（need/must_have/must_not）。
+
+    V4 C（外审三轮）：消费顺序 = 固定 enum 精确命中 → legacy 关键词归一器
+    （旧数据/模型没给 enum 时的迁移补丁）→ 空（上层回退角色模板）。
+    红线不变：need 文本永远来自模板，绝不把输入句原文拼进 need——参考片
+    的自由中文 function 可能携带参考事实（跆拳道/比赛），拼进去就是 C2
+    式跨库荒谬检索需求。"""
+    value = str(form_function or "")
+    template = _FORM_FUNCTION_NEEDS.get(value)
+    if template is not None:
+        return deepcopy(template)
+    normalized = normalize_form_function(value)
+    if normalized is not None:
+        return deepcopy(_FORM_FUNCTION_NEEDS[normalized])
+    return {"need": "", "must_have": [], "must_not": [], "evidence_mode": "visual"}
+
+
+# legacy 关键词归一器（迁移补丁，长期架构是 narrative_agent 输出 canonical
+# enum）。词表按外审十四节裁定：列举/成就/能力 等是**强扩展信号**——同句
+# 出现时压过 对比/局限（"列举生活技能与局限形成对比"在后段承担继续扩展
+# 证据+人物化收束，非首段反证）；其余按首条命中。
+_EXPANSION_STRONG = ("扩展", "更多", "进一步", "成绩", "成就", "能力", "实力",
+                     "证明", "认可", "列举")
+_FORM_KEYWORD_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("反驳", "打破", "证伪", "做得到", "反差", "对比"), "counter_evidence"),
+    (("冲突", "对抗", "危险", "威胁"), "confrontation"),
+    (("高潮", "关键行动", "峰值", "爆发"), "decisive_action"),
+    (("收束", "落地", "和解", "启程", "收尾", "局限", "反转"), "payoff"),
+    (("断言", "处境", "开场", "悬念"), "premise"),
+    (_EXPANSION_STRONG, "evidence_expansion"),
+)
+
+
+def normalize_form_function(text: str) -> str | None:
+    """自由中文 function → 形态 enum（确定性关键词匹配，无模型）。
+
+    多类同句时的裁定（外审十四节）：强扩展信号（列举/成就/能力…）优先于
+    对比/局限——"列举生活技能与局限形成对比" → evidence_expansion。"""
+    value = str(text or "")
+    if not value:
+        return None
+    if any(keyword in value for keyword in _EXPANSION_STRONG):
+        return "evidence_expansion"
+    for keywords, enum in _FORM_KEYWORD_RULES:
+        if any(keyword in value for keyword in keywords):
+            return enum
+    return None
 
 
 def entity_schema(form_name: str) -> dict:

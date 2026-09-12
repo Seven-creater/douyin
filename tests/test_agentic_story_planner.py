@@ -476,3 +476,46 @@ def test_merged_events_carry_member_shots_and_preceding():
     assert len(by_event["eA"]["member_shots"]) == 1
     assert by_event["eB"]["preceding_event_ids"] == ["eA"]
     assert by_event["eA"]["preceding_event_ids"] == []
+
+
+def test_compile_form_need_enum_first_then_legacy_keywords():
+    """V4 C（外审三轮）：固定 enum 精确命中优先；旧自由中文句走 legacy
+    关键词归一——badcase 两条原句必须命中且 need 不含输入句原文（参考
+    事实红线）；不可映射回退空（上层走角色模板）。"""
+    from src.agentic_video.narrative_form import (compile_form_need,
+                                                  normalize_form_function)
+    # enum 精确命中
+    assert compile_form_need("counter_evidence")["must_have"] \
+        == ["主角的关键行动可见", "主角在场"]
+    # badcase 原句一：「展示主角在专业领域的成就，强化其能力形象」
+    spec = compile_form_need("展示主角在专业领域的成就，强化其能力形象")
+    assert spec == compile_form_need("evidence_expansion")      # 归一到模板，零原文透传
+    # badcase 原句二：「列举生活技能与局限形成对比」——强扩展信号压过 对比/局限
+    assert normalize_form_function("列举生活技能与局限形成对比") \
+        == "evidence_expansion"
+    assert normalize_form_function("主角以行动反驳刻板印象") == "counter_evidence"
+    assert normalize_form_function("收束整个故事的情绪") == "payoff"
+    assert normalize_form_function("完全不沾边的句子") is None
+    assert compile_form_need("完全不沾边的句子") == \
+        {"need": "", "must_have": [], "must_not": [], "evidence_mode": "visual"}
+
+
+def test_thick_arc_prefers_canonical_form_enum_over_free_text():
+    """厚弧段带 enum（V4 双字段）时直接消费；只给自由中文时走归一器，
+    不再把整句当 form_function 传给 compile_form_need。"""
+    from src.agentic_video.narrative_form import resolve_slot_sequence
+    narrative = {
+        "arc": [
+            {"role": "hook", "event_ids": [],
+             "form_function": "premise", "function": "开场断言"},
+            {"role": "context", "event_ids": [],
+             "function": "展示主角在专业领域的成就，强化其能力形象"},
+            {"role": "resolution", "event_ids": [],
+             "function": "轻细节收尾"},
+        ],
+        "events": [], "entities": [], "causal_links": [], "utterances": [],
+    }
+    slots, _form = resolve_slot_sequence(narrative)
+    assert slots[0]["form_function"] == "premise"
+    assert slots[1]["form_function"] == "evidence_expansion"
+    assert slots[2]["form_function"] == "payoff"

@@ -260,7 +260,11 @@ event={{"id":"event_000","interval":[0.0,1.0],"participants":["entity_000"],"act
 causal_link={{"from_event":"event_000","to_event":"event_001",
 "relation":"causes|motivates|enables|prevents|reveals","evidence":[],"confidence":0.0,"status":"..."}}
 arc={{"role":"hook|context|conflict|choice|climax|consequence|resolution",
-"event_ids":["event_000"],"function":"该段在整条表达中的作用（一句话）"}}
+"event_ids":["event_000"],
+"form_function":"premise|counter_evidence|evidence_expansion|confrontation|decisive_action|payoff",
+"function":"该段在整条表达中的作用（一句话中文说明，给人看的解释）"}}
+（form_function 是该段的表达功能枚举——断言开场/反驳断言/扩展证据/呈现冲突/
+关键行动/收束落地，按实际作用选，不许为了叙事弧好看而虚标。）
 utterance={{"id":"utterance_000","interval":[0.0,1.0],"speaker_id":"entity_000或null",
 "original":"原文或可靠概括","translation_zh":"已有中文则同原文；否则可靠翻译或uncertain",
 "evidence":[],"confidence":0.0,"status":"..."}}
@@ -650,6 +654,12 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
     program["causal_links"] = links
 
     arc = []
+    # V4 C（外审三轮）：form_function 必须是固定 enum（下游
+    # compile_form_need 只认 enum）；自由中文说明进 function_description。
+    # V3 病灶：弧段 function 是自由整句 → 编译必 miss → "展示能力"退化成
+    # "人物互动"（badcase 第五节的转换丢失）。
+    _FORM_ENUMS = frozenset({"premise", "counter_evidence", "evidence_expansion",
+                             "confrontation", "decisive_action", "payoff"})
     for segment in payload.get("arc") or []:
         if not isinstance(segment, dict) or segment.get("role") not in ARC_ROLES:
             continue
@@ -658,9 +668,13 @@ def parse_narrative_program(raw: str, *, reference_id: str, reference_uri: str,
             continue
         entry = {"role": segment["role"], "event_ids": ids}
         # 同一事件可被多槽引用，但必须写明各段的不同功能（v2 红线：禁止复制描述凑弧）
-        function = str(segment.get("function") or "").strip()
+        function = str(segment.get("function")
+                       or segment.get("function_description") or "").strip()
         if function:
             entry["function"] = function
+        enum = str(segment.get("form_function") or "").strip()
+        if enum in _FORM_ENUMS:
+            entry["form_function"] = enum
         arc.append(entry)
     program["arc"] = arc
 
