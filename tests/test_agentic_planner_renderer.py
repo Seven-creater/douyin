@@ -371,3 +371,21 @@ def test_render_cache_key_sensitive_to_subtitle_crop():
     changed = render_cache_key(recipe, plan, retrieval,
                                subtitle_crops=[[0, "crop=iw:ih*0.88:0:0"]], **kwargs)
     assert base["sha256"] != same["sha256"] != changed["sha256"]
+
+
+def test_final_audio_args_mix_uses_amix_without_normalization():
+    """V4 D2：mix = 原声 1.0 + BGM 低混；amix normalize=0 必须显式（默认
+    1/inputs 会把原声压半）；bgm 模式维持整轨替换；无 bgm 回退原声。"""
+    from src.agentic_video.renderer import _final_audio_args
+    pre, fc, maps = _final_audio_args("mix", 22.0, bgm_volume=0.9,
+                                      mix_volume=0.25, has_bgm=True)
+    assert "amix=inputs=2:duration=first:normalize=0" in fc
+    assert "volume=1.0[ra]" in fc and "volume=0.25" in fc
+    assert maps == ["-map", "0:v", "-map", "[au]"]
+    assert pre == ["-stream_loop", "-1", "-i", "__BGM__"]
+    _, fc_bgm, maps_bgm = _final_audio_args("bgm", 22.0, bgm_volume=0.9,
+                                            mix_volume=0.25, has_bgm=True)
+    assert "atrim=duration=22" in "".join(maps_bgm) and "volume=0.9" in "".join(maps_bgm)
+    _, _, maps_fb = _final_audio_args("mix", 22.0, bgm_volume=0.9,
+                                      mix_volume=0.25, has_bgm=False)
+    assert maps_fb == ["-map", "0:v", "-map", "0:a?"]        # bgm 缺失回退原声

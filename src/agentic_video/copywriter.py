@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-COPY_VERSION = "copy_v2"          # V3 P4：cue 绑 slot_idx/subject/evidence + grounding 校验
+COPY_VERSION = "copy_v3"          # V4：hook 补检+身份断言+卡片 ≥2 shingle+audio 三态
 
 # 模板保底文案：通用但不空洞的断言/收尾，适配逆袭-励志-守护类主题
 _FALLBACK_HOOKS = (
@@ -93,8 +93,39 @@ def _ask_llm(runner, story_plan: dict) -> dict | None:
         return None
 
 
+def _usable_dialogue_seconds(slot: dict) -> float:
+    """槽内可用对白累计秒数（translation_zh 有效 = 真实台词而非 uncertain）。"""
+    seconds = 0.0
+    for line in (slot.get("source") or {}).get("dialogue") or []:
+        translation = str(line.get("translation_zh") or "").strip()
+        if not translation or translation in {"uncertain", "unknown"}:
+            continue
+        try:
+            seconds += max(0.0, float(line.get("end_s") or 0)
+                           - float(line.get("start_s") or 0))
+        except (TypeError, ValueError):
+            continue
+    return seconds
+
+
+def decide_audio_mode(story_plan: dict) -> str:
+    """V4 D1（外审三轮十节）：验证靠对白成立的素材，交付必须保留对白。
+
+    mix = 原声为主 + BGM 低混（任一 live 槽可用对白 ≥2.0s——一条 1s 的
+    「嗯」不会把整片切到 mix）；bgm = 7682 纯文案公式（无有效对白）；
+    dialogue = 空计划退化。"""
+    slots = story_plan.get("slots") or []
+    if not slots:
+        return "dialogue"
+    live = [slot for slot in slots
+            if slot.get("status") in {"supported", "uncertain"}]
+    if any(_usable_dialogue_seconds(slot) >= 2.0 for slot in live):
+        return "mix"
+    return "bgm"
+
+
 def build_copy_cues(story_plan: dict, runner=None) -> dict:
-    """产出成片时间轴的文案 cue 列表 + 音频模式（7682 公式 = 纯文案 + 纯 BGM）。
+    """产出成片时间轴的文案 cue 列表 + 音频模式。
 
     时序规则（复刻参考片实测）：钩子 [0.15, min(4.2, 首槽末-0.2)]；
     中段留白（对应参考片记分牌区）；成就卡从末槽起点 +0.2s 起每张 1.0s、
@@ -108,6 +139,7 @@ def build_copy_cues(story_plan: dict, runner=None) -> dict:
     llm_copy = _ask_llm(runner, story_plan)
     copy = llm_copy or _template_copy(story_plan)
     source_tier = "llm" if llm_copy else "template"
+    audio_mode = decide_audio_mode(story_plan)
 
     first_end = float(slots[0]["target_interval"][1])
     last_start = float(slots[-1]["target_interval"][0])
@@ -149,13 +181,23 @@ def build_copy_cues(story_plan: dict, runner=None) -> dict:
         "subject_entity": _subject(slots[-1]),
         "evidence": _evidence(slots[-1]),
     })
-    return {"cues": cues, "audio_mode": "bgm", "source": source_tier,
+    return {"cues": cues, "audio_mode": audio_mode, "source": source_tier,
             "version": COPY_VERSION}
 
 
-# 动作断言词：punchline 含这些词时必须有画面证据（V3 P4）
+# 动作断言词：含这些词的文案必须有画面证据（V3 P4）
 _ACTION_ASSERTION_CHARS = ("救", "赢", "找到", "夺", "守住", "护住", "翻盘",
                            "逆袭", "夺冠", "康复", "打败", "战胜")
+# V4 D3 身份/普遍断言词：关于"是谁/变成什么/从不总是"的判断句需要画面支撑
+# ——V3_C3 实锤「原来我们才是异类」「人类从不真正接纳妖怪」都不在动作词
+# 表里免检过审（外审六节）。兜底钩「人们常常觉得…」不含这些标记，不受影响。
+_IDENTITY_ASSERTION_CHARS = ("才是", "变成", "原来我们", "属于", "从不", "总是",
+                             "永远")
+
+
+def _asserts_something(text: str) -> bool:
+    return (any(verb in text for verb in _ACTION_ASSERTION_CHARS)
+            or any(marker in text for marker in _IDENTITY_ASSERTION_CHARS))
 
 
 def validate_copy_grounding(copy: dict, story_plan: dict) -> dict:
@@ -170,8 +212,15 @@ def validate_copy_grounding(copy: dict, story_plan: dict) -> dict:
 
     slots = story_plan.get("slots") or []
     by_idx = {int(slot.get("slot_idx", -1)): slot for slot in slots}
-    report = {"dropped": [], "replaced_punchline": False, "kept": 0}
+    report = {"dropped": [], "replaced_punchline": False, "replaced_hook": False,
+              "kept": 0}
     cues = list((copy or {}).get("cues") or [])
+    live = [slot for slot in slots
+            if slot.get("status") in {"supported", "uncertain"}]
+    first_live_caption = str(((live[0].get("source") or {}).get("caption") or "")
+                             if live else "")
+    last_live_caption = str(((live[-1].get("source") or {}).get("caption") or "")
+                            if live else "")
     kept = []
     for cue in cues:
         kind = cue.get("kind")
@@ -179,21 +228,31 @@ def validate_copy_grounding(copy: dict, story_plan: dict) -> dict:
         if kind == "info_card":
             slot = by_idx.get(int(cue.get("slot_idx", -1)))
             caption = str(((slot or {}).get("source") or {}).get("caption") or "")
+            shared = _text_shingles(text) & _text_shingles(caption)
+            # V4 D3 收紧：共享任一二元组 → ≥2 个（或单 token 卡豁免——
+            # ascii 角色名截断卡只有一个词，不误杀）
+            tokens = len(text.strip())
             grounded = (slot is not None
                         and slot.get("status") in {"supported", "uncertain"}
                         and caption
-                        and bool(_text_shingles(text) & _text_shingles(caption)))
+                        and (len(shared) >= 2 or (shared and tokens <= 2)))
             if not grounded:
                 report["dropped"].append({"kind": kind, "text": text,
                                           "reason": "no_visual_evidence"})
                 continue
+        elif kind == "hook_line":
+            # V4 D3 补检（外审六节：钩子句此前零检查原样保留）——断言型钩子
+            # （人们从不/才是/属于…）必须与首 live 槽画面词面有重合，否则换
+            # 无断言兜底钩
+            if _asserts_something(text) \
+                    and not (_text_shingles(text) & _text_shingles(first_live_caption)):
+                cue = {**cue, "text": _FALLBACK_HOOKS[0],
+                       "grounding": "replaced_nonassertive"}
+                report["replaced_hook"] = True
         elif kind == "punchline":
-            live = [slot for slot in slots
-                    if slot.get("status") in {"supported", "uncertain"}]
-            caption = str(((live[-1].get("source") or {}).get("caption") or "")
-                          if live else "")
-            asserts_action = any(verb in text for verb in _ACTION_ASSERTION_CHARS)
-            if asserts_action and not (_text_shingles(text) & _text_shingles(caption)):
+            # 动作断言 + 身份断言（「原来我们才是异类」类）都要画面支撑
+            if _asserts_something(text) \
+                    and not (_text_shingles(text) & _text_shingles(last_live_caption)):
                 cue = {**cue, "text": _FALLBACK_PUNCHLINES[0],
                        "grounding": "replaced_nonassertive"}
                 report["replaced_punchline"] = True

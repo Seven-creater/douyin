@@ -305,8 +305,8 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
         "reference": recipe.get("reference"),
         "operations": recipe.get("operations"),
         # 语义版本标记：执行策略变更（v2=叙事模式剔除参考文字层；
-        # v3=文案轨 + BGM 换轨）后旧缓存失效
-        "exec_policy": 3,
+        # v3=文案轨 + BGM 换轨；v4=amix 终混 + 盲看输入改终版）后旧缓存失效
+        "exec_policy": 4,
         "copy_cues": asset_plan.get("copy_cues"),
         "audio_mode": asset_plan.get("audio_mode"),
         "theme": asset_plan.get("theme"),
@@ -319,6 +319,38 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
         "subtitle_crops": subtitle_crops or [],
     }, ensure_ascii=False, sort_keys=True)
     return {"sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest()}
+
+
+def _final_audio_args(audio_mode: str, render_duration: float, *, bgm_volume: float,
+                      mix_volume: float, has_bgm: bool
+                      ) -> tuple[list[str], list[str], list[str]]:
+    """终混音频参数（V4 D2 纯函数，便于单测）：→ (pre_inputs, filter_complex,
+    map_args)。
+
+    mix = 原声为主 + BGM 低混（外审三轮十节：验证靠对白成立的素材，交付
+    必须保留对白——原声 volume 1.0，BGM 按 mix_volume≈0.25 垫底）。
+    **amix normalize=0 必须显式**：默认 1/inputs 归一会把原声压半。
+    bgm = 7682 纯文案公式（BGM 整轨替换）；bgm 缺失回退素材原声（调用方
+    记 audio_fallback）。输入布局：[0]=视频（masked）[1]=原声（concat）
+    [2]=BGM(loop)——原声取 concat 而非 masked，规避 mask 后端丢音轨。"""
+    if audio_mode == "mix" and has_bgm:
+        fade_out = max(0.0, render_duration - 1.0)
+        filter_complex = (
+            f"[1:a]volume=1.0[ra];"
+            f"[2:a]volume={mix_volume:g},afade=t=in:st=0:d=0.5,"
+            f"afade=t=out:st={fade_out:g}:d=1.0[bg];"
+            f"[ra][bg]amix=inputs=2:duration=first:normalize=0[au]")
+        return (["-stream_loop", "-1", "-i", "__BGM__"],
+                filter_complex,
+                ["-map", "0:v", "-map", "[au]"])
+    if audio_mode == "bgm" and has_bgm:
+        fade_out = max(0.0, render_duration - 1.0)
+        return (["-stream_loop", "-1", "-i", "__BGM__"],
+                "",
+                ["-map", "0:v", "-map", "1:a:0", "-af",
+                 f"atrim=duration={render_duration:g},volume={bgm_volume:g},"
+                 f"afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out:g}:d=1.0"])
+    return [], "", ["-map", "0:v", "-map", "0:a?"]
 
 
 def render_canvas(cfg: AppConfig, narrative_mode: bool) -> tuple[int, int]:
@@ -475,28 +507,40 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
             subtitle_filter = _subtitle_filter(subtitles)
             filter_chain = (subtitle_filter if filter_chain == "null"
                             else f"{filter_chain},{subtitle_filter}")
-        # BGM 换轨（2026-09-10 MVP）：7682 型模板 = 纯文案 + 纯 BGM，素材对白
-        # 音轨丢弃。bgm 缺失时回退素材音轨并在 manifest 记 audio_fallback（不崩整跑）。
+        # 终混（V4 D2）：mix = 原声为主 + BGM 低混（对白承载内容的槽交付
+        # 必须保留对白）；bgm = 7682 纯文案公式；bgm 缺失回退素材音轨并在
+        # manifest 记 audio_fallback（不崩整跑）。
         render_cfg = cfg.library.get("narrative_render") or {}
         bgm_setting = str(render_cfg.get("bgm_path") or "")
         bgm_path = (repo_root() / bgm_setting if bgm_setting and not Path(bgm_setting).is_absolute()
                     else Path(bgm_setting) if bgm_setting else None)
-        use_bgm = (asset_plan.get("audio_mode") == "bgm" and bgm_path is not None
-                   and bgm_path.exists())
-        if use_bgm:
-            volume = float(render_cfg.get("bgm_volume", 0.9))
-            fade_out = max(0.0, render_duration - 1.0)
-            audio_args = ["-map", "1:a:0", "-af",
-                          f"atrim=duration={render_duration:g},volume={volume:g},"
-                          f"afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out:g}:d=1.0"]
-            pre_inputs = ["-stream_loop", "-1", "-i", str(bgm_path)]
+        has_bgm = bgm_path is not None and bgm_path.exists()
+        audio_mode = str(asset_plan.get("audio_mode") or "source")
+        pre_inputs, filter_complex, map_args = _final_audio_args(
+            audio_mode, render_duration,
+            bgm_volume=float(render_cfg.get("bgm_volume", 0.9)),
+            mix_volume=float(render_cfg.get("bgm_mix_volume", 0.25)),
+            has_bgm=has_bgm)
+        if audio_mode in {"mix", "bgm"} and not has_bgm:
+            runtime_status.append({"operation_id": "audio", "status": "audio_fallback",
+                                   "reason": "bgm missing"})
+        if audio_mode == "mix" and has_bgm:
+            # mix 三输入：[0]=masked(视频) [1]=concat(原声) [2]=bgm(loop)
+            # -vf（视频滤镜链/字幕烧录）与 -filter_complex（音频终混）并存
+            args = (["-y", "-loglevel", "error", "-i", str(masked_video),
+                     "-i", str(concat_video), *pre_inputs,
+                     "-vf", filter_chain,
+                     "-filter_complex", filter_complex, *map_args,
+                     "-t", f"{render_duration:g}", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+                     "-c:a", "aac", str(final)])
         else:
-            audio_args = ["-map", "0:a?"]
-            pre_inputs = []
-        args = (["-y", "-loglevel", "error", "-i", str(masked_video), *pre_inputs,
-                 "-vf", filter_chain, "-map", "0:v", *audio_args,
-                 "-t", f"{render_duration:g}", "-c:v", "libx264", "-preset", "veryfast",
-                 "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", str(final)])
+            pre_inputs = [str(a) if a != "__BGM__" else str(bgm_path)
+                          for a in pre_inputs] if has_bgm else []
+            args = (["-y", "-loglevel", "error", "-i", str(masked_video), *pre_inputs,
+                     "-vf", filter_chain, *map_args,
+                     "-t", f"{render_duration:g}", "-c:v", "libx264", "-preset", "veryfast",
+                     "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", str(final)])
         common.run_ffmpeg(cfg.perception.get("ffmpeg_bin", "ffmpeg"), args)
         commands.append([cfg.perception.get("ffmpeg_bin", "ffmpeg"), *args])
     elif reference.exists():

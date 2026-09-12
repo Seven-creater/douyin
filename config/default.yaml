@@ -206,6 +206,10 @@ library:                   # 素材库（2026-09-11 起主力 = 罗小黑两部�
     # 渲染时替换素材对白音轨；文件缺失自动回退素材音轨（manifest 记 audio_fallback）
     bgm_path: data/library/bgm/template_7682.m4a
     bgm_volume: 0.9
+    # V4 D2：mix 模式（对白承载内容的槽）BGM 垫底音量。0.25 是默认值不是
+    # 事实标准——验收以人耳能听清对白为准（外审十节）；loudnorm/ducking
+    # 留 V4.1
+    bgm_mix_volume: 0.25
   mask_backend:
     python: /data02/usr/wangqihao/miniconda3/envs/grounded_sam2/bin/python
     grounding_model: /data02/pretrained_model/cvr_learn/cvr_model/03_audio_vlm2vec_backbone/MaskEdit/GroundingDINO/checkpoints

@@ -126,3 +126,55 @@ def test_copy_grounding_drops_unevidenced_lines():
     assert "可它还是救了他" not in texts
     assert report["replaced_punchline"] is True
     assert any(row["reason"] == "no_visual_evidence" for row in report["dropped"])
+
+
+def test_decide_audio_mode_three_states():
+    """V4 D1：任一 live 槽可用对白 ≥2s → mix（原声+低混 BGM）；只有 1s 短句
+    → bgm；空计划 → dialogue。"""
+    from src.agentic_video.copywriter import decide_audio_mode
+
+    def _slot(lines):
+        return {"status": "supported", "source": {"dialogue": lines}}
+
+    assert decide_audio_mode({"slots": []}) == "dialogue"
+    assert decide_audio_mode({"slots": [
+        _slot([{"start_s": 1, "end_s": 2, "translation_zh": "嗯"}])]},
+    ) == "bgm"
+    assert decide_audio_mode({"slots": [
+        {"status": "unsupported", "source": {"dialogue": [
+            {"start_s": 0, "end_s": 5, "translation_zh": "不算"}]}},
+        _slot([{"start_s": 1, "end_s": 2, "translation_zh": "嗯"},
+              {"start_s": 2, "end_s": 4, "translation_zh": "两句加起来三秒"}])]},
+    ) == "mix"
+    # uncertain 翻译不算可用对白
+    assert decide_audio_mode({"slots": [
+        _slot([{"start_s": 0, "end_s": 9, "translation_zh": "uncertain"}])]},
+    ) == "bgm"
+
+
+def test_hook_and_punchline_identity_assertions_need_grounding():
+    """V4 D3：断言型钩子/身份断言 punchline 无画面词面重合 → 换无断言兜底；
+    通用钩子（人们常常觉得…）不受影响；卡片 ≥2 shingle 收紧。"""
+    from src.agentic_video.copywriter import validate_copy_grounding
+
+    def _slot(caption):
+        return {"slot_idx": 0, "status": "supported",
+                "source": {"caption": caption, "dialogue": []}}
+
+    story = {"slots": [_slot("众人围坐在昏暗的屋内沉默")]}
+    copy = {"cues": [
+        {"kind": "hook_line", "text": "人类从不真正接纳妖怪", "slot_idx": 0},
+        {"kind": "info_card", "text": "完全无关的卡片", "slot_idx": 0},
+        {"kind": "punchline", "text": "原来我们才是异类", "slot_idx": 0},
+    ]}
+    report = validate_copy_grounding(copy, story)
+    assert report["replaced_hook"] is True
+    assert report["replaced_punchline"] is True
+    assert report["dropped"] and report["dropped"][0]["kind"] == "info_card"
+    assert not any(cue["text"] == "人类从不真正接纳妖怪" for cue in copy["cues"])
+
+    ok = {"cues": [
+        {"kind": "hook_line", "text": "人们常常觉得，弱者的挣扎毫无意义", "slot_idx": 0},
+    ]}
+    report2 = validate_copy_grounding(ok, story)
+    assert report2["replaced_hook"] is False              # 通用断言钩不触发
