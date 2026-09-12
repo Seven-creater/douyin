@@ -173,6 +173,23 @@ library:                   # 素材库（2026-09-11 起主力 = 罗小黑两部�
   # 槽级验证 + 分层重搜（P3；P4 对照的 C 档开 / B 档关）
   verification:
     enabled: true
+  # P1.5 Film Knowledge Bootstrap（默认关：不开时管线与 V3 行为一致）。
+  # 看片前先建世界模型：代表帧→A/B 双投识别作品→knowledge_pack（全 to_verify）
+  # →标注注入候选表（Recognition Prior）→两层 Identity（local vis_ + canonical
+  # binding）。红线：知识=prior，视频=evidence；关系/剧情绝不进标注器。
+  film_bootstrap:
+    enabled: false
+    n_uniform: 6            # 均匀代表帧
+    n_informative: 4        # 高信息帧（kfs 按 dialogue+action 挑）
+    tier_high: 0.85         # 双投一致+平均≥此 → model_prior
+    tier_low: 0.4           # ≥此 → search（无 provider 降 model_prior_unverified 不注入）
+    max_entities: 12
+    search:                 # 外部检索（默认禁用；有 provider 时产品模式主动用）
+      enabled: false
+      provider: none
+      endpoint: ""
+      key_env: FILM_SEARCH_API_KEY
+      timeout_s: 10
   narrative_render:
     # 画布规则（2026-09-11 用户规定）：所有剪辑成片一律 1920x1080 横屏——
     # 叙事/编辑两模式共用（代码回退值同为此值，见 renderer.RENDER_CANVAS_DEFAULT）；

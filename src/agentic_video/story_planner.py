@@ -700,6 +700,11 @@ def merge_event_candidates(rows: list[dict]) -> list[dict]:
                  "entity_ids": list(row.get("entity_ids") or []),
                  "story_role": row.get("story_role")}
                 for row in ordered],
+            # P1.5 两层 Identity：成员镜头的 canonical 绑定并进事件行——
+            # 契约/确定性检查经 row_identity_keys 消费
+            "bindings": [dict(binding) for row in ordered
+                         for binding in (row.get("bindings") or [])
+                         if isinstance(binding, dict)],
             "preceding_event_ids": [],
         })
         merged.append(first)

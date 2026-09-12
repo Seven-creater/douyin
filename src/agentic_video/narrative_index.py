@@ -197,18 +197,29 @@ def attach_transcript_to_shots(result_path: Path, transcript: dict) -> Path:
 
 WINDOW_ANNOTATION_PROMPT = """你是电影叙事素材标注 Agent。观看 {start:g}~{end:g} 秒片段，
 根据给定镜头编号、时间、三帧描述和 ASR 转写，为每个镜头标注可见内容。只输出 JSON：
-{{"shots":[{{"shot_idx":0,"entity_ids":["稳定、简短的角色ID"],
+{{"shots":[{{"shot_idx":0,"entity_ids":["vis_开头的本地视觉身份ID"],
 "entity_names":["角色名或可见身份"],"event_id":"window事件ID",
 "event_summary":"主体做了什么并造成什么变化","story_role":"hook|context|conflict|choice|climax|consequence|resolution",
 "emotion":"情绪或uncertain","focus_x":0.5,"dialogue":[{{"start_s":0.0,"end_s":1.0,"original":"日语原文",
-"translation_zh":"忠实中文字幕","confidence":0.0}}],"confidence":0.0}}],
+"translation_zh":"忠实中文字幕","confidence":0.0}}],"confidence":0.0,
+"bindings":[{{"local_entity_id":"vis_..","canonical_entity_id":"候选表中的canonical id或null",
+"binding_status":"supported|uncertain|conflict","binding_confidence":0.0,
+"binding_evidence":["长发","黑衣","持刀"]}}]}}],
 "causal_links":[{{"from_event":"...","to_event":"...","relation":"causes|motivates|enables|prevents|reveals"}}]}}
-不得根据 IP 常识补写镜头外剧情；同一人物跨镜头使用相同 entity_id；没有可靠对白就保留空数组。
+身份纪律（两层 Identity，永不合并）：
+- entity_ids 永远写本地视觉身份（vis_ 前缀，同窗同人同 id）；同一人物跨镜头同 id。
+- 候选角色表只是**待验证假设**：只在画面特征（发色/服装/体型/标志物/动作）确实
+  吻同时，在 bindings 里给出 canonical_entity_id 并列出 binding_evidence；
+  都不像就只留本地 vis_ 身份，禁止强行绑定。
+- 画面与候选明显矛盾（性别/年龄/体型不符）→ binding_status=conflict。
+- 候选表的剧情/关系知识不是画面证据，event_summary 只写本窗可见内容。
+不得根据 IP 常识补写镜头外剧情；没有可靠对白就保留空数组。
 只有当本窗画面特征支持时才能复用已有 entity_id；无法确认就新建可见身份 ID，不得强行合并。
 本窗新事件 ID 必须以 {event_prefix} 开头。
-【已有实体注册表】{registry}
+【候选角色表（待验证假设）+ 已观察实体注册表】{registry}
 【镜头材料】{material}
 """
+WINDOW_ANNOTATION_PROMPT_VERSION = "window_annot_v2"
 
 
 def build_entity_registry(shots: dict) -> list[dict]:
@@ -241,6 +252,7 @@ def namespace_window_events(parsed: dict, window_idx: int) -> dict:
         namespaced = event_id if event_id.startswith(prefix) else prefix + event_id
         mapping[event_id] = namespaced
         annotation["event_id"] = namespaced
+        annotation["window_idx"] = window_idx   # P1.5：绑定状态机按窗累计
     for link in parsed.get("causal_links") or []:
         for key in ("from_event", "to_event"):
             if link.get(key) in mapping:
@@ -248,9 +260,17 @@ def namespace_window_events(parsed: dict, window_idx: int) -> dict:
     return parsed
 
 
+def _stable_hash_local(payload) -> str:
+    import hashlib
+
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False,
+                                     sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
 def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
                              time_offset_s: float = 0.0,
-                             clip_duration_s: float | None = None) -> dict:
+                             clip_duration_s: float | None = None,
+                             valid_canonicals: set[str] | None = None) -> dict:
     """解析窗口标注答案。
 
     H1：模型看的是从 time_offset_s 截出的切片（片段内 0 起算），其对白 start_s/end_s
@@ -313,10 +333,42 @@ def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
             "story_role": role, "emotion": str(item.get("emotion") or "uncertain"),
             "focus_x": focus_x, "dialogue": dialogue,
             "annotation_confidence": confidence,
+            # 两层 Identity（P1.5）：本地 vis_ id 之上的 canonical 绑定旁挂——
+            # pack 认错只改 binding，视觉观察层无损可审计
+            "bindings": _parse_bindings(item.get("bindings"), valid_canonicals),
         }
     links = [link for link in payload.get("causal_links") or [] if isinstance(link, dict)]
     return {"shots": rows, "causal_links": links,
             "parse_status": "json" if block else "failed"}
+
+
+def _parse_bindings(items, valid_canonicals: set[str] | None) -> list[dict]:
+    """canonical 必须来自候选表白名单（防模型自造 canonical）；local/canonical
+    缺失的条目丢弃；状态非法归 uncertain。"""
+    bindings = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        local = str(item.get("local_entity_id") or "")
+        canonical = str(item.get("canonical_entity_id") or "")
+        status = str(item.get("binding_status") or "")
+        if not local or not canonical:
+            continue
+        if valid_canonicals is not None and canonical not in valid_canonicals:
+            continue
+        if status not in {"supported", "uncertain", "conflict"}:
+            status = "uncertain"
+        try:
+            confidence = min(1.0, max(0.0, float(item.get("binding_confidence", 0))))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        bindings.append({
+            "local_entity_id": local, "canonical_entity_id": canonical,
+            "binding_status": status, "binding_confidence": confidence,
+            "binding_evidence": [str(v)[:24] for v in item.get("binding_evidence")
+                                 or []][:4],
+        })
+    return bindings
 
 
 def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
@@ -334,6 +386,25 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
     envelope = json.loads(result_path.read_text(encoding="utf-8"))
     shots = envelope["output"]["shots"]
     video = Path(envelope["output"]["video"])
+    # P1.5：pack 候选表（Recognition Prior）注入 + 断点键含 pack_sha——
+    # pack roster 或 prompt 版本变化只重标受影响窗口；旧 list 断点视为过期。
+    from src.library.film_bootstrap import (annotation_view, load_pack,
+                                             merge_pack_registry, pack_sha)
+    source = result_path.parent.name.rsplit("__", 1)[0] \
+        if result_path.parent.name.endswith("__narrative") else result_path.parent.name
+    pack = load_pack(cfg, source) if bool((cfg.library.get("film_bootstrap") or {})
+                                           .get("enabled")) else None
+    pack_view = annotation_view(pack)
+    valid_canonicals = {row["canonical_id"] for row in pack_view} or None
+    resume_key = _stable_hash_local({
+        "prompt_version": WINDOW_ANNOTATION_PROMPT_VERSION,
+        "pack_sha": pack_sha(pack) if pack else "",
+    })
+    completed = saved.get("completed_windows") or []
+    if isinstance(completed, list):                     # 旧格式：一律重标（prompt v2）
+        completed_keys: dict[str, str] = {}
+    else:
+        completed_keys = {str(k): str(v) for k, v in completed.items()}
     by_window: dict[int, list[dict]] = {}
     for shot in shots:
         by_window.setdefault(int(shot["window_idx"]), []).append(shot)
@@ -363,7 +434,7 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
         runner = OmniRunner(cfg.perception.get("omni") or {})
     processed = 0
     for window_idx, window_shots in sorted(by_window.items()):
-        if window_idx in saved.get("completed_windows", []) and not force:
+        if not force and completed_keys.get(str(window_idx)) == resume_key:
             continue
         if limit_windows is not None and processed >= limit_windows:
             break
@@ -374,10 +445,13 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
             "end_s": row["end_s"], "caption": captions.get(str(row["shot_idx"]), ""),
             "dialogue_asr": row.get("dialogue") or [],
         } for row in window_shots]
+        registry_text = merge_pack_registry(saved.get("shots") or {}, pack_view) \
+            if pack_view else json.dumps(
+                build_entity_registry(saved.get("shots") or {}),
+                ensure_ascii=False)[:8000]
         prompt = WINDOW_ANNOTATION_PROMPT.format(
             start=start, end=end, event_prefix=f"w{window_idx:03d}_",
-            registry=json.dumps(build_entity_registry(saved.get("shots") or {}),
-                                ensure_ascii=False)[:8000],
+            registry=registry_text,
             material=json.dumps(material, ensure_ascii=False)[:18000])
         clip_dir = result_path.parent / "annotation_clips" / f"{window_idx:03d}"
         clip_dir.mkdir(parents=True, exist_ok=True)
@@ -385,12 +459,15 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
                               max_new_tokens=3072, duration_s=end - start)
         parsed = parse_window_annotations(
             answer.text, valid_shot_ids={int(row["shot_idx"]) for row in window_shots},
-            time_offset_s=start, clip_duration_s=end - start)
+            time_offset_s=start, clip_duration_s=end - start,
+            valid_canonicals=valid_canonicals)
         parsed = namespace_window_events(parsed, window_idx)
         saved.setdefault("shots", {}).update(parsed["shots"])
         saved.setdefault("causal_links", []).extend(parsed["causal_links"])
-        saved.setdefault("completed_windows", []).append(window_idx)
-        saved["completed_windows"] = sorted(set(saved["completed_windows"]))
+        completed_keys[str(window_idx)] = resume_key
+        saved["completed_windows"] = completed_keys
+        saved["pack_sha"] = pack_sha(pack) if pack else ""
+        saved["prompt_version"] = WINDOW_ANNOTATION_PROMPT_VERSION
         saved["coord_system"] = "movie"
         _atomic_write_json(output_path, saved)
         processed += 1
@@ -560,6 +637,18 @@ def run_type_facets(cfg, source: str, *, windows: list[int] | None = None,
     # 注册表带可见名（2026-09-10 全量实测：光杆 ID 导致模型 interaction 双方
     # 都填同一实体，自指交互全部被丢——30 窗 0 条交互边）
     registry = list(registry_rows.values())[:60]
+    # P1.5：pack 候选表（Recognition Prior）排前注入——canonical 绑定让 facet
+    # 的 interaction/关系也能对上跨窗同一角色；registry_sha 进缓存键自动重提。
+    if ((getattr(cfg, "library", None) or {}).get("film_bootstrap") or {}).get("enabled"):
+        from src.library.film_bootstrap import annotation_view, load_pack
+        pack = load_pack(cfg, str(result_path.parent.name).split("__")[0])
+        pack_view = annotation_view(pack)
+        if pack_view:
+            from src.library.film_bootstrap import merge_pack_registry
+            registry_text = merge_pack_registry({"shots": {}}, pack_view, budget=4000)
+            registry = json.loads(registry_text) + [
+                row for row in registry
+                if row.get("entity_id") not in {e["canonical_id"] for e in pack_view}][:60]
 
     by_window: dict[int, list[dict]] = {}
     for shot in shots:

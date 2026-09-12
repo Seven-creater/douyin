@@ -111,10 +111,14 @@ def test_atomic_write_json_survives_rerun_and_leaves_no_tmp(tmp_path):
 
 
 def test_run_narrative_annotations_migrates_legacy_clip_coordinates(tmp_path):
-    """H1 存量迁移：无 coord_system 标记的旧对白按窗口起点 +offset，且立即落盘。"""
+    """H1 存量迁移：无 coord_system 标记的旧对白按窗口起点 +offset，且立即落盘。
+    P1.5 后旧 list 断点与 prompt v2 键不匹配 → 会触发重标（新行为）——本测改用
+    新格式断点键验证"命中不重看 + 迁移仍发生"。"""
     import json as _json
 
-    from src.agentic_video.narrative_index import run_narrative_annotations
+    from src.agentic_video.narrative_index import (_stable_hash_local,
+                                                   WINDOW_ANNOTATION_PROMPT_VERSION,
+                                                   run_narrative_annotations)
     from src.config import AppConfig, PathsCfg
     from src.perception import common
 
@@ -133,13 +137,15 @@ def test_run_narrative_annotations_migrates_legacy_clip_coordinates(tmp_path):
                                   "duration_s": 10.0, "window_idx": 0},
                                  {"shot_idx": 1, "start_s": 3710.0, "end_s": 3720.0,
                                   "duration_s": 10.0, "window_idx": 0}]})
+    resume_key = _stable_hash_local(
+        {"prompt_version": WINDOW_ANNOTATION_PROMPT_VERSION, "pack_sha": ""})
     legacy = {"shots": {"0": {"dialogue": [{"start_s": 1.0, "end_s": 2.0,
                                             "original": "走れ"}]}},
-              "causal_links": [], "completed_windows": [0]}
+              "causal_links": [], "completed_windows": {"0": resume_key}}
     ann_path = shots_dir / "narrative_annotations.json"
     ann_path.write_text(_json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
 
-    class DoneRunner:                                  # 窗口 0 已完成 → 不会再调模型
+    class DoneRunner:                                  # 断点键命中 → 不会再调模型
         def watch(self, *a, **k):
             raise AssertionError("不应再调模型")
 
@@ -148,3 +154,48 @@ def test_run_narrative_annotations_migrates_legacy_clip_coordinates(tmp_path):
     line = migrated["shots"]["0"]["dialogue"][0]
     assert line["start_s"] == 3701.0 and line["end_s"] == 3702.0   # +窗口起点 3700
     assert migrated["coord_system"] == "movie"
+
+
+def test_legacy_list_breakpoint_is_expired_by_prompt_v2(tmp_path):
+    """P1.5：旧 list 断点（prompt v1 产物）必须重标——prompt v2 换代不静默复用。"""
+    import json as _json
+
+    from src.agentic_video.narrative_index import run_narrative_annotations
+    from src.config import AppConfig, PathsCfg
+    from src.perception import common
+
+    cfg = AppConfig(
+        wellbyte={}, ranking={}, download={}, perception={}, template={},
+        generation={}, logging_level="INFO", library={},
+        paths=PathsCfg(raw_dir=tmp_path / "r", processed_dir=tmp_path / "p",
+                       videos_dir=tmp_path / "v", logs_dir=tmp_path / "l",
+                       perception_dir=tmp_path / "per", generation_dir=tmp_path / "g",
+                       library_dir=tmp_path / "lib"))
+    shots_dir = cfg.paths.library_dir / "shots" / "src1__narrative"
+    shots_dir.mkdir(parents=True)
+    common.write_result_json(shots_dir, tool="shots", aweme_id="src1", params={},
+                             output={"video": str(tmp_path / "movie.mp4"), "shots": [
+                                 {"shot_idx": 0, "start_s": 3700.0, "end_s": 3710.0,
+                                  "duration_s": 10.0, "window_idx": 0}]})
+    legacy = {"shots": {}, "causal_links": [], "completed_windows": [0]}
+    (shots_dir / "narrative_annotations.json").write_text(
+        _json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    watched = []
+
+    class WatchOnce:
+        def watch(self, *a, **k):
+            watched.append(k.get("start_s"))
+            from types import SimpleNamespace
+            return SimpleNamespace(text=_json.dumps({
+                "shots": [{"shot_idx": 0, "entity_ids": ["vis_1"],
+                           "entity_names": ["角色"], "event_id": "e1",
+                           "event_summary": "动作", "bindings": []}],
+                "causal_links": []}, ensure_ascii=False))
+
+    out = run_narrative_annotations(cfg, shots_dir / "result.json",
+                                    runner=WatchOnce())
+    state = _json.loads(out.read_text(encoding="utf-8"))
+    assert watched == [3700.0]                           # 旧断点过期，真的重标了
+    assert isinstance(state["completed_windows"], dict)  # 新格式落盘
+    assert state["shots"]["0"]["bindings"] == []         # 两层 Identity 字段就位

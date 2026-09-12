@@ -24,19 +24,44 @@ def _norm(name: str) -> str:
 
 
 def load_entity_registry(cfg=None) -> dict:
-    """加载注册表：cfg.library.entities.registry_path 或仓库
-    config/entity_registry.json；缺文件/解析失败返回空表（显式降级）。"""
+    """加载注册表（P1.5 起三层合并）：
+
+    1. 手写 config/entity_registry.json（或 cfg.library.entities.registry_path）；
+    2. auto 回填 library_dir/entity_registry.auto.json（bootstrap --verify 从
+       标注绑定生成）——同 canonical 只补 source_entities，手写别名优先；
+    3. 缺文件/解析失败逐层显式降级为空表。"""
     path = None
+    auto_path = None
     if cfg is not None:
         entities_cfg = (cfg.library.get("entities") or {}) if hasattr(cfg, "library") else {}
         path = entities_cfg.get("registry_path")
+        if hasattr(cfg, "paths"):
+            auto_path = cfg.paths.library_dir / "entity_registry.auto.json"
     if not path:
         path = repo_root() / "config" / "entity_registry.json"
+    registry: dict = {}
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
+        registry = data if isinstance(data, dict) else {}
     except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+        registry = {}
+    if auto_path is not None and auto_path.exists():
+        try:
+            auto = json.loads(auto_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            auto = {}
+        for canonical, entry in (auto or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            if canonical not in registry:
+                registry[canonical] = {"aliases": list(entry.get("aliases") or []),
+                                        "source_entities": list(
+                                            entry.get("source_entities") or [])}
+                continue
+            refs = set(registry[canonical].get("source_entities") or [])
+            refs |= set(entry.get("source_entities") or [])
+            registry[canonical]["source_entities"] = sorted(refs)
+    return registry
 
 
 def build_alias_maps(registry: dict) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
@@ -81,13 +106,25 @@ def canonical_entities(row: dict, registry: dict) -> set[str]:
 
 def row_identity_keys(row: dict, registry: dict) -> set[str]:
     """身份键（Entity Continuity Contract 的判定基础）：
-    canonical > 窗口内 entity_id > 归一名字。
+    binding canonical > 别名 canonical > 窗口内 entity_id > 归一名字。
 
     窗口作用域（V3 晨跑实锤的假等价 bug）：库侧 entity_id 是**窗口级编号**
     ——每个 45s 窗各自从 e001 起，窗1 的 e001（黑发少年）≠ 窗7 的 e001
     （小女孩）。id 键必须带 window_idx，否则三槽三主角被算成同人，
-    deterministic check 假绿（盲看抓到真相，det 没抓到）。"""
-    keys = canonical_entities(row, registry)
+    deterministic check 假绿（盲看抓到真相，det 没抓到）。
+
+    P1.5 两层 Identity：标注行旁挂 bindings（local vis_ id → canonical，
+    binding_status/confidence/evidence）——supported 绑定直接贡献 canonical
+    键（跨窗同人成立的正路）；conflict 绑定不贡献（先验与视觉矛盾时以视觉为准）。"""
+    keys: set[str] = set()
+    for binding in row.get("bindings") or []:
+        if not isinstance(binding, dict):
+            continue
+        if str(binding.get("binding_status") or "") in {"supported", "verified"}:
+            canonical = str(binding.get("canonical_entity_id") or "")
+            if canonical:
+                keys.add(canonical)
+    keys |= canonical_entities(row, registry)
     source = str(row.get("video_stem") or row.get("source") or "").split("__")[0]
     window = row.get("window_idx")
     scope = f"/w{int(window)}" if isinstance(window, int) else ""

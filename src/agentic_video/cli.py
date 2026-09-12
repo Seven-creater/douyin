@@ -67,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="comma-separated window indexes for a pilot run, e.g. 0,1,2")
     facets.add_argument("--force", action="store_true")
 
+    bootstrap = sub.add_parser(
+        "bootstrap", help="P1.5 Film Knowledge Bootstrap: identify film, build knowledge pack")
+    bootstrap.add_argument("--source", required=True)
+    bootstrap.add_argument("--force", action="store_true")
+    bootstrap.add_argument("--verify", action="store_true",
+                           help="标注后跑绑定状态机 + source_entities 回填")
+    bootstrap.add_argument("--gt", default=None,
+                           help="人工 GT JSON（verified_entities 列表）——verified 只认独立证据")
+    bootstrap.add_argument("--mask-metadata", action="store_true",
+                           help="benchmark 模式：Identity Gate 不看文件名/元数据")
+
     decompose = sub.add_parser("decompose", help="reference video to Recipe v2")
     decompose.add_argument("--reference", required=True)
     decompose.add_argument("--output", required=True)
@@ -216,6 +227,24 @@ def _facets(args, cfg) -> dict:
             "facets_total": n_facets}
 
 
+def _bootstrap(args, cfg) -> dict:
+    from src.library.film_bootstrap import (bootstrap_film_knowledge,
+                                            update_pack_from_annotations)
+
+    pack_path = bootstrap_film_knowledge(
+        cfg, args.source, force=args.force, mask_metadata=args.mask_metadata)
+    report = None
+    if args.verify:
+        gt = Path(args.gt) if args.gt else None
+        report = update_pack_from_annotations(cfg, args.source, gt_path=gt)
+    pack = json.loads(pack_path.read_text(encoding="utf-8"))
+    return {"pack": str(pack_path),
+            "tier": (pack.get("work_identity") or {}).get("tier"),
+            "title": (pack.get("work_identity") or {}).get("title"),
+            "entities": len(pack.get("entities") or []),
+            "verify": report}
+
+
 def _decompose(args, cfg) -> dict:
     from src.agentic_video.pipeline import (run_decomposition,
                                              run_narrative_decomposition)
@@ -317,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(Path(args.config) if args.config else None)
     setup_logging(cfg.paths.logs_dir, cfg.logging_level, filename_prefix="agentic_video")
     handlers = {"discover": _discover, "benchmark": _benchmark,
-                "index": _index, "facets": _facets, "decompose": _decompose,
+                "index": _index, "facets": _facets, "bootstrap": _bootstrap,
+                "decompose": _decompose,
                 "render": _render, "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
