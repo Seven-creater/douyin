@@ -55,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="caption only N new shots for a GPU smoke test")
     index.add_argument("--limit-windows", type=int, default=None,
                        help="annotate only N narrative windows for a GPU smoke test")
+    index.add_argument("--windows", default=None,
+                       help="comma-separated window indexes for targeted annotation "
+                            "(3-window pack-on/off gate)")
     index.add_argument("--force", action="store_true")
     index.add_argument("--skip-captions", action="store_true")
     index.add_argument("--skip-embeddings", action="store_true")
@@ -201,7 +204,9 @@ def _index(args, cfg) -> dict:
     if args.profile == "narrative" and not args.skip_annotations:
         from src.agentic_video.narrative_index import run_narrative_annotations
         annotations = run_narrative_annotations(
-            cfg, result_path, force=args.force, limit_windows=args.limit_windows)
+            cfg, result_path, force=args.force, limit_windows=args.limit_windows,
+            windows=([int(w) for w in str(args.windows).split(",") if w.strip()]
+                     if args.windows else None))
     index_path = None
     if not args.skip_embeddings:
         index_path = build(cfg)

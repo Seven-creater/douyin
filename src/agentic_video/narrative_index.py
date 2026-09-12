@@ -372,7 +372,8 @@ def _parse_bindings(items, valid_canonicals: set[str] | None) -> list[dict]:
 
 
 def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
-                              runner=None, limit_windows: int | None = None) -> Path:
+                              runner=None, limit_windows: int | None = None,
+                              windows: list[int] | None = None) -> Path:
     result_path = Path(result_path)
     output_path = result_path.parent / "narrative_annotations.json"
     saved = {"shots": {}, "causal_links": [], "completed_windows": []}
@@ -435,6 +436,10 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
     processed = 0
     for window_idx, window_shots in sorted(by_window.items()):
         if not force and completed_keys.get(str(window_idx)) == resume_key:
+            continue
+        # --windows 14,19,24：指定窗诊断跑（3 窗 pack-on/off 门控用）——
+        # 精确控制身份识别小测试的窗口选择，不依赖 resume 状态
+        if windows is not None and window_idx not in set(int(w) for w in windows):
             continue
         if limit_windows is not None and processed >= limit_windows:
             break
