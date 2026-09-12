@@ -180,6 +180,20 @@ def run_rendering(cfg: AppConfig, recipe: dict, *, theme: str, library: str,
                 target_duration_s=target_duration_s)
             (output_dir / "story_candidates.json").write_text(
                 json.dumps(candidate_groups, ensure_ascii=False, indent=2), encoding="utf-8")
+            # V4 B4：coarse 槽（无锚且 >2×budget）localize-or-reject——在渲染
+            # 前定位，绝不带盲切区间进片。无 runner（render 子命令手动路径）
+            # 时跳过并在日志注明。
+            if any((slot.get("source") or {}).get("anchor") == "coarse"
+                   for slot in story_plan.get("slots") or []):
+                if runner is not None:
+                    from src.agentic_video.verify_slots import localize_coarse_slots
+
+                    localize_coarse_slots(cfg, story_plan, runner=runner,
+                                          output_dir=output_dir)
+                else:
+                    logging.getLogger(__name__).warning(
+                        "[render] coarse slots present but no runner——localize "
+                        "跳过（手动 render 路径），区间将按槽预算截断")
         # V3 P4：文案不再在渲染前生成——critic 轮看的是无文案的干净素材，
         # copy 在验证收敛后最后生成并逐句绑定证据（run_full 尾部）。
         # 传入的 story_plan 自带 copy（人工改写/render 子命令）则照用。

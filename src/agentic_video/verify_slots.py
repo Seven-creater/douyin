@@ -143,6 +143,120 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
 DETERMINISTIC_CHECK_VERSION = "det_check_v2"   # V4：外观别名退出等价+bindings 生效+cutaway 分类学
 
 
+LOCALIZE_PROMPT = """你是素材证据定位员。观看影片 {video} 的 {start:g}~{end:g} 秒区间
+（这是一个完整候选窗口，远长于成片槽位）。找出**实际承载下列叙事需求**的
+连续片段——需求靠什么表达（可见动作/可听对白），片段就在哪里。
+
+叙事需求：{need}
+
+只输出 JSON：
+{{"found": true, "start": 窗口内起始秒数, "end": 窗口内结束秒数,
+"evidence": "该片段内可见/可听内容的一句话（写实，不外推）", "confidence": 0.0}}
+
+判定纪律：
+- 区间不得小于 2 秒，不得超出窗口范围。
+- 只依据窗口内可见/可听内容定位；窗口内没有承载该需求的片段 → found=false，
+  禁止"差不多在前半段"式的猜测定位。
+"""
+
+LOCALIZE_PROMPT_VERSION = "localize_v1"
+
+
+def parse_localization(raw: str) -> dict | None:
+    block = extract_json_block(raw)
+    try:
+        payload = json.loads(block) if block else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        confidence = min(1.0, max(0.0, float(payload.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    interval = payload.get("interval")
+    if interval is None and payload.get("start") is not None:
+        interval = [payload.get("start"), payload.get("end")]
+    if not (isinstance(interval, list) and len(interval) == 2):
+        interval = None
+    return {
+        "found": bool(payload.get("found")),
+        "interval": [float(value) for value in interval]
+        if interval and all(isinstance(v, (int, float)) for v in interval) else None,
+        "evidence": str(payload.get("evidence") or "")[:160],
+        "confidence": confidence,
+    }
+
+
+def localize_coarse_slots(cfg, story_plan: dict, *, runner,
+                          output_dir=None) -> list[dict]:
+    """V4 B4（外审三轮必改②）：coarse 槽的 localize-or-reject。
+
+    无对白锚且远超预算（>2×budget）的候选窗口，禁止"从起点截前 N 秒"——
+    让 Omni 在完整窗口内定位实际承载需求的片段；解析失败/未找到 → 槽降
+    unsupported（必选槽 → plan_incomplete → delivery blocked），绝不盲切。
+    返回逐槽日志（localize_log 落档供验收核对 -ss）。
+    """
+    import tempfile
+
+    log: list[dict] = []
+    clip_root = Path(tempfile.mkdtemp(prefix="localize_"))
+    for slot in story_plan.get("slots") or []:
+        idx = int(slot.get("slot_idx", 0))
+        source = slot.get("source") or {}
+        if slot.get("status") not in {"supported", "uncertain"} \
+                or source.get("anchor") != "coarse":
+            continue
+        spec = slot.get("need_spec") or {}
+        budget = (float(slot["target_interval"][1])
+                  - float(slot["target_interval"][0]))
+        win_start, win_end = float(source.get("start_s") or 0), float(source.get("end_s") or 0)
+        video = Path(str(source.get("video") or ""))
+        entry = {"slot_idx": idx, "window": [win_start, win_end], "budget_s": budget}
+        if not video.exists():
+            slot["status"], slot["reason"] = "unsupported", "coarse_unlocalizable(video_missing)"
+            entry["outcome"] = "rejected"
+            log.append(entry)
+            continue
+        prompt = LOCALIZE_PROMPT.format(video=video.name, start=win_start, end=win_end,
+                                        need=spec.get("need") or slot.get("role"))
+        clip_dir = clip_root / f"slot_{idx:02d}"
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            answer = runner.watch(video, prompt, start_s=win_start, end_s=win_end,
+                                  clip_dir=clip_dir, max_new_tokens=768,
+                                  duration_s=win_end - win_start)
+            parsed = parse_localization(answer.text)
+        except Exception:                                     # noqa: BLE001 - 定位失败=拒绝
+            parsed = None
+        if parsed is None or not parsed["found"] or parsed["interval"] is None:
+            slot["status"] = "unsupported"
+            slot["reason"] = "coarse_unlocalizable(not_found)"
+            entry["outcome"] = "rejected"
+            entry["parsed"] = parsed
+            log.append(entry)
+            continue
+        rel_start, rel_end = parsed["interval"]
+        abs_start = min(win_end, max(win_start, win_start + rel_start))
+        abs_end = min(win_end, abs_start + budget)
+        if abs_end - abs_start < min(budget, 2.0) - 1e-6:
+            slot["status"], slot["reason"] = "unsupported", "coarse_unlocalizable(too_short)"
+            entry["outcome"] = "rejected"
+            log.append(entry)
+            continue
+        source["start_s"], source["end_s"] = round(abs_start, 3), round(abs_end, 3)
+        source["anchor"] = "localized"
+        source["caption"] = parsed["evidence"] or source.get("caption") or ""
+        entry.update({"outcome": "localized", "interval": [abs_start, abs_end],
+                      "evidence": parsed["evidence"], "confidence": parsed["confidence"]})
+        log.append(entry)
+    if log and output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(output_dir) / "localize_log.json").write_text(
+            json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+    return log
+
+
 def deterministic_story_check(story_plan: dict, *, registry: dict | None = None) -> dict:
     """V3 P3：渲染前零模型全局检查——Local Correctness ≠ Narrative Coherence。
 

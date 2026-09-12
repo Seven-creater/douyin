@@ -102,12 +102,17 @@ def test_thin_reference_arc_renders_form_slots_not_single_slot():
                for slot in plan["slots"])
 
 
+_WIDE_DIALOGUE = {"hook": "处境与张力", "conflict": "冲突与危险", "choice": "关键选择与行动",
+                  "climax": "高潮峰值", "resolution": "收束", "consequence": "结果",
+                  "context": "关系背景"}
+
+
 def _wide_candidate(idx: int, role: str, start: float) -> dict:
     row = _candidate(idx, role, "person", start=start, event_id=f"e{idx}")
     row.update({"source_end_s": start + 45, "duration_s": 45,
                 "dialogue": [
                     {"start_s": start + 1, "end_s": start + 3,
-                     "original": "前", "translation_zh": "窗内的对白"},
+                     "original": "前", "translation_zh": _WIDE_DIALOGUE[role]},
                     {"start_s": start + 38, "end_s": start + 40,
                      "original": "後", "translation_zh": "会越界的对白"},
                 ]})
@@ -115,8 +120,8 @@ def _wide_candidate(idx: int, role: str, start: float) -> dict:
 
 
 def test_oversized_event_is_trimmed_to_slot_not_dropped():
-    """2026-09-10 v4 黑屏：45s 合并段 + 越界对白被一票否决 → picked=None →
-    渲染器 0 segment 纯黑 60s。现在必须裁剪保槽，只留窗内完整对白。"""
+    """2026-09-10 v4 黑屏 + V4 B：45s 合并段不再一票否决；有相关对白锚时
+    窗口跟着对白走（anchor=dialogue），只留窗内完整对白。"""
     program = valid_program()
     program["arc"] = program["arc"][:3]                      # hook/conflict/choice
     rows = [_wide_candidate(0, "hook", start=5040),
@@ -130,7 +135,50 @@ def test_oversized_event_is_trimmed_to_slot_not_dropped():
         assert slot["status"] == "supported"                 # 不再一票否决
         assert slot["source_interval_trimmed"] is True
         assert source["end_s"] - source["start_s"] <= 20.0 + 1e-6
-        assert [line["translation_zh"] for line in source["dialogue"]] == ["窗内的对白"]
+        assert source["anchor"] == "dialogue"                # 对白锚定而非起点盲切
+        assert [line["translation_zh"] for line in source["dialogue"]] == [_WIDE_DIALOGUE[slot["role"]]]
+
+
+def test_coarse_window_is_never_blind_cut_from_event_start():
+    """V4 B3（外审三轮必改②）：无对白锚且 > 2×budget 的粗窗禁止从起点盲切
+    ——anchor=coarse、保留完整区间交 localize 步骤（localize or reject）。"""
+    program = valid_program()
+    program["arc"] = program["arc"][:3]
+    rows = []
+    for idx, (role, start) in enumerate([("hook", 5040), ("conflict", 5370),
+                                         ("choice", 7819)]):
+        row = _candidate(idx, role, "person", start=start, event_id=f"e{idx}")
+        row.update({"source_end_s": start + 45, "duration_s": 45,
+                    "dialogue": [                      # 与需求零重合的对白 → 无锚
+                        {"start_s": start + 1, "end_s": start + 3,
+                         "original": "闲", "translation_zh": "完全无关的闲聊"}]})
+        rows.append(row)
+    plan = build_story_plan(program, rows, theme="鬼灭高燃战斗", library="guimie",
+                            target_duration_s=60.0)
+    for slot in plan["slots"]:
+        source = slot["source"]
+        assert source["anchor"] == "coarse"                  # 不盲切
+        assert source["end_s"] - source["start_s"] > 40.0    # 完整区间留给 localize
+
+
+def test_select_evidence_window_anchors_single_shot_on_dialogue():
+    """V4 B：单镜头超预算时在镜头内按最相关对白行选子窗，锚行完整落入。"""
+    from src.agentic_video.story_planner import _select_evidence_window
+    member = [{"shot_idx": 0, "start_s": 2940.0, "end_s": 2985.0,
+               "caption": "餐桌旁众人交谈",
+               "dialogue": [
+                   {"start_s": 2941.0, "end_s": 2944.0,
+                    "original": "a", "translation_zh": "无关的一句"},
+                   {"start_s": 2977.5, "end_s": 2985.0,
+                    "original": "b", "translation_zh": "人和妖很难定义好坏"}],
+               }]
+    window = _select_evidence_window(member, budget_s=7.33,
+                                     query_text="人和妖的关系 妖灵与人类")
+    assert window["anchor"] == "dialogue"
+    assert window["start_s"] <= 2977.5                       # 锚行完整落入
+    assert window["end_s"] >= 2985.0 - 1e-6
+    # 行比预算长时整行优先（≤1s 轻微超预算由渲染 -t 收口）
+    assert window["end_s"] - window["start_s"] <= 7.33 + 1.0
 
 
 def test_execution_inputs_never_advertise_reference_text_ops():

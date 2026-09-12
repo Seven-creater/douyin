@@ -498,19 +498,36 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                     specs[idx].get("need") or "",
                     *(specs[idx].get("must_have") or []),
                     str(picked.get("query") or ""), str(picked.get("caption") or "")])))
+            query_keys = _text_shingles("；".join(filter(None, [
+                specs[idx].get("need") or "",
+                *(specs[idx].get("must_have") or []),
+                str(picked.get("query") or ""), str(picked.get("caption") or "")])))
             if evidence is not None:
                 if (abs(evidence["start_s"] - source_start) > 1e-6
                         or evidence["end_s"] < source_end - 1e-6):
                     source_trimmed = True
                 source_start, source_end = evidence["start_s"], evidence["end_s"]
-                if source_end - source_start > slot_budget + 1e-6:
+                evidence_anchor = evidence.get("anchor")
+                if evidence_anchor != "coarse" \
+                        and source_end - source_start > slot_budget + 1e-6:
                     source_end = source_start + slot_budget   # 单镜头超预算兜底截断
                 evidence_caption = evidence["caption"] or None
                 evidence_shots = evidence.get("shot_indices")
-                evidence_anchor = evidence.get("anchor")
             elif source_end - source_start > slot_budget + 1e-6:
-                source_end = source_start + slot_budget
-                source_trimmed = True
+                # 无 member_shots 明细（未合并的裸行）：行级对白锚定，仍无锚
+                # 且 > 2×budget → coarse（禁止起点盲切）；≤2×budget 保守截断
+                anchored = _anchor_by_dialogue(
+                    picked.get("dialogue") or [], query_keys,
+                    source_start, source_end, slot_budget)
+                if anchored is not None:
+                    source_start, source_end = anchored
+                    evidence_anchor = "dialogue"
+                    source_trimmed = True
+                elif source_end - source_start > 2 * slot_budget + 1e-6:
+                    evidence_anchor = "coarse"                # localize 步骤接管
+                else:
+                    source_end = source_start + slot_budget
+                    source_trimmed = True
         if picked:
             dialogue = [line for line in dialogue
                         if float(line.get("start_s", source_start)) >= source_start - 1e-6
@@ -661,14 +678,59 @@ def _text_shingles(text: str) -> set[str]:
     return tokens
 
 
+def _dialogue_shingles(lines: list[dict]) -> set[str]:
+    """对白行（translation_zh 优先）的 shingle 集。"""
+    text = "；".join(str(line.get("translation_zh")
+                         or line.get("original") or "") for line in lines or [])
+    return _text_shingles(text)
+
+
+def _anchor_by_dialogue(lines: list[dict], query: set[str], win_start: float,
+                        win_end: float, budget_s: float) -> tuple[float, float] | None:
+    """V4 B：与需求最相关的对白行为锚选子窗（窗口内定位）。
+
+    返回 (start, end)（绝对时间，end-start ≤ budget 且锚行尽量完整落入），
+    无相关行返回 None。film1 病灶：36 事件全是整 45s 单镜头，旧逻辑从事件
+    起点盲切 7.33s——关键对白在 2977.5~2985s 却播出 2940~2947s 的开头。"""
+    best_line, best_overlap = None, 0
+    for line in lines or []:
+        overlap = len(_dialogue_shingles([line]) & query)
+        if overlap > best_overlap:
+            best_line, best_overlap = line, overlap
+    if best_line is None:
+        return None
+    line_start = float(best_line.get("start_s") or win_start)
+    line_end = float(best_line.get("end_s") or line_start)
+    line_duration = max(0.0, line_end - line_start)
+    # lead 让锚行尽量完整落入：行比预算短给 ≤2s 前置，行比预算长则 lead=0
+    # （宁可 end 轻微超出预算也要保住整行——渲染按 -t 截，end_s 只记账）
+    lead = max(0.0, min(2.0, budget_s - line_duration,
+                        line_start - win_start))
+    start = max(win_start, line_start - lead)
+    if line_end > start:
+        end = line_end                                     # 锚行完整落入
+    else:
+        end = min(win_end, start + budget_s)
+    if end - start < budget_s - 1e-6:
+        end = min(win_end, start + budget_s)               # 行短则补足预算
+    if end - start < min(budget_s, 2.0) - 1e-6:
+        return None
+    return start, end
+
+
 def _select_evidence_window(member_shots: list[dict], budget_s: float,
                             query_text: str) -> dict | None:
-    """预算内覆盖 required evidence 的连续镜头子序列（V3 P2）。
+    """预算内覆盖 required evidence 的连续镜头子序列（V3 P2 + V4 B）。
 
-    评分 = 窗口内镜头 caption 与槽需求（need/must_have/查询）的平均重合度，
-    并列取覆盖更长者；证据在后段时窗口跟着证据走——不再"从事件起点盲切
-    7.3s"（lxh_p4_C2：caption 说奔跑、切出的是开头的施法静止段）。
-    单镜头超预算仍保底返回，由上层截断。
+    多镜头主路径：评分 = 窗口 caption 重合度 + 0.5×对白重合度（行归属 =
+    中点落窗内；权重保证无对白时排序与 V3 一致）；证据在后段时窗口跟着
+    证据走。边界补全：截断的相关对白行（越界 ≤1.0s）在预算内扩到行尾。
+
+    单镜头超预算（V4 B3 外审必改②）：
+    - 有相关对白锚 → 镜头内锚定子窗（anchor="dialogue"）；
+    - 无锚且镜头 > 2×budget → anchor="coarse"：**禁止从起点盲切**，返回
+      完整区间交由 localize 步骤（Omni 定位）处理或拒绝；
+    - 无锚且 ≤ 2×budget → 保守允许事件起点截断（anchor="event_start"）。
     """
     shots = [shot for shot in (member_shots or [])
              if float(shot.get("end_s") or 0) > float(shot.get("start_s") or 0)]
@@ -677,6 +739,27 @@ def _select_evidence_window(member_shots: list[dict], budget_s: float,
     query = _text_shingles(query_text)
     if not query:
         return None
+    if len(shots) == 1:
+        shot = shots[0]
+        win_start, win_end = float(shot["start_s"]), float(shot["end_s"])
+        duration = win_end - win_start
+        if duration > budget_s + 1e-6:
+            anchored = _anchor_by_dialogue(shot.get("dialogue") or [], query,
+                                           win_start, win_end, budget_s)
+            if anchored is not None:
+                return {"start_s": anchored[0], "end_s": anchored[1],
+                        "caption": str(shot.get("caption") or ""),
+                        "shot_indices": [shot.get("shot_idx")],
+                        "anchor": "dialogue"}
+            if duration > 2 * budget_s + 1e-6:
+                return {"start_s": win_start, "end_s": win_end,
+                        "caption": str(shot.get("caption") or ""),
+                        "shot_indices": [shot.get("shot_idx")],
+                        "anchor": "coarse"}
+            return {"start_s": win_start, "end_s": win_start + budget_s,
+                    "caption": str(shot.get("caption") or ""),
+                    "shot_indices": [shot.get("shot_idx")],
+                    "anchor": "event_start"}
     best: dict | None = None
     for start_idx in range(len(shots)):
         picked_shots, total = [], 0.0
@@ -687,20 +770,39 @@ def _select_evidence_window(member_shots: list[dict], budget_s: float,
                 break
             picked_shots.append(shot)
             total += duration
-            overlap = sum(len(_text_shingles(item.get("caption") or "") & query)
-                          for item in picked_shots) / len(picked_shots)
+            caption_overlap = sum(len(_text_shingles(item.get("caption") or "")
+                                      & query) for item in picked_shots)
+            window_start = float(picked_shots[0]["start_s"])
+            window_end = float(picked_shots[-1]["end_s"])
+            covered = [line for item in picked_shots for line in item.get("dialogue") or []
+                       if window_start <= (float(line.get("start_s") or 0)
+                                           + float(line.get("end_s") or 0)) / 2 <= window_end]
+            dialogue_overlap = len(_dialogue_shingles(covered) & query)
+            overlap = (caption_overlap + 0.5 * dialogue_overlap) / len(picked_shots)
             ranking = (round(overlap, 6), round(min(total, budget_s), 3))
             if best is None or ranking > best["ranking"]:
                 best = {"ranking": ranking, "shots": list(picked_shots)}
     if best is None:
         return None
     chosen = best["shots"]
+    start_s = float(chosen[0]["start_s"])
+    end_s = float(chosen[-1]["end_s"])
+    # 边界补全：截断的相关对白行（start 在窗内、end 越界 ≤1.0s）预算内扩到行尾
+    for item in chosen:
+        for line in item.get("dialogue") or []:
+            line_start = float(line.get("start_s") or 0)
+            line_end = float(line.get("end_s") or 0)
+            if (start_s <= line_start <= end_s < line_end <= end_s + 1.0 + 1e-6
+                    and _dialogue_shingles([line]) & query
+                    and line_end - start_s <= budget_s + 1e-6):
+                end_s = line_end
     return {
-        "start_s": float(chosen[0]["start_s"]),
-        "end_s": float(chosen[-1]["end_s"]),
+        "start_s": start_s,
+        "end_s": end_s,
         "caption": "；".join(str(shot.get("caption") or "") for shot in chosen
                             if str(shot.get("caption") or "").strip()),
         "shot_indices": [shot.get("shot_idx") for shot in chosen],
+        "anchor": "shots",
     }
 
 
@@ -766,7 +868,10 @@ def merge_event_candidates(rows: list[dict]) -> list[dict]:
                  "end_s": float(row.get("source_end_s", 0) or 0),
                  "caption": str(row.get("caption") or ""),
                  "entity_ids": list(row.get("entity_ids") or []),
-                 "story_role": row.get("story_role")}
+                 "story_role": row.get("story_role"),
+                 # V4 B1：镜头行自带对白（H1 归一时间戳）——供选窗锚定
+                 "dialogue": [dict(line) for line in row.get("dialogue") or []],
+                 }
                 for row in ordered],
             # P1.5 两层 Identity：成员镜头的 canonical 绑定并进事件行——
             # 契约/确定性检查经 row_identity_keys 消费
@@ -982,14 +1087,25 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
         "；".join(filter(None, [reason, str(picked.get("query") or ""), caption])))
     if evidence is not None:
         source_start, source_end = evidence["start_s"], evidence["end_s"]
-        if evidence["end_s"] - evidence["start_s"] > budget + 1e-6:
+        if evidence.get("anchor") != "coarse" \
+                and evidence["end_s"] - evidence["start_s"] > budget + 1e-6:
             source_end = source_start + budget          # 单镜头超预算兜底
         trimmed = (abs(evidence["start_s"] - float(picked.get("source_start_s", 0))) > 1e-6
                    or evidence["end_s"] < float(picked.get("source_end_s", 0)) - 1e-6)
         caption = evidence["caption"] or caption
         shot_indices = evidence.get("shot_indices") or shot_indices
     elif source_end - source_start > budget + 1e-6:
-        source_end = source_start + budget
+        anchored = _anchor_by_dialogue(
+            picked.get("dialogue") or [],
+            _text_shingles("；".join(filter(None, [reason, str(picked.get("query") or ""),
+                                                   caption]))),
+            source_start, source_end, budget)
+        if anchored is not None:
+            source_start, source_end = anchored
+        elif source_end - source_start > 2 * budget + 1e-6:
+            pass                                         # coarse：完整区间交 localize
+        else:
+            source_end = source_start + budget
         trimmed = True
     trial_slot["source"] = {
         "video": str(picked.get("video") or ""), "video_stem": str(picked.get("video_stem") or ""),
