@@ -115,12 +115,22 @@ def pick_representative_timestamps(duration_s: float, *, n_uniform: int = 6,
     return [round(lo + step * (idx + 0.5), 1) for idx in range(n_uniform)]
 
 
-def pick_informative_frames(shots: list[dict], *, n: int = 4) -> list[Path]:
-    """4 张高信息帧：镜头检测 kfs 里按 dialogue+action 分数挑（人物丰富/变化
-    大），比纯均匀采样更稳地覆盖主角（2h 电影 10 张均匀图可能全是风景）。"""
+_PERSON_MARKERS = ("男", "女", "少年", "少女", "孩", "角色", "人物", "猫", "妖",
+                  "师", "者", "人")
+
+
+def pick_informative_frames(shots: list[dict], *, n: int = 4,
+                            captions: dict | None = None) -> list[Path]:
+    """4 张高信息帧：kfs 按 dialogue+action+**含人物 caption 加权**挑——
+    冒烟实锤：纯分数挑出的全是风景（高空飞行/自然扫镜），Omni 诚实拒认
+    （门控正确，采样背锅）；识别作品靠的是角色脸，不是山水。"""
+    captions = captions or {}
+
     def _score(row: dict) -> float:
+        caption = str(captions.get(str(row.get("shot_idx"))) or "")
+        person_bonus = 2.0 if any(m in caption for m in _PERSON_MARKERS) else 0.0
         return (float(row.get("dialogue_score") or 0)
-                + float(row.get("action_score") or 0))
+                + float(row.get("action_score") or 0) + person_bonus)
 
     ranked = sorted((row for row in shots if row.get("kfs")),
                     key=_score, reverse=True)
@@ -355,8 +365,16 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
     timestamps = pick_representative_timestamps(
         duration, n_uniform=int(bootstrap_cfg.get("n_uniform", 6)),
         head_s=float(zones.get("head_s", 90)), tail_s=float(zones.get("tail_s", 360)))
-    informative = pick_informative_frames(scan_output.get("shots") or [],
-                                          n=int(bootstrap_cfg.get("n_informative", 4)))
+    captions: dict = {}
+    captions_path = shots_dir / "captions.json"
+    if captions_path.exists():
+        try:
+            captions = json.loads(captions_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            captions = {}
+    informative = pick_informative_frames(
+        scan_output.get("shots") or [], n=int(bootstrap_cfg.get("n_informative", 4)),
+        captions=captions)
     work_dir = shots_dir / "bootstrap"
     audit, slideshow, frames = build_slideshow(
         video, work_dir, timestamps=timestamps, informative_frames=informative,
