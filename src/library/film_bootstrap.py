@@ -329,10 +329,15 @@ def parse_roster_answer(raw: str, *, franchise: str, max_entities: int) -> dict:
             break
     relations = []
     for item in payload.get("relations") or []:
-        if isinstance(item, dict) and item.get("a") and item.get("b"):
-            relations.append({"a": str(item.get("a")), "b": str(item.get("b")),
-                              "relation": str(item.get("relation") or "")[:16],
-                              "source": "model_prior", "status": "proposed"})
+        if not (isinstance(item, dict) and item.get("a") and item.get("b")):
+            continue
+        # 自环过滤（外审三轮实锤：roster 出现"某角色对自己亲情/敌对"）——
+        # 同 narrative_index.parse_type_facets 已有同款
+        if str(item.get("a")) == str(item.get("b")):
+            continue
+        relations.append({"a": str(item.get("a")), "b": str(item.get("b")),
+                          "relation": str(item.get("relation") or "")[:16],
+                          "source": "model_prior", "status": "proposed"})
     plot_arcs = []
     for item in payload.get("plot_arcs") or []:
         if isinstance(item, dict) and item.get("summary"):
@@ -350,8 +355,14 @@ def annotation_view(pack: dict | None, *, max_entities: int = 12) -> list[dict]:
     appearance。关系与剧情是 Narrative Prior，绝不进标注器。tier 未达
     model_prior/metadata_prior 时返回空（含 model_prior_unverified：错 title
     会诱导幻觉；metadata_prior 的 roster 全 proposed，绑定层要求画面特征
-    吻合才生效）。"""
+    吻合才生效）。pack_validity 失效（塌缩采样/tier 缺失/roster 空）同样
+    返回空——外审三轮必改①：坏 pack 不重跑也不能继续污染身份。"""
     if not isinstance(pack, dict):
+        return []
+    validity = pack_validity(pack)
+    if not validity["valid"]:
+        logger.warning("[bootstrap] pack rejected (%s): %s",
+                       pack.get("source") or "?", "; ".join(validity["reasons"]))
         return []
     identity = pack.get("work_identity") or {}
     if identity.get("tier") not in {"model_prior", "metadata_prior"}:
@@ -395,10 +406,69 @@ def merge_pack_registry(saved_shots: dict, view: list[dict],
 
 # ---------------------------------------------------------------- 主流程
 
-def _load_scan(shots_dir: Path) -> tuple[Path, dict]:
+def _load_scan(shots_dir: Path) -> tuple[Path, dict, dict]:
+    """→ (video, envelope, output)。envelope 整体返回——aweme_id 在信封顶层
+    （common.write_result_json），只回 output 会把备用读取链全部读空。"""
     result_path = shots_dir / "result.json"
     envelope = json.loads(result_path.read_text(encoding="utf-8"))
-    return Path(envelope["output"]["video"]), envelope["output"]
+    return Path(envelope["output"]["video"]), envelope, envelope["output"]
+
+
+def _source_duration_s(cfg: AppConfig, video: Path, envelope: dict,
+                       scan_output: dict) -> tuple[float, str]:
+    """片长三级读取链（外审三轮实锤的塌缩根因修复）。
+
+    旧代码 duration 恒 0 的双层错位：索引 result.json 的 output 既无
+    duration_s 也无 aweme_id（aweme_id 在信封顶层被读 output 层）；inspect
+    的 duration_s 在 envelope.output 却被读信封根层。duration=0 时
+    pick_representative_timestamps 的 hi=max(head+1, 0-360)=91 → 六帧全部
+    塌缩 [90.1, 90.9]s（film2 实测复现）。主读链改 ffprobe 探视频文件本身，
+    全部失败显式 raise——静默塌缩采样比崩溃恶劣。"""
+    try:
+        probed = float(common.video_duration_s(
+            cfg.perception.get("ffprobe_bin", "ffprobe"), video))
+    except Exception:                                          # noqa: BLE001 - 备用链兜底
+        probed = 0.0
+    if probed > 0:
+        return probed, "ffprobe"
+    if float(scan_output.get("duration_s") or 0) > 0:
+        return float(scan_output["duration_s"]), "scan_result"
+    aweme_id = str(envelope.get("aweme_id") or "")
+    if aweme_id:
+        inspect = common.read_result_json(
+            cfg.paths.perception_dir / aweme_id / "inspect")
+        output = (inspect or {}).get("output") if isinstance(inspect, dict) else {}
+        if float((output or {}).get("duration_s") or 0) > 0:
+            return float(output["duration_s"]), "inspect"
+    raise RuntimeError(
+        f"bootstrap: cannot determine duration of {video.name} "
+        "(ffprobe/scan/inspect 全失败)——拒绝采样，静默塌缩 [90,91] 比崩溃恶劣")
+
+
+def pack_validity(pack: dict | None) -> dict:
+    """旧坏 pack 的失效门（外审三轮必改①：本轮不重跑 bootstrap，但坏 pack
+    禁止注入标注器）。判据：代表帧采样跨度（provenance.timestamps 非空时
+    max-min ≥ 300s——film2 塌缩 pack span<1s 直接 invalid）；tier 缺失；
+    roster 空。timestamps 为空 = 走了人物帧路径（film1 实际生效路径，帧跨
+    全片），无法判跨度，放行由 binding 层守。"""
+    if not isinstance(pack, dict):
+        return {"valid": False, "reasons": ["pack_missing"]}
+    reasons: list[str] = []
+    timestamps = []
+    for value in (pack.get("provenance") or {}).get("timestamps") or []:
+        try:
+            timestamps.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    if timestamps:
+        span = max(timestamps) - min(timestamps)
+        if span < 300.0:
+            reasons.append(f"sampling_span={span:.1f}s<300s (collapsed)")
+    if not (pack.get("work_identity") or {}).get("tier"):
+        reasons.append("tier_missing")
+    if not (pack.get("entities") or []):
+        reasons.append("roster_empty")
+    return {"valid": not reasons, "reasons": reasons}
 
 
 def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False,
@@ -413,12 +483,8 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
                            "开启后本模块才可用——不改变 V3 默认行为")
     shots_dir = cfg.paths.library_dir / "shots" / f"{source}__narrative"
     pack_path = shots_dir / "knowledge_pack.json"
-    video, scan_output = _load_scan(shots_dir)
-    inspect = common.read_result_json(
-        cfg.paths.perception_dir / scan_output.get("aweme_id", source) / "inspect") \
-        if scan_output.get("aweme_id") else {}
-    duration = float(scan_output.get("duration_s")
-                     or (inspect or {}).get("duration_s") or 0)
+    video, envelope, scan_output = _load_scan(shots_dir)
+    duration, duration_source = _source_duration_s(cfg, video, envelope, scan_output)
     zones = cfg.library.get("source_zones") or {}
     timestamps = pick_representative_timestamps(
         duration, n_uniform=int(bootstrap_cfg.get("n_uniform", 6)),
@@ -516,6 +582,7 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
             "informative_frames": [str(p) for p in informative],
             "slideshow_audit": str(audit), "slideshow": str(slideshow),
             "raw_head": str(vote_a)[:200],
+            "duration_source": duration_source,
         },
     }
     pack_path.write_text(json.dumps(pack, ensure_ascii=False, indent=2),
