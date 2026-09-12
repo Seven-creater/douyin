@@ -335,7 +335,10 @@ def _rank_under_contract(specs: list[dict], candidate_groups: list[list[dict]],
         path = _rank_runs(candidate_groups, hard, allowed=allowed)
         covered = sum(1 for row in path if row is not None)
         score = sum(float((row or {}).get("semantic_score", 0)) for row in path)
-        ranking = (covered, round(score, 6))
+        # 平局判定：canonical 假设优先——池更宽（同人多窗），去重/换件有余地；
+        # 窗口级 id 假设只锁一窗，槽间撞段没有出路（C4 实锤：槽0=槽2 同段）。
+        canonical_first = 1 if hypothesis.startswith("char:") else 0
+        ranking = (covered, canonical_first, round(score, 6))
         if best_key is None or ranking > best_key:
             best_key, best = ranking, (path, hypothesis, display)
     path, hypothesis, display = best
