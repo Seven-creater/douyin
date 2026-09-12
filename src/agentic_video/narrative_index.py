@@ -288,14 +288,32 @@ def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
-    rows = {}
-    for item in payload.get("shots") or []:
-        if not isinstance(item, dict):
+    # 门控 v2 实锤：模型有时无视素材里的 shot_idx 自行从 0 重编号（素材
+    # shot_idx=24 输出 0）→ 合法 shot 过滤全灭、整窗静默丢弃。先收集原始
+    # 条目，与 valid_shot_ids 零交集且数量一致时按位置重映射。
+    raw_items = [item for item in payload.get("shots") or []
+                 if isinstance(item, dict)]
+    shot_remap: dict[int, int] = {}
+    produced_ids = set()
+    for item in raw_items:
+        try:
+            produced_ids.add(int(item.get("shot_idx")))
+        except (TypeError, ValueError):
             continue
+    if raw_items and produced_ids and not (produced_ids & set(valid_shot_ids)) \
+            and len(raw_items) == len(valid_shot_ids):
+        for item, real_idx in zip(raw_items, sorted(valid_shot_ids)):
+            try:
+                shot_remap[int(item.get("shot_idx"))] = real_idx
+            except (TypeError, ValueError):
+                continue
+    rows = {}
+    for item in raw_items:
         try:
             shot_idx = int(item.get("shot_idx"))
         except (TypeError, ValueError):
             continue
+        shot_idx = shot_remap.get(shot_idx, shot_idx)
         if shot_idx not in valid_shot_ids:
             continue
         role = item.get("story_role") if item.get("story_role") in ARC_ROLES else "context"

@@ -377,7 +377,11 @@ def _ground_roster_canonicals(entities: list[dict], franchise: str,
                 f"char:{franchise or 'unknown'}:e{idx + 1}", franchise)
         id_map[str(entity.get("canonical_id") or "")] = canonical
         grounded.append({**entity, "canonical_id": canonical,
-                         "model_slug": str(entity.get("canonical_id") or "")})
+                         "model_slug": str(entity.get("canonical_id") or ""),
+                         # grounded=命中手写真值；未命中的是模型记忆候选
+                         # （metadata_prior 档幻觉高发：film1 roster 12 实体
+                         # 9 个是编造角色），annotation_view 据此过滤注入。
+                         "grounded": canonical in set(aliases.values())})
     return grounded, id_map
 
 
@@ -406,10 +410,19 @@ def annotation_view(pack: dict | None, *, max_entities: int = 12) -> list[dict]:
                        pack.get("source") or "?", "; ".join(validity["reasons"]))
         return []
     identity = pack.get("work_identity") or {}
-    if identity.get("tier") not in {"model_prior", "metadata_prior"}:
+    tier = identity.get("tier")
+    if tier not in {"model_prior", "metadata_prior"}:
         return []
     view = []
     for entity in (pack.get("entities") or [])[:max_entities]:
+        # 门控 v2 实锤：metadata_prior 档 roster 幻觉高发（film1 12 实体
+        # 9 个是编造角色——阿根/小茶/谛听/李云祥…），标注器拿幻觉条目兜底
+        # 乱绑（w19 三实体全绑幻觉角色 supported@0.9）。只注入归并到手工
+        # 真值的条目；幻觉条目留在 pack 归档，不进 binding 候选表。
+        # model_prior（视觉已认出作品）roster 可信度高，全量注入。
+        if tier == "metadata_prior" and "grounded" in entity \
+                and not entity.get("grounded"):
+            continue
         view.append({
             "canonical_id": str(entity.get("canonical_id") or ""),
             "name": str(entity.get("name") or ""),
