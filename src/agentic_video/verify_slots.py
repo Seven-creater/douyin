@@ -64,11 +64,37 @@ def parse_verification(raw: str) -> dict | None:
                 "evidence_interval": item.get("evidence_interval")
                 if isinstance(item.get("evidence_interval"), list) else None,
             })
+    # V4 E1 规整层（外审六节反例实锤：pass + met=false + missing 非空原样
+    # 保留；met=true 无 evidence_interval 也通过）——由代码保证不变式，
+    # 不信模型的自我汇报：
+    #   ①met=true 必须带合法 evidence_interval（二元数值、start<end、非负），
+    #     否则该条件 met=false；
+    #   ②verdict=pass 但存在 met=false 或 missing 非空 → 降级 fail；
+    #   ③fail 但 missing 与 failure_reason 皆空 → 补 unspecified（fail 仍 fail，
+    #     但可行动）。
+    for condition in conditions:
+        interval = condition.get("evidence_interval")
+        valid = (isinstance(interval, list) and len(interval) == 2
+                 and all(isinstance(v, (int, float)) for v in interval)
+                 and 0 <= float(interval[0]) < float(interval[1]))
+        if condition["met"] and not valid:
+            condition["met"] = False
+            condition["evidence_interval"] = None
+    unmet = [c for c in conditions if not c["met"]]
+    missing = [str(value) for value in payload.get("missing") or []]
+    verdict = payload["verdict"]
+    failure_reason = str(payload.get("failure_reason") or "")
+    if verdict == "pass" and (unmet or missing):
+        verdict = "fail"
+        failure_reason = (failure_reason + " | " if failure_reason else "") \
+            + "normalized: pass with unmet conditions"
+    if verdict == "fail" and not missing and not failure_reason:
+        failure_reason = "unspecified"
     return {
-        "verdict": payload["verdict"],
+        "verdict": verdict,
         "conditions": conditions,
-        "missing": [str(value) for value in payload.get("missing") or []],
-        "failure_reason": str(payload.get("failure_reason") or ""),
+        "missing": missing,
+        "failure_reason": failure_reason,
         "needs_context": bool(payload.get("needs_context")),
         "what_is_visible": str(payload.get("what_is_visible") or "")[:120],
     }
@@ -122,12 +148,32 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
             verdict = {"verdict": "uncertain", "conditions": [], "missing": [],
                        "failure_reason": "verification parse failed",
                        "needs_context": False, "what_is_visible": ""}
-        elif verdict.get("needs_context"):
-            # 有界上下文扩展：帮助判断，但判定仍以原区间为准
-            widened = _ask(max(0.0, start - context_pad_s), end + context_pad_s)
-            if widened is not None:
-                verdict["context_widened"] = True
-                verdict = widened
+        else:
+            # V4 E1：证据区间必须是片段内秒数——模型报绝对时间/越界秒数时
+            # 该条件打回 met=false（解析层不知片段时长，只能在这里判）
+            clip_duration = end - start
+            demoted = False
+            for condition in verdict.get("conditions") or []:
+                interval = condition.get("evidence_interval")
+                if condition.get("met") and isinstance(interval, list) \
+                        and len(interval) == 2:
+                    if (float(interval[0]) >= clip_duration
+                            or float(interval[1]) > clip_duration + 1.0):
+                        condition["met"] = False
+                        condition["evidence_interval"] = None
+                        demoted = True
+            if demoted:
+                if verdict.get("verdict") == "pass":
+                    verdict["verdict"] = "fail"
+                verdict["failure_reason"] = (
+                    str(verdict.get("failure_reason") or "")
+                    + " | normalized: evidence outside clip")
+            if verdict.get("needs_context"):
+                # 有界上下文扩展：帮助判断，但判定仍以原区间为准
+                widened = _ask(max(0.0, start - context_pad_s), end + context_pad_s)
+                if widened is not None:
+                    verdict["context_widened"] = True
+                    verdict = widened
         verdict["slot_idx"] = idx
         results.append(verdict)
     return {
@@ -341,9 +387,10 @@ BLIND_VIDEO_PROMPT = """你是第一次观看这条短视频的观众，没有�
 "story_in_one_sentence":"这条视频讲了什么",
 "event_relations":"前后段事件的关系：延续/并列/无关，逐段说明"}
 判定纪律：前后主要人物换成另一个人且没有转场理由，consistent_protagonist
-写 false 并在 switch_points 给出大致时间；不确定也写 false 并说明原因。"""
+写 false 并在 switch_points 给出大致时间；不确定也写 false 并说明原因。
+画面内字幕/烧录文字属于视频内容，可作判断依据。"""
 
-BLIND_VIDEO_PROMPT_VERSION = "blind_v1"
+BLIND_VIDEO_PROMPT_VERSION = "blind_v2"   # V4：盲看输入改为终版（含烧录文案+终混音）
 
 
 def blind_video_check(video_path, *, runner) -> dict:

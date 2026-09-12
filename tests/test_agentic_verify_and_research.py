@@ -211,3 +211,77 @@ def test_blind_video_check_parses_structured_answer():
     assert result["parsed"] is True
     assert result["consistent_protagonist"] is False
     assert result["switch_points"][0]["at_s"] == 7.0
+
+
+def test_parse_verification_normalizes_inconsistent_pass():
+    """V4 E1（外审六节反例）：pass+met=false/missing 非空 → 降级 fail；
+    met=true 无合法 evidence_interval → met=false；fail 无原因 → 补 unspecified。"""
+    bad = parse_verification(json.dumps({
+        "verdict": "pass",
+        "conditions": [{"condition": "主角在场", "met": False,
+                        "evidence_interval": [1, 2]}],
+        "missing": ["冲突可见"], "failure_reason": "", "needs_context": False,
+        "what_is_visible": "x"}, ensure_ascii=False))
+    assert bad["verdict"] == "fail"
+    assert "normalized: pass with unmet conditions" in bad["failure_reason"]
+
+    no_interval = parse_verification(json.dumps({
+        "verdict": "pass",
+        "conditions": [{"condition": "主角在场", "met": True,
+                        "evidence_interval": None}],
+        "missing": [], "failure_reason": "", "needs_context": False,
+        "what_is_visible": "x"}, ensure_ascii=False))
+    assert no_interval["verdict"] == "fail"
+    assert no_interval["conditions"][0]["met"] is False
+
+    inverted = parse_verification(json.dumps({
+        "verdict": "pass",
+        "conditions": [{"condition": "主角在场", "met": True,
+                        "evidence_interval": [5, 2]}],
+        "missing": [], "failure_reason": "", "needs_context": False,
+        "what_is_visible": "x"}, ensure_ascii=False))
+    assert inverted["verdict"] == "fail"
+
+    empty_fail = parse_verification(json.dumps({
+        "verdict": "fail", "conditions": [], "missing": [],
+        "failure_reason": "", "needs_context": False, "what_is_visible": "x"}))
+    assert empty_fail["verdict"] == "fail"
+    assert empty_fail["failure_reason"] == "unspecified"
+
+
+def test_overall_verdict_truth_table():
+    """V4 E3（外审必改③）：blind_required 时 None/unparsed/inconsistent 全
+    blocked；det/plan/文案轨三因子独立命名；B 档（blind_required=False）
+    不因盲看缺席而 fail。"""
+    from src.agentic_video.pipeline import _overall_verdict
+
+    det_ok = {"passed": True, "violations": []}
+    story = {"slots": [{"slot_idx": 0, "status": "supported",
+                        "need_spec": {"required": True}}],
+             "copy": {"cues": [{"kind": "hook_line"}, {"kind": "punchline"}]}}
+    grounding = {"kept": 2, "dropped": []}
+    blind_ok = {"parsed": True, "consistent_protagonist": True}
+    assert _overall_verdict(det_ok, blind_ok, grounding, story,
+                            blind_required=True)["passed"] is True
+    # 三态盲看失败
+    for blind in (None, {"parsed": False},
+                  {"parsed": True, "consistent_protagonist": False}):
+        verdict = _overall_verdict(det_ok, blind, grounding, story,
+                                   blind_required=True)
+        assert verdict["passed"] is False
+    assert _overall_verdict(det_ok, None, grounding, story,
+                            blind_required=True)["reasons"] == ["blind_missing"]
+    # B 档不因盲看缺席 fail
+    assert _overall_verdict(det_ok, None, grounding, story,
+                            blind_required=False)["passed"] is True
+    # det / plan / 文案轨道独立
+    assert _overall_verdict({"passed": False, "violations": ["x"]}, blind_ok,
+                            grounding, story, blind_required=True)["reasons"] \
+        == ["det_violations:x"]
+    broken = {"slots": [{"slot_idx": 1, "status": "unsupported",
+                         "need_spec": {"required": True}}],
+              "copy": {"cues": []}}
+    reasons = _overall_verdict(det_ok, blind_ok, grounding, broken,
+                               blind_required=False)["reasons"]
+    assert any(r.startswith("plan_incomplete") for r in reasons)
+    assert any(r.startswith("copy_track_empty") for r in reasons)

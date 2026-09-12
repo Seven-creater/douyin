@@ -217,6 +217,45 @@ def run_rendering(cfg: AppConfig, recipe: dict, *, theme: str, library: str,
     return asset_plan, retrieval, final
 
 
+def _overall_verdict(det: dict | None, blind: dict | None, grounding: dict | None,
+                     story: dict, *, blind_required: bool) -> dict:
+    """V4 E3 总门控（外审三轮必改③：blind 开启时 None/unparsed/inconsistent
+    一律 blocked——原「blind is None → 放行」会让没跑成的盲看比失败的盲看
+    分数还高）。
+
+    passed = det.passed
+          AND plan_complete（必选槽无 unsupported）
+          AND 文案轨道达标（assertion 型：hook 与 punchline 均存活——替换
+              可以，消失不行；空文案轨=copy_track_empty）
+          AND blind_required ? (parsed AND consistent_protagonist) : True
+    失败 reasons 逐项命名，供 blocked 交付的判读。"""
+    reasons: list[str] = []
+    if not (det or {}).get("passed"):
+        reasons.append("det_violations:" + ";".join((det or {}).get("violations") or [])
+                       or "det_failed")
+    incomplete = [int(slot["slot_idx"]) for slot in (story.get("slots") or [])
+                  if slot.get("status") == "unsupported"
+                  and (slot.get("need_spec") or {}).get("required")]
+    if incomplete:
+        reasons.append(f"plan_incomplete:{incomplete}")
+    cues = list(((story.get("copy") or {}).get("cues")) or [])
+    kinds = {str(cue.get("kind")) for cue in cues}
+    if not cues:
+        reasons.append("copy_track_empty")
+    elif "hook_line" not in kinds or "punchline" not in kinds:
+        missing = [kind for kind in ("hook_line", "punchline") if kind not in kinds]
+        reasons.append(f"copy_required_kinds_missing:{missing}")
+    if blind_required:
+        if blind is None:
+            reasons.append("blind_missing")
+        elif not blind.get("parsed"):
+            reasons.append("blind_unparsed")
+        elif blind.get("consistent_protagonist") is not True:
+            reasons.append("blind_inconsistent")
+    return {"passed": not reasons, "reasons": reasons,
+            "blind_required": blind_required}
+
+
 def _release_gpu_cache() -> None:
     """critic 前释放检索/渲染阶段驻留的显存（2026-09-10 v4：E5 检索 + 渲染后
     GPU0 仅剩 10.9GiB，叙事 critic 的视觉编码要 11.45GiB 直接 OOM 崩掉整轮）。
@@ -333,10 +372,14 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                         "start_s": old_source.get("start_s"),
                         "end_s": old_source.get("end_s"),
                         "reason": "verification_failed"})
-                round_reports.append(re_search_slot(
+                report = re_search_slot(
                     cfg, current_story, failed_idx, theme=theme,
                     candidate_pool=candidate_pool.get(failed_idx),
-                    rejected=rejected_sources))
+                    rejected=rejected_sources)
+                # V4 E2：验证通道直接改 current_story 且当场重渲 → 恒采用
+                report["channel"] = "verification"
+                report["adopted"] = True
+                round_reports.append(report)
             if any(row.get("status") == "replaced" for row in round_reports):
                 _re_render(f"verify_render_{round_idx}")      # 重搜生效先重渲再给 critic 看
                 det_check = deterministic_story_check(current_story)
@@ -374,11 +417,13 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                         "start_s": old_source.get("start_s"),
                         "end_s": old_source.get("end_s"),
                         "reason": f"critic: {directive.get('reason') or ''}"[:80]})
-                round_reports.append(re_search_slot(
+                report = re_search_slot(
                     cfg, patched_story, slot_idx, theme=theme,
                     candidate_pool=candidate_pool.get(slot_idx),
-                    need_hint=directive.get("need_hint"), rejected=rejected_sources))
-        re_search_log.extend({"round": round_idx, **row} for row in round_reports)
+                    need_hint=directive.get("need_hint"), rejected=rejected_sources)
+                report["channel"] = "critic"    # patched_story 是 deepcopy 副本——
+                round_reports.append(report)    # 采用与否在循环收敛判定之后回填
+        re_search_log.extend(round_reports)   # 引用 dict：adopted 可事后回填
         (output_dir / f"recipe_patch_round_{round_idx}.json").write_text(
             json.dumps({"patches": edit_critique.get("patches") or [],
                         "audit": recipe_audit},
@@ -397,22 +442,35 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
         any_applied = (any(row["status"] == "applied" for row in recipe_audit)
                        or any(row["status"] == "applied" for row in story_audit)
                        or any(row.get("status") == "replaced" for row in round_reports))
+
+        def _mark_critic_adopted(value: bool) -> None:
+            # V4 E2：critic 通道的重搜发生在 deepcopy 副本上——循环在采用前
+            # break 时这些"replaced"从未进入 current_story。日志必须区分
+            # "提出"与"采用"（V3_C3 实锤：日志记 slot2→5100s，终稿仍 2775s）。
+            for row in round_reports:
+                if row.get("channel") == "critic":
+                    row["adopted"] = value
+
         if not any_applied:
+            _mark_critic_adopted(False)
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="no_applicable_patch")
             last_round_modified = False
             break
         if any(row["state_hash"] == next_hash for row in history):
+            _mark_critic_adopted(False)
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="state_repeated")
             last_round_modified = False
             break
         if len(history) >= 2 and history[-1]["score"] - history[-2]["score"] < min_improvement:
+            _mark_critic_adopted(False)
             manifest.stage("critics", "complete", rounds=round_idx,
                            stop_reason="insufficient_improvement")
             last_round_modified = False
             break
         current_recipe, current_story = patched_recipe, patched_story
+        _mark_critic_adopted(True)
         _re_render(f"critic_render_{round_idx}")
         last_round_modified = True
         if round_idx >= max_rounds:
@@ -424,12 +482,21 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
                        stop_reason="max_rounds")
         last_round_modified = max_rounds > 0
 
-    # ③ V3 终版流水线（红线升级）：收敛后的素材先过确定性检查 + 盲看（零文案
-    # 干净画面），文案最后生成并逐句绑定证据，带文案重渲出终版成片——
-    # 每句字幕都有画面支持，裁判不再自评理解题。
+    # ③ V4 终版流水线（外审三轮必改③：审谁就交谁）：det → 文案（烧录前
+    # grounding 丢弃/替换）→ 真终渲（文案+mix/bgm 终混）→ 盲看看**终版** →
+    # overall 门控。失败仍产出（调试预览）但 delivery=blocked——判读以
+    # final_review.overall 为准，不再"机器指标全绿"式自欺。
     final_review: dict = {}
     det_final = deterministic_story_check(current_story)   # 零模型，恒跑
     final_review["deterministic"] = det_final
+    from src.agentic_video.copywriter import build_copy_cues, validate_copy_grounding
+
+    current_story["copy"] = build_copy_cues(current_story, runner=runner)
+    grounding = validate_copy_grounding(current_story["copy"], current_story)
+    (output_dir / "copy_grounding.json").write_text(
+        json.dumps(grounding, ensure_ascii=False, indent=2), encoding="utf-8")
+    final_review["copy_grounding"] = grounding
+    _re_render("final_render")                            # 带文案终渲=真交付物
     blind = None
     if verification_enabled:                                # B 档关（对照开关）
         # V3 晨修（B3/C3 实锤）：critic 两轮 + copy ask 后进程驻留 46.85GB，
@@ -443,19 +510,16 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
             "main_character": blind.get("main_character"),
             "story_in_one_sentence": blind.get("story_in_one_sentence"),
         }
-    # 文案轨最后生成（V3 P4）：无画面证据的句子在 grounding 里被丢弃/替换
-    from src.agentic_video.copywriter import build_copy_cues, validate_copy_grounding
-
-    current_story["copy"] = build_copy_cues(current_story, runner=runner)
-    grounding = validate_copy_grounding(current_story["copy"], current_story)
-    (output_dir / "copy_grounding.json").write_text(
-        json.dumps(grounding, ensure_ascii=False, indent=2), encoding="utf-8")
-    final_review["copy_grounding"] = grounding
-    _re_render("final_render")                            # 带文案终渲
+    overall = _overall_verdict(det_final, blind, grounding, current_story,
+                               blind_required=verification_enabled)
+    final_review["overall"] = overall
     manifest.stage("final_review", "complete",
                    det_passed=det_final.get("passed"),
                    blind_consistent=(blind or {}).get("consistent_protagonist"),
-                   copy_dropped=len(grounding.get("dropped") or []))
+                   copy_dropped=len(grounding.get("dropped") or []),
+                   overall_passed=overall["passed"])
+    manifest.stage("delivery", "complete" if overall["passed"] else "blocked",
+                  reasons=overall["reasons"])
     (output_dir / "final_review.json").write_text(
         json.dumps(final_review, ensure_ascii=False, indent=2), encoding="utf-8")
     if re_search_log:
