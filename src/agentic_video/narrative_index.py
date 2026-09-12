@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -260,6 +261,9 @@ def namespace_window_events(parsed: dict, window_idx: int) -> dict:
     return parsed
 
 
+logger = logging.getLogger(__name__)
+
+
 def _stable_hash_local(payload) -> str:
     import hashlib
 
@@ -466,6 +470,13 @@ def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
             answer.text, valid_shot_ids={int(row["shot_idx"]) for row in window_shots},
             time_offset_s=start, clip_duration_s=end - start,
             valid_canonicals=valid_canonicals)
+        if not parsed.get("shots"):
+            # 3 窗门控实锤：parse 失败仍记 completed → 断点污染，重跑静默跳过
+            # 丢窗（pack_off 丢 2 窗、pack_on 丢 1 窗都没被察觉）。失败窗
+            # 不进 completed，留 raw 头供排查。
+            logger.warning("[annotate w%d] parse failed——不记 completed（重跑会重试），raw_head=%s",
+                           window_idx, str(answer.text)[:120].replace("\n", " "))
+            continue
         parsed = namespace_window_events(parsed, window_idx)
         saved.setdefault("shots", {}).update(parsed["shots"])
         saved.setdefault("causal_links", []).extend(parsed["causal_links"])

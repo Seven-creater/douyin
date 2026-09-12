@@ -27,6 +27,7 @@ import unicodedata
 from pathlib import Path
 
 from src.config import AppConfig
+from src.library.entity_registry import load_entity_registry
 from src.perception import common
 from src.template.schema import extract_json_block
 
@@ -348,6 +349,46 @@ def parse_roster_answer(raw: str, *, franchise: str, max_entities: int) -> dict:
             "relations": relations, "plot_hypotheses": plot_arcs}
 
 
+def _ground_roster_canonicals(entities: list[dict], franchise: str,
+                              registry: dict) -> list[dict]:
+    """canonical 真值归并（3 窗门控实锤的幻觉 slug 修复）。
+
+    模型给的 slug 不可信：film1 pack 实况——「无限」的 slug 被写成 zhongli
+    （钟离的拼音，纯记忆幻觉），「罗小黑」→luoxiaohai，且 franchise 断链后
+    全落 char:unknown:* 命名空间。规则：
+    ①roster name/alias 精确命中手写 registry 的身份别名 → 用手写 canonical
+      （手写表是 canonical 真值来源；跨片/跨窗合并、row_identity_keys 的
+      别名路径都认它，char:unknown:* 它视而不见）；
+    ②未命中的新角色 → 代码确定性生成 char:{franchise}:e{N}，模型原始 slug
+      记档 model_slug 供审计。"""
+    from src.library.entity_registry import _norm, build_alias_maps
+
+    aliases, _source_map, _windowed = build_alias_maps(registry)
+    grounded, id_map = [], {}
+    for idx, entity in enumerate(entities):
+        canonical = None
+        for name in [entity.get("name"), *(entity.get("aliases") or [])]:
+            hit = aliases.get(_norm(str(name or "")))
+            if hit:
+                canonical = hit
+                break
+        if canonical is None:
+            canonical = sanitize_canonical_id(
+                f"char:{franchise or 'unknown'}:e{idx + 1}", franchise)
+        id_map[str(entity.get("canonical_id") or "")] = canonical
+        grounded.append({**entity, "canonical_id": canonical,
+                         "model_slug": str(entity.get("canonical_id") or "")})
+    return grounded, id_map
+
+
+def _remap_relations(relations: list[dict], id_map: dict[str, str]) -> list[dict]:
+    """roster relations 的 a/b 换成归并后的 canonical（防悬空引用）。"""
+    return [{**relation,
+             "a": id_map.get(str(relation.get("a")), str(relation.get("a"))),
+             "b": id_map.get(str(relation.get("b")), str(relation.get("b")))}
+            for relation in relations]
+
+
 # ---------------------------------------------------------------- pack 视图
 
 def annotation_view(pack: dict | None, *, max_entities: int = 12) -> list[dict]:
@@ -549,6 +590,11 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
         roster_title = gate.get("metadata_title_extracted") or roster_title
     if tier in {"model_prior", "metadata_prior"}:
         franchise = vote_a.get("franchise_slug") or vote_b.get("franchise_slug") or ""
+        if not franchise:
+            # 3 窗门控实锤：视觉拒认（metadata_prior 档）时 franchise_slug 恒空
+            # → roster 全部落 char:unknown:* 命名空间（film1 pack 实况）。
+            # 兜底：source 名剥离开头数字段（luoxiaohei1 → luoxiaohei）。
+            franchise = re.sub(r"\d+$", "", str(source or "").strip())
         roster_prompt = ROSTER_PROMPT.format(
             title=roster_title,
             installment=vote_a.get("installment") or "",
@@ -558,6 +604,12 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
             runner.ask(roster_prompt, max_new_tokens=2048).text,
             franchise=franchise,
             max_entities=int(bootstrap_cfg.get("max_entities", 12)))
+        grounded_entities, id_map = _ground_roster_canonicals(
+            roster.get("entities") or [], franchise,
+            load_entity_registry(cfg) if hasattr(cfg, "library") else {})
+        roster["entities"] = grounded_entities
+        roster["relations"] = _remap_relations(
+            roster.get("relations") or [], id_map)
         if tier == "metadata_prior":
             for entity in roster.get("entities") or []:
                 entity["source"] = "metadata_prior"      # 文件名来路如实标记
