@@ -41,6 +41,24 @@ def test_identity_gate_metadata_conflict_blocks_injection():
     assert low["tier"] == "unknown"
 
 
+def test_metadata_prior_tier_when_vision_refuses_but_filename_names_film():
+    """四轮冒烟实锤：Qwen3-Omni 对罗小黑视觉拒认（角色帧也诚实说不知道）。
+    视觉全盲 + 文件名含明确作品名 → metadata_prior（roster 照生成、全
+    proposed；绑定层要求画面吻合才生效）；mask 元数据后（benchmark 模式）
+    同样输入回到 unknown——泄漏源可控。"""
+    from src.library.film_bootstrap import title_from_metadata
+    filename = "罗小黑1 2019.4K.H265.60fps.10bit.Dolby.5.1.chs.mkv"
+    assert title_from_metadata(filename) == "罗小黑1"
+    blind = resolve_tier(_vote("", 0.0), _vote("", 0.0), filename)
+    assert blind["tier"] == "metadata_prior"
+    assert blind["metadata_title_extracted"] == "罗小黑1"
+    masked = resolve_tier(_vote("", 0.0), _vote("", 0.0), "")
+    assert masked["tier"] == "unknown"
+    # 元数据只是乱码技术噪声（无 CJK）→ 仍 unknown
+    assert resolve_tier(_vote("", 0.0), _vote("", 0.0), "2160p.WEB-DL.HQ.mkv")["tier"] \
+        == "unknown"
+
+
 def test_sanitize_canonical_id_enforces_franchise_namespace():
     """char:<franchise>:<slug> 三段式（防多素材库同名碰撞）；单段自动补 franchise。"""
     assert sanitize_canonical_id("char:luoxiaohei:wuxian", "luoxiaohei") \

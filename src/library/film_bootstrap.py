@@ -247,13 +247,28 @@ def parse_identity_answer(raw: str) -> dict:
     }
 
 
+def title_from_metadata(metadata_title: str) -> str:
+    """文件名→作品名：剥离 技术噪声（4K/H265/2160p/WEB-DL/…），取最长 CJK 段
+    （含尾缀数字）。'罗小黑1 2019.4K.H265...' → '罗小黑1'。"""
+    import re as _re
+
+    text = str(metadata_title or "")
+    cjk = _re.findall(r"[一-鿿]{2,}[0-9ⅠⅡⅢ]?", text)
+    if not cjk:
+        return ""
+    return max(cjk, key=len)
+
+
 def resolve_tier(vote_a: dict, vote_b: dict, metadata_title: str = "", *,
                  tier_high: float = 0.85, tier_low: float = 0.4) -> dict:
     """Identity Gate（外审二轮）：tier = f(双投一致性, 平均置信, 元数据佐证)。
 
     两投一致 + 平均≥high → model_prior；任一投票被元数据佐证 → model_prior；
-    模型与元数据互相矛盾 → identity_conflict（不注入任何实体表）；其余
-    中间地带 → search；低置信 → unknown。"""
+    视觉全盲但文件名含明确作品名 → metadata_prior（四轮冒烟实锤：Qwen3-Omni
+    对罗小黑视觉拒认——文件名是产品模式的合法便宜信号；roster 照生成但全部
+    proposed，绑定层仍要求画面特征吻合才生效，红线"视频=evidence"不破）；
+    模型与元数据互相矛盾 → identity_conflict（不注入任何实体表）；
+    其余中间地带 → search；低置信 → unknown。"""
     same = _titles_agree(vote_a.get("title"), vote_b.get("title"))
     avg = (float(vote_a.get("confidence") or 0) + float(vote_b.get("confidence") or 0)) / 2
     meta = str(metadata_title or "").strip()
@@ -270,13 +285,16 @@ def resolve_tier(vote_a: dict, vote_b: dict, metadata_title: str = "", *,
         tier = "model_prior"
     elif meta_match:
         tier = "model_prior"
+    elif not votes and title_from_metadata(meta):
+        tier = "metadata_prior"
     elif (same and avg >= tier_low) or max(float(vote_a.get("confidence") or 0),
                                            float(vote_b.get("confidence") or 0)) >= 0.7:
         tier = "search"
     else:
         tier = "unknown"
     return {"tier": tier, "votes_agree": same, "avg_confidence": round(avg, 3),
-            "metadata_match": meta_match, "metadata_conflict": meta_conflict}
+            "metadata_match": meta_match, "metadata_conflict": meta_conflict,
+            "metadata_title_extracted": title_from_metadata(meta)}
 
 
 def parse_roster_answer(raw: str, *, franchise: str, max_entities: int) -> dict:
@@ -330,11 +348,13 @@ def parse_roster_answer(raw: str, *, franchise: str, max_entities: int) -> dict:
 def annotation_view(pack: dict | None, *, max_entities: int = 12) -> list[dict]:
     """标注器唯一注入物（外审红线）：Recognition Prior——roster/aliases/
     appearance。关系与剧情是 Narrative Prior，绝不进标注器。tier 未达
-    model_prior 时返回空（含 model_prior_unverified：错 title 会诱导幻觉）。"""
+    model_prior/metadata_prior 时返回空（含 model_prior_unverified：错 title
+    会诱导幻觉；metadata_prior 的 roster 全 proposed，绑定层要求画面特征
+    吻合才生效）。"""
     if not isinstance(pack, dict):
         return []
     identity = pack.get("work_identity") or {}
-    if identity.get("tier") != "model_prior":
+    if identity.get("tier") not in {"model_prior", "metadata_prior"}:
         return []
     view = []
     for entity in (pack.get("entities") or [])[:max_entities]:
@@ -458,10 +478,13 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
         if provider is None:
             # 无搜索通道：降 model_prior_unverified——title/实体都不进 prompt
             tier = "model_prior_unverified"
-    if tier == "model_prior":
+    roster_title = vote_a.get("title") or vote_b.get("title") or ""
+    if tier == "metadata_prior":
+        roster_title = gate.get("metadata_title_extracted") or roster_title
+    if tier in {"model_prior", "metadata_prior"}:
         franchise = vote_a.get("franchise_slug") or vote_b.get("franchise_slug") or ""
         roster_prompt = ROSTER_PROMPT.format(
-            title=vote_a.get("title") or vote_b.get("title") or "",
+            title=roster_title,
             installment=vote_a.get("installment") or "",
             franchise=franchise or "unknown",
             max_entities=int(bootstrap_cfg.get("max_entities", 12)))
@@ -469,12 +492,15 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
             runner.ask(roster_prompt, max_new_tokens=2048).text,
             franchise=franchise,
             max_entities=int(bootstrap_cfg.get("max_entities", 12)))
+        if tier == "metadata_prior":
+            for entity in roster.get("entities") or []:
+                entity["source"] = "metadata_prior"      # 文件名来路如实标记
     pack = {
         "schema": KNOWLEDGE_PACK_SCHEMA,
         "prompt_version": BOOTSTRAP_PROMPT_VERSION,
         "source": source,
         "work_identity": {
-            "title": vote_a.get("title") or vote_b.get("title") or "",
+            "title": roster_title,
             "installment": vote_a.get("installment") or vote_b.get("installment") or "",
             "tier": tier, "status": "proposed",
             "votes": {"a": vote_a, "b": vote_b},
