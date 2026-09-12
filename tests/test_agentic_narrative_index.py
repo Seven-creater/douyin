@@ -199,3 +199,41 @@ def test_legacy_list_breakpoint_is_expired_by_prompt_v2(tmp_path):
     assert watched == [3700.0]                           # 旧断点过期，真的重标了
     assert isinstance(state["completed_windows"], dict)  # 新格式落盘
     assert state["shots"]["0"]["bindings"] == []         # 两层 Identity 字段就位
+
+
+def test_shard_output_and_merge_annotation_shards(tmp_path):
+    """72c 高并发：分片独立输出文件 + merge_annotation_shards 并集合并；
+    冲突窗（不同 resume key）跳过并报告；主文件 list 旧断点从分片重建。"""
+    import json as _json
+    from src.agentic_video.narrative_index import merge_annotation_shards
+    main = tmp_path / "narrative_annotations.json"
+    shard_a = tmp_path / "shard_a.json"
+    shard_b = tmp_path / "shard_b.json"
+    shard_a.write_text(_json.dumps({
+        "shots": {"21": {"window_idx": 21, "entity_names": ["a"]}},
+        "causal_links": [{"from_event": "e1", "to_event": "e2"}],
+        "completed_windows": {"21": "KEY", "22": "KEY"},
+        "pack_sha": "sha", "prompt_version": "v3"}, ensure_ascii=False), encoding="utf-8")
+    shard_b.write_text(_json.dumps({
+        "shots": {"30": {"window_idx": 30, "entity_names": ["b"]}},
+        "causal_links": [{"from_event": "e1", "to_event": "e2"},   # 重复链接去重
+                         {"from_event": "e3", "to_event": "e4"}],
+        "completed_windows": {"30": "KEY"},
+        "pack_sha": "sha", "prompt_version": "v3"}, ensure_ascii=False), encoding="utf-8")
+    # 主文件是旧 list 断点 → 从分片重建
+    main.write_text(_json.dumps({"shots": {}, "causal_links": [],
+                                 "completed_windows": []}), encoding="utf-8")
+    report = merge_annotation_shards(main, [shard_a, shard_b])
+    merged = _json.loads(main.read_text(encoding="utf-8"))
+    assert set(merged["completed_windows"]) == {"21", "22", "30"}
+    assert "21" in merged["shots"] and "30" in merged["shots"]
+    assert len(merged["causal_links"]) == 2                      # 去重后
+    assert merged["prompt_version"] == "v3"
+    # 冲突：同窗不同 key → 跳过并报告
+    shard_c = tmp_path / "shard_c.json"
+    shard_c.write_text(_json.dumps({
+        "shots": {"21": {"window_idx": 21}}, "causal_links": [],
+        "completed_windows": {"21": "DIFFERENT"}}, ensure_ascii=False), encoding="utf-8")
+    report2 = merge_annotation_shards(main, [shard_c])
+    assert report2["conflicts"] == ["21"]
+    assert merged["completed_windows"]["21"] == "KEY"

@@ -270,6 +270,58 @@ def namespace_window_events(parsed: dict, window_idx: int) -> dict:
 logger = logging.getLogger(__name__)
 
 
+def merge_annotation_shards(main_path: Path, shard_paths: list[Path]) -> dict:
+    """分片标注合并（72c 高并发链）：completed/shots/causal_links 并集。
+
+    窗口列表不相交是调用方责任；冲突（同窗不同 resume key）跳过并报告。
+    主文件可能仍在 list 格式（旧断点）→ 视为空集从分片重建。"""
+    main_path = Path(main_path)
+    if main_path.exists():
+        try:
+            merged = json.loads(main_path.read_text(encoding="utf-8"))
+        except ValueError:
+            merged = {}
+    else:
+        merged = {}
+    if not isinstance(merged, dict):
+        merged = {}
+    merged.setdefault("shots", {})
+    merged.setdefault("causal_links", [])
+    completed = merged.get("completed_windows")
+    merged["completed_windows"] = completed if isinstance(completed, dict) else {}
+    report = {"merged_windows": [], "conflicts": [], "shards": []}
+    seen_links = {json.dumps(link, ensure_ascii=False, sort_keys=True)
+                  for link in merged["causal_links"]}
+    for shard in shard_paths:
+        shard = Path(shard)
+        if not shard.exists():
+            continue
+        data = json.loads(shard.read_text(encoding="utf-8"))
+        keys = data.get("completed_windows")
+        keys = keys if isinstance(keys, dict) else {}
+        for widx, key in keys.items():
+            existing = merged["completed_windows"].get(widx)
+            if existing is not None and existing != key:
+                report["conflicts"].append(widx)
+                continue
+            merged["completed_windows"][widx] = key
+            report["merged_windows"].append(widx)
+        for shot_key, shot in (data.get("shots") or {}).items():
+            merged["shots"][str(shot_key)] = shot
+        for link in data.get("causal_links") or []:
+            token = json.dumps(link, ensure_ascii=False, sort_keys=True)
+            if token not in seen_links:
+                seen_links.add(token)
+                merged["causal_links"].append(link)
+        if keys:
+            merged["pack_sha"] = data.get("pack_sha") or merged.get("pack_sha", "")
+            merged["prompt_version"] = (data.get("prompt_version")
+                                        or merged.get("prompt_version", ""))
+        report["shards"].append(shard.name)
+    _atomic_write_json(main_path, merged)
+    return report
+
+
 def _stable_hash_local(payload) -> str:
     import hashlib
 
@@ -408,9 +460,13 @@ def _parse_bindings(items, valid_canonicals: set[str] | None) -> list[dict]:
 
 def run_narrative_annotations(cfg, result_path: Path, *, force: bool = False,
                               runner=None, limit_windows: int | None = None,
-                              windows: list[int] | None = None) -> Path:
+                              windows: list[int] | None = None,
+                              output_path: Path | None = None) -> Path:
     result_path = Path(result_path)
-    output_path = result_path.parent / "narrative_annotations.json"
+    # output_path：多实例分片并行（72c 高并发链）——分片写独立文件，
+    # merge_annotation_shards 合并回主文件；缺省仍是源目录的标注文件。
+    output_path = (Path(output_path) if output_path is not None
+                   else result_path.parent / "narrative_annotations.json")
     saved = {"shots": {}, "causal_links": [], "completed_windows": []}
     if output_path.exists() and not force:
         try:
