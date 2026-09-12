@@ -145,6 +145,33 @@ def pick_informative_frames(shots: list[dict], *, n: int = 4,
     return frames
 
 
+def pick_person_frames(shots: list[dict], captions: dict, *, n: int = 10
+                       ) -> list[Path]:
+    """含人物镜头 kf 的均匀采样（三轮冒烟实锤的最终结论：识别作品靠角色脸。
+
+    纯时间均匀 → 山水风景；分数加权 → 高分风景；片头字幕区 → 出品方名单。
+    captions 已判过主体，直接按"主体含人物"过滤后全片均匀取 n 张。"""
+    person_shots = [row for row in shots if row.get("kfs")
+                    and any(marker in str(captions.get(str(row.get("shot_idx")))
+                                          or "") for marker in _PERSON_MARKERS)]
+    if not person_shots:
+        return []
+    frames: list[Path] = []
+    if len(person_shots) <= n:
+        for row in person_shots:
+            kf = next((Path(p) for p in row["kfs"] if Path(p).exists()), None)
+            if kf:
+                frames.append(kf)
+        return frames
+    step = len(person_shots) / n
+    for idx in range(n):
+        row = person_shots[min(int(idx * step), len(person_shots) - 1)]
+        kf = next((Path(p) for p in row["kfs"] if Path(p).exists()), None)
+        if kf:
+            frames.append(kf)
+    return frames
+
+
 def build_slideshow(video: Path, work_dir: Path, *, timestamps: list[float],
                     informative_frames: list[Path], ffmpeg_bin: str = "ffmpeg"
                     ) -> tuple[Path, Path, list[Path]]:
@@ -383,9 +410,18 @@ def bootstrap_film_knowledge(cfg: AppConfig, source: str, *, force: bool = False
             captions = json.loads(captions_path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             captions = {}
-    informative = pick_informative_frames(
-        scan_output.get("shots") or [], n=int(bootstrap_cfg.get("n_informative", 4)),
-        captions=captions)
+    n_frames = int(bootstrap_cfg.get("n_uniform", 6)) \
+        + int(bootstrap_cfg.get("n_informative", 4))
+    # 人物帧优先（三轮冒烟实锤：时间均匀=风景、片头区=出品方名单——识别靠
+    # 角色脸）；无 captions/无人物镜头才回退 时间均匀+分数加权。
+    person_frames = pick_person_frames(scan_output.get("shots") or [], captions,
+                                        n=n_frames)
+    if person_frames:
+        timestamps, informative = [], person_frames
+    else:
+        informative = pick_informative_frames(
+            scan_output.get("shots") or [],
+            n=int(bootstrap_cfg.get("n_informative", 4)), captions=captions)
     work_dir = shots_dir / "bootstrap"
     audit, slideshow, frames = build_slideshow(
         video, work_dir, timestamps=timestamps, informative_frames=informative,
