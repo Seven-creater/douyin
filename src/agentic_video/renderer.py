@@ -597,7 +597,6 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     reference = Path(recipe["reference"]["uri"])
     filter_chain = final_filter(execution_recipe, font=Path(cfg.generation.get("assemble", {}).get(
         "font", "")))
-    use_bgm = False
     audio_mode = "source"              # 叙事分支按 asset_plan.audio_mode 覆盖
     applied_audio_mode = "source"      # V4：manifest 记实际生效的终混模式
     if narrative_mode:
@@ -692,13 +691,23 @@ def _sha256_file(path: Path) -> str:
 
 
 def frame_md5(ffmpeg_bin: str, video: Path) -> str:
-    """Return deterministic video-only framemd5 for variant equality checks."""
+    """Return a hash of decoded video-frame checksums only.
+
+    Raw ``framemd5`` also contains muxer-dependent time bases and timestamps.
+    Audio-only remuxing may change those headers while decoded pixels remain
+    identical, so equality must use the ordered per-frame checksum column.
+    """
     proc = subprocess.run([ffmpeg_bin, "-v", "error", "-i", str(video), "-map", "0:v:0",
                            "-f", "framemd5", "-"], capture_output=True, text=True,
                           cwd=repo_root(), check=False, timeout=600)
     if proc.returncode:
         raise RuntimeError(f"framemd5 failed: {(proc.stderr or '')[-300:]}")
-    return hashlib.md5(proc.stdout.encode("utf-8")).hexdigest()
+    checksums = [line.rsplit(",", 1)[-1].strip()
+                 for line in proc.stdout.splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")]
+    if not checksums:
+        raise RuntimeError("framemd5 produced no video frames")
+    return hashlib.md5("\n".join(checksums).encode("ascii")).hexdigest()
 
 
 def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path, *,
@@ -718,7 +727,8 @@ def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path
     source_out = output_dir / "source_only" / "rendered.mp4"
     mix_out = output_dir / "bgm_mix" / "rendered.mp4"
     source_audio = content_master.parent / "source_audio.m4a"
-    source_out.parent.mkdir(parents=True, exist_ok=True); mix_out.parent.mkdir(parents=True, exist_ok=True)
+    source_out.parent.mkdir(parents=True, exist_ok=True)
+    mix_out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(content_master, source_out)
     ffmpeg_bin = cfg.perception.get("ffmpeg_bin", "ffmpeg")
     extract_args = ["-y", "-loglevel", "error", "-i", str(content_master),
@@ -732,8 +742,6 @@ def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path
     args = ["-y", "-loglevel", "error", "-i", str(content_master),
             "-i", str(source_audio), "-stream_loop", "-1", "-i", str(bgm_path),
             "-filter_complex", audio_filter, "-map", "0:v:0", "-map", "[au]"]
-    if render_duration is not None:
-        args += ["-t", f"{render_duration:g}"]
     args += ["-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", str(mix_out)]
     if "__BGM__" in " ".join(args):
         raise RuntimeError("unresolved __BGM__ placeholder")
@@ -755,3 +763,110 @@ def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path
                 "commands": [extract_args, args]}
     (output_dir / "audio_variants_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"source_only": source_out, "bgm_mix": mix_out}
+
+
+def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
+                         source_video: Path | None = None,
+                         bgm_path: Path | None = None,
+                         force: bool = False) -> dict[str, object]:
+    """Render a V6 Evidence Edit Plan as one content master.
+
+    A segment is either a short source interval or a keyframe hold.  The
+    master is rendered once; when ``bgm_path`` is supplied, the existing audio
+    derivation helper creates source_only and bgm_mix variants from that exact
+    master.  No duration padding is introduced.
+    """
+    if plan.get("passed") is False:
+        raise ValueError("refusing to render a blocked evidence edit plan")
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    master = output_dir / "content_master.mp4"
+    if master.exists() and not force:
+        variants = {}
+        for name in ("source_only", "bgm_mix"):
+            path = output_dir / "variants" / name / "rendered.mp4"
+            if path.exists():
+                variants[name] = path
+        return {"content_master": master, "variants": variants,
+                "duration_s": float(plan.get("duration_s") or 0.0)}
+    ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
+    ffprobe = cfg.perception.get("ffprobe_bin", "ffprobe")
+    width, height = render_canvas(cfg, False)
+    work = output_dir / "micro_work"
+    work.mkdir(parents=True, exist_ok=True)
+    segments: list[Path] = []
+    commands: list[list[str]] = []
+    for index, segment in enumerate(plan.get("segments") or []):
+        kind = str(segment.get("unit_type") or "micro_clip")
+        duration = float(segment.get("duration_s") or 0.0)
+        if duration <= 0:
+            raise ValueError(f"evidence segment {index} has no positive duration")
+        destination = work / f"segment_{index:04d}.mp4"
+        if kind == "keyframe_hold":
+            frame_value = str(segment.get("keyframe_path") or "").strip()
+            frame = Path(frame_value) if frame_value else None
+            if frame is None or not frame.is_file():
+                if source_video is None:
+                    raise FileNotFoundError(f"keyframe missing for segment {index}")
+                frame = work / f"frame_{index:04d}.png"
+                timestamp = float((segment.get("source_interval") or [0.0])[0])
+                extract = ["-y", "-loglevel", "error", "-ss", f"{timestamp:g}",
+                           "-i", str(source_video), "-frames:v", "1", str(frame)]
+                common.run_ffmpeg(ffmpeg, extract, timeout_s=120)
+                commands.append([ffmpeg, *extract])
+            args = ["-y", "-loglevel", "error", "-loop", "1", "-i", str(frame),
+                    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", f"{duration:g}",
+                    "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                           f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps=24,setsar=1",
+                    "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(destination)]
+        else:
+            if source_video is None and not segment.get("source_video"):
+                raise ValueError(f"micro clip {index} has no source_video")
+            source = Path(str(segment.get("source_video") or source_video))
+            start, end = map(float, segment.get("source_interval") or [0.0, 0.0])
+            if end - start < 0.15 - 1e-6:
+                raise ValueError(f"micro clip {index} is shorter than 0.15s")
+            try:
+                has_audio = _has_audio_stream(ffprobe, source)
+            except Exception:
+                has_audio = False
+            args = ["-y", "-loglevel", "error", "-ss", f"{start:g}", "-t", f"{end - start:g}",
+                    "-i", str(source)]
+            if not has_audio:
+                args.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+            args.extend(["-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps=24,setsar=1",
+                         "-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0",
+                         "-t", f"{duration:g}", "-c:v", "libx264", "-preset", "ultrafast",
+                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000", "-ac", "2",
+                         str(destination)])
+        common.run_ffmpeg(ffmpeg, args, timeout_s=max(120, int(duration * 20)))
+        commands.append([ffmpeg, *args])
+        segments.append(destination)
+    if not segments:
+        raise ValueError("evidence edit plan has no segments")
+    concat = work / "concat.txt"
+    concat.write_text("".join(f"file '{path.as_posix()}'\n" for path in segments), encoding="utf-8")
+    concat_args = ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat),
+                   "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                   "-c:a", "aac", "-ar", "48000", "-ac", "2", str(master)]
+    common.run_ffmpeg(ffmpeg, concat_args, timeout_s=max(180, int(float(plan.get("duration_s") or 1) * 30)))
+    commands.append([ffmpeg, *concat_args])
+    variants = {}
+    if bgm_path is not None:
+        mix_volume = float((cfg.library.get("narrative_render") or {}).get(
+            "bgm_mix_volume", 0.25))
+        variants = derive_audio_variants(
+            cfg, master, output_dir / "variants", bgm_path=Path(bgm_path),
+            mix_volume=mix_volume, duration_s=float(plan.get("duration_s") or 0.0))
+    manifest = {
+        "schema_version": "evidence_render_v1", "content_master": str(master),
+        "duration_s": float(plan.get("duration_s") or 0.0),
+        "segments": plan.get("segments") or [], "commands": commands,
+        "variants": {name: str(path) for name, path in variants.items()},
+    }
+    (output_dir / "evidence_render_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"content_master": master, "variants": variants,
+            "duration_s": float(plan.get("duration_s") or 0.0)}

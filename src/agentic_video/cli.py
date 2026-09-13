@@ -122,6 +122,59 @@ def build_parser() -> argparse.ArgumentParser:
     roughcut_accept.add_argument("--human-acceptance", required=True,
                                  help="human acceptance JSON")
 
+    pattern = sub.add_parser(
+        "reference-pattern", help="extract V6 editing grammar from a reference video")
+    pattern.add_argument("--reference", required=True)
+    pattern.add_argument("--output", required=True)
+    pattern.add_argument("--with-omni", action="store_true",
+                         help="optionally enrich the deterministic pattern with Omni")
+
+    evidence = sub.add_parser(
+        "evidence-mine", help="mine fine-grained V6 visual evidence units")
+    evidence.add_argument("--video", required=True)
+    evidence.add_argument("--shots", required=True)
+    evidence.add_argument("--scope-start", type=float, required=True)
+    evidence.add_argument("--scope-end", type=float, required=True)
+    evidence.add_argument("--output", required=True)
+    evidence.add_argument("--unverified", action="store_true",
+                          help="offline parser test only; never deliverable")
+
+    evidence_plan = sub.add_parser(
+        "evidence-plan", help="plan a micro montage from evidence_units.json")
+    evidence_plan.add_argument("--evidence", required=True)
+    evidence_plan.add_argument("--pattern", required=True)
+    evidence_plan.add_argument("--output", required=True)
+    evidence_plan.add_argument("--preferred-duration", type=float, default=12.0)
+    evidence_plan.add_argument("--min-duration", type=float, default=4.0)
+    evidence_plan.add_argument("--max-duration", type=float, default=20.0)
+
+    evidence_render = sub.add_parser(
+        "evidence-render", help="render a V6 evidence edit plan and audio variants")
+    evidence_render.add_argument("--plan", required=True)
+    evidence_render.add_argument("--video", default=None)
+    evidence_render.add_argument("--output", required=True)
+    evidence_render.add_argument("--bgm", default=None)
+    evidence_render.add_argument("--force", action="store_true")
+
+    evidence_v6 = sub.add_parser(
+        "evidence-v6", help="run the complete V6 evidence-centric control loop")
+    evidence_v6.add_argument(
+        "--spec", default="config/roughcuts/lxh1_w15_evidence_v6.json")
+    evidence_v6.add_argument("--video", default=None,
+                             help="optional source movie override")
+    evidence_v6.add_argument("--output", required=True)
+    evidence_v6.add_argument(
+        "--gpu-pairs", default=None,
+        help="parallel Omni workers, e.g. '0,1;2,3;4,5;6,7'")
+    evidence_v6.add_argument("--worker-timeout", type=float, default=3600.0)
+    evidence_v6.add_argument("--human-acceptance", default=None)
+    evidence_v6.add_argument("--force", action="store_true")
+
+    evidence_v6_accept = sub.add_parser(
+        "evidence-v6-accept", help="release V6 output after human review")
+    evidence_v6_accept.add_argument("--output", required=True)
+    evidence_v6_accept.add_argument("--human-acceptance", required=True)
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -352,6 +405,104 @@ def _roughcut_accept(args, _cfg) -> dict:
     return {"output": str(final)}
 
 
+def _reference_pattern(args, cfg) -> dict:
+    from src.agentic_video.reference_pattern import extract_reference_pattern
+    runner = None
+    if args.with_omni:
+        from src.perception.omni_runner import OmniRunner
+        runner = OmniRunner(cfg.perception.get("omni") or {},
+                            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
+    pattern = extract_reference_pattern(
+        Path(args.reference), runner=runner, output=Path(args.output),
+        ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+        ffprobe_bin=cfg.perception.get("ffprobe_bin", "ffprobe"))
+    return {"output": str(args.output), "pattern_type": pattern["pattern_type"],
+            "shot_count": pattern["shot_count"]}
+
+
+def _evidence_mine(args, cfg) -> dict:
+    from src.perception.evidence_miner import mine_evidence
+    shots = json.loads(Path(args.shots).read_text(encoding="utf-8"))
+    runner = None
+    if not args.unverified:
+        from src.perception.omni_runner import OmniRunner
+        runner = OmniRunner(cfg.perception.get("omni") or {},
+                            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
+    result = mine_evidence(
+        Path(args.video), shots, runner=runner,
+        scope_interval=(args.scope_start, args.scope_end), output=Path(args.output),
+        clip_dir=Path(args.output).parent / "omni_clips",
+        allow_unverified=args.unverified)
+    return {"output": str(args.output), "units": len(result["units"]),
+            "passed": result["passed"], "failure_class": result["failure_class"]}
+
+
+def _evidence_plan(args, _cfg) -> dict:
+    from src.agentic_video.evidence_planner import (build_evidence_edit_plan,
+                                                    write_evidence_edit_plan)
+    evidence = json.loads(Path(args.evidence).read_text(encoding="utf-8"))
+    pattern = json.loads(Path(args.pattern).read_text(encoding="utf-8"))
+    plan = build_evidence_edit_plan(
+        evidence, pattern, preferred_duration_s=args.preferred_duration,
+        min_duration_s=args.min_duration, max_duration_s=args.max_duration)
+    write_evidence_edit_plan(plan, Path(args.output))
+    return {"output": str(args.output), "segments": len(plan["segments"]),
+            "duration_s": plan["duration_s"], "passed": plan["passed"],
+            "failure_class": plan["failure_class"]}
+
+
+def _evidence_render(args, cfg) -> dict:
+    from src.agentic_video.renderer import render_micro_montage
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    bgm = Path(args.bgm) if args.bgm else None
+    if bgm is None:
+        configured = str((cfg.library.get("narrative_render") or {}).get("bgm_path") or "")
+        if configured:
+            bgm = Path(configured) if Path(configured).is_absolute() else repo_root() / configured
+    result = render_micro_montage(
+        cfg, plan, Path(args.output), source_video=Path(args.video) if args.video else None,
+        bgm_path=bgm, force=args.force)
+    return {"content_master": str(result["content_master"]),
+            "variants": {key: str(value) for key, value in (result["variants"] or {}).items()},
+            "duration_s": result["duration_s"]}
+
+
+def _evidence_v6(args, cfg) -> dict:
+    from src.agentic_video.evidence_pipeline import (read_evidence_spec,
+                                                      run_evidence_pipeline)
+    from src.perception.omni_pool import OmniProcessPool
+
+    spec_path = Path(args.spec)
+    spec, _ = read_evidence_spec(spec_path)
+    configured_pairs = (spec.get("analysis") or {}).get("gpu_pairs") or []
+    pairs = args.gpu_pairs or ";".join(str(pair) for pair in configured_pairs)
+    if not pairs:
+        raise ValueError("evidence-v6 requires --gpu-pairs or analysis.gpu_pairs")
+    with OmniProcessPool(
+            pairs, cfg.perception.get("omni") or {},
+            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+            response_timeout_s=args.worker_timeout) as runner:
+        result = run_evidence_pipeline(
+            cfg, spec, Path(args.output), runner=runner,
+            source_video=Path(args.video) if args.video else None,
+            human_acceptance=(Path(args.human_acceptance)
+                              if args.human_acceptance else None),
+            force=args.force)
+    acceptance = result["acceptance"]
+    return {"output": str(result["output_dir"]),
+            "automated_passed": acceptance.get("automated_passed", False),
+            "passed": acceptance.get("passed", False),
+            "failure_class": acceptance.get("failure_class"),
+            "delivery": acceptance.get("delivery", "blocked")}
+
+
+def _evidence_v6_accept(args, _cfg) -> dict:
+    from src.agentic_video.evidence_pipeline import finalize_evidence_delivery
+
+    final = finalize_evidence_delivery(Path(args.output), Path(args.human_acceptance))
+    return {"output": str(final), "delivery": "passed"}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -404,7 +555,14 @@ def main(argv: list[str] | None = None) -> int:
                 "index": _index, "facets": _facets, "bootstrap": _bootstrap,
                 "decompose": _decompose,
                 "render": _render, "roughcut": _roughcut,
-                "roughcut-accept": _roughcut_accept, "run": _run}
+                "roughcut-accept": _roughcut_accept,
+                "reference-pattern": _reference_pattern,
+                "evidence-mine": _evidence_mine,
+                "evidence-plan": _evidence_plan,
+                "evidence-render": _evidence_render,
+                "evidence-v6": _evidence_v6,
+                "evidence-v6-accept": _evidence_v6_accept,
+                "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
             else handlers[args.command](args)

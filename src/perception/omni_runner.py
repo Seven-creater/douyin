@@ -50,6 +50,10 @@ def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
     1080p 及以下源不受影响（scale=min 不放大）。5.1 声源必须下混立体声
     （同日实锤：杜比/DTS 6 声道让 librosa audioread reshape 直接 ValueError）。
     """
+    if clip_dir is None:
+        raise ValueError("clip_dir is required when start_s/end_s are provided")
+    clip_dir = Path(clip_dir)
+    clip_dir.mkdir(parents=True, exist_ok=True)
     clip = clip_dir / "clip.mp4"
     if clip.exists():
         try:
