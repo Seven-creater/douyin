@@ -328,3 +328,122 @@ def test_localize_coarse_slots_exception_path_no_crash(tmp_path, monkeypatch):
     assert slot["status"] == "unsupported"
     assert slot["reason"] == "coarse_unlocalizable(not_found)"
     assert log[0]["error"].startswith("RuntimeError")
+
+
+def test_localize_preserves_evidence_interval_with_pre_post_roll(tmp_path):
+    """V5 P2（外审六轮硬修改⑥-2）：证据区间 ≠ 剪辑区间——证据 4121-4123s
+    + budget 5.5 → 证据完整保留，余量做 pre/post roll；旧代码 abs_end=
+    start+budget 会把证据尾巴切掉。证据超预算 → flag 不截断。"""
+    import json as _json
+    from src.agentic_video.verify_slots import localize_coarse_slots
+
+    class _Anchor:
+        def watch(self, video, prompt, **kw):
+            class A: text = ('{"found": true, "start": 4121, "end": 4123, '
+                             '"evidence": "无限讲解灵质空间", "confidence": 0.9} '
+                             '{"found": true, "start": 4124, "end": 4127, '
+                             '"evidence": "你的领域", "confidence": 0.9}')
+            return A()
+
+    (tmp_path / "v.mp4").write_bytes(b"0")
+    story = {"slots": [{
+        "slot_idx": 0, "status": "supported", "role": "context",
+        "target_interval": [0.0, 5.5],
+        "need_spec": {"need": "x", "evidence_mode": "both"},
+        "source": {"video": str(tmp_path / "v.mp4"), "anchor": "coarse",
+                   "start_s": 4095.0, "end_s": 4140.0, "dialogue": []}}]}
+    log = localize_coarse_slots(None, story, runner=_Anchor(), output_dir=tmp_path)
+    slot = story["slots"][0]
+    assert slot["status"] == "supported" and slot["source"]["anchor"] == "localized"
+    assert slot["source"]["start_s"] <= 4121.0            # 前置 roll
+    assert slot["source"]["end_s"] >= 4123.0              # 证据完整（旧代码 4121+5.5=4126.5 但从证据起点硬截）
+    entry = log[0]
+    assert entry["evidence_interval"] == [4121.0, 4123.0]
+    assert entry["cut_interval"][0] < 4121.0              # pre roll 生效
+    # 证据超预算：7.5s 对白 vs 5.5s 槽 → flag + evidence_interval 落 source
+    class _Long:
+        def watch(self, video, prompt, **kw):
+            class A: text = ('{"found": true, "start": 2977.5, "end": 2985.0, '
+                             '"evidence": "人和妖一样，很难定义好坏", "confidence": 0.9}')
+            return A()
+
+    story2 = {"slots": [{
+        "slot_idx": 0, "status": "supported", "role": "hook",
+        "target_interval": [0.0, 5.5],
+        "need_spec": {"need": "x", "evidence_mode": "dialogue"},
+        "source": {"video": str(tmp_path / "v.mp4"), "anchor": "coarse",
+                   "start_s": 2940.0, "end_s": 2985.0, "dialogue": []}}]}
+    log2 = localize_coarse_slots(None, story2, runner=_Long(), output_dir=tmp_path)
+    slot2 = story2["slots"][0]
+    assert "evidence_exceeds_budget" in log2[0]["flags"]
+    assert slot2["source"]["evidence_interval"] == [2977.5, 2985.0]
+    # 追加式 log：两轮调用都在
+    combined = _json.loads((tmp_path / "localize_log.json").read_text(encoding="utf-8"))
+    assert len(combined) == 2 and all("run_ts" in row for row in combined)
+
+
+def test_recovery_classifier_routes_by_reason():
+    """V5 P2（外审六轮硬修改②）：失败→分类→next_action；只有
+    index_insufficient 触发 gap_watch（evidence_timing=时间协议错，
+    素材可能就在眼前）。"""
+    from src.agentic_video.verify_slots import (RECOVERY_NEXT_ACTION,
+                                                classify_slot_failure)
+    assert RECOVERY_NEXT_ACTION["index_insufficient"] == "gap_watch"
+    assert RECOVERY_NEXT_ACTION["evidence_timing"] == "relocalize"
+    assert RECOVERY_NEXT_ACTION["identity_mismatch"] == "verify_identity"
+
+    timing = classify_slot_failure(
+        {"slot_idx": 2, "status": "fail",
+         "reason": "", },
+        {"verdict": "fail", "failure_reason": "x | normalized: evidence outside clip"})
+    assert timing == "evidence_timing"
+
+    localize = classify_slot_failure(
+        {"slot_idx": 3, "status": "unsupported",
+         "reason": "coarse_unlocalizable(not_found)"}, None)
+    assert localize == "localize_rejected"
+
+    no_cand = classify_slot_failure(
+        {"slot_idx": 4, "status": "unsupported",
+         "reason": "no eligible candidate in pool or index"}, None)
+    assert no_cand == "index_insufficient"
+
+    det = {"violations": ["required_slots_missing_protagonist=[0, 2]"]}
+    identity = classify_slot_failure(
+        {"slot_idx": 2, "status": "supported", "reason": ""}, None, det_check=det)
+    assert identity == "identity_mismatch"
+
+    mismatch = classify_slot_failure(
+        {"slot_idx": 5, "status": "supported", "reason": ""},
+        {"verdict": "fail", "failure_reason": "冲突不可见"})
+    assert mismatch == "evidence_mismatch"
+
+
+def test_verify_slots_includes_uncertain_slots():
+    """V5 P2：uncertain ≠ 通过——有 source 的 uncertain 槽进验证（此前
+    整体跳过，失败/恢复两条路都不含它）。"""
+    from src.agentic_video.verify_slots import verify_slots
+
+    class _V:
+        def __init__(self):
+            self.calls = 0
+        def watch(self, video, prompt, **kw):
+            self.calls += 1
+            class A: text = '{"verdict":"pass","conditions":[],"missing":[],"failure_reason":""}'
+            return A()
+
+    (tmp := Path(_verify_plan_dir())) if False else None
+    import tempfile
+    tmp = Path(tempfile.mkdtemp())
+    (tmp / "v.mp4").write_bytes(b"0")
+    plan = {"slots": [
+        {"slot_idx": 0, "status": "supported", "role": "hook",
+         "need_spec": {"need": "x"}, "target_interval": [0, 5],
+         "source": {"video": str(tmp / "v.mp4"), "start_s": 0, "end_s": 5}},
+        {"slot_idx": 1, "status": "uncertain", "role": "conflict",
+         "need_spec": {"need": "x"}, "target_interval": [5, 10],
+         "source": {"video": str(tmp / "v.mp4"), "start_s": 100, "end_s": 105}}]}
+    runner = _V()
+    report = verify_slots(None, plan, runner=runner)
+    assert runner.calls >= 2                        # uncertain 槽也被看
+    assert len(report["results"]) == 2

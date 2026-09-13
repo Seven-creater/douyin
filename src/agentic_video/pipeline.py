@@ -305,6 +305,7 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
     edit_critiques = []
     narrative_critiques = []
     re_search_log = []
+    recovery_queue: dict[int, dict] = {}   # V5 P2 恢复状态机
     critic_cfg = cfg.library.get("critic_v2") or {}
     max_rounds = int(critic_cfg.get("max_rounds", 2))
     min_improvement = float(critic_cfg.get("min_improvement", 0.02))
@@ -361,6 +362,48 @@ def run_full(cfg: AppConfig, reference: Path, *, theme: str, library: str,
             (output_dir / f"deterministic_check_round_{round_idx}.json").write_text(
                 json.dumps(det_check, ensure_ascii=False, indent=2), encoding="utf-8")
             failed_idxs = list(verification["failed_slots"])
+            # V5 P2 恢复状态机（外审六轮硬修改②）：uncertain 槽与 localize
+            # 拒绝的 unsupported 槽此前都逃出了恢复通道（verify 只验
+            # supported、det live 排除 unsupported——最需要重找素材的槽
+            # 反而没人管）。失败→分类→next_action，每槽 attempts 有界。
+            from src.agentic_video.verify_slots import (RECOVERY_NEXT_ACTION,
+                                                        classify_slot_failure)
+            verdict_by_slot = {int(row["slot_idx"]): row
+                               for row in verification.get("results") or []}
+            recovery_max = int(((cfg.library.get("recovery") or {})
+                                .get("max_attempts", 2)))
+            for slot in current_story.get("slots") or []:
+                idx = int(slot.get("slot_idx", 0))
+                verdict = verdict_by_slot.get(idx)
+                failing = (idx in failed_idxs
+                           or slot.get("status") in {"unsupported", "uncertain"}
+                           or (verdict or {}).get("verdict") == "uncertain")
+                if not failing:
+                    continue
+                reason_code = classify_slot_failure(slot, verdict, det_check)
+                entry = recovery_queue.get(idx) or {
+                    "slot_idx": idx, "attempts": 0, "first_round": round_idx}
+                entry.update({"reason_code": reason_code,
+                              "next_action": RECOVERY_NEXT_ACTION[reason_code],
+                              "last_round": round_idx})
+                entry["attempts"] += 1
+                recovery_queue[idx] = entry
+                if reason_code == "evidence_timing":
+                    # 时间协议错不换素材：重置区间为 localize 重定位（下一轮
+                    # 的 localize 调用点会处理 anchor=coarse 槽；这里把
+                    # too-short 的旧区间清回窗口边界）
+                    slot["source"].setdefault("_relocalize", True)
+                if entry["attempts"] > recovery_max:
+                    entry["reason_code"] = "budget_exhausted"
+                    entry["next_action"] = "stop"
+                if entry["next_action"] not in {"stop"} \
+                        and idx not in failed_idxs:
+                    failed_idxs.append(idx)
+            if recovery_queue:
+                (output_dir / "recovery_queue.json").write_text(
+                    json.dumps(sorted(recovery_queue.values(),
+                                      key=lambda row: row["slot_idx"]),
+                               ensure_ascii=False, indent=2), encoding="utf-8")
             for det_idx in det_check["re_search_slots"]:
                 if det_idx not in failed_idxs:
                     failed_idxs.append(det_idx)

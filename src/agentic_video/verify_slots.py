@@ -118,7 +118,9 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
         idx = int(slot.get("slot_idx", 0))
         if slot_idxs is not None and idx not in set(slot_idxs):
             continue
-        if slot.get("status") != "supported":
+        # V5 P2（外审六轮）：uncertain ≠ 通过——有 source.video 的 uncertain
+        # 槽此前被验证器整体跳过（失败/恢复两条路都不含它）
+        if slot.get("status") not in {"supported", "uncertain"}:
             continue
         source = slot.get("source") or {}
         video = Path(str(source.get("video") or ""))
@@ -321,26 +323,61 @@ def localize_coarse_slots(cfg, story_plan: dict, *, runner,
         # 值落在窗口绝对范围内 → 直接当绝对坐标用。
         clip_duration = win_end - win_start
         if rel_start > clip_duration and win_start <= rel_start < win_end:
-            abs_start = rel_start                       # 绝对时间制式
+            ev_start = rel_start                        # 绝对时间制式
         else:
-            abs_start = min(win_end, max(win_start, win_start + rel_start))
-        abs_end = min(win_end, abs_start + budget)      # 锚点定起点，长度=预算
-        if abs_end - abs_start < min(budget, 2.0) - 1e-6:
+            ev_start = min(win_end, max(win_start, win_start + rel_start))
+        ev_end = (rel_end if win_start <= rel_end <= win_end
+                  else ev_start + 0.0)
+        ev_end = max(ev_end, ev_start + 0.5)            # 证据至少半秒可辨
+        ev_end = min(ev_end, win_end)
+        # V5 P2（外审六轮硬修改⑥-2）：**证据区间 ≠ 剪辑区间**——证据先完整
+        # 保留（旧代码 abs_end=start+budget 把 120-122s 的证据切成 120-125.5
+        # 再硬砍 122-125.5 的事件尾巴）；不足预算的余量做 pre/post roll：
+        # 对白偏前置（说话前的呼吸/反应），动作前后均衡（第一版简单实现）。
+        evidence_s = ev_end - ev_start
+        spare = max(0.0, budget - evidence_s)
+        lead = min(1.0, spare / 3.0) if spec.get("evidence_mode") in {"visual", None} \
+            else min(1.5, spare / 2.0)                  # 对白/both 更偏前置
+        cut_start = max(win_start, ev_start - lead)
+        cut_end = min(win_end, cut_start + max(budget, evidence_s + (spare - lead)))
+        if cut_end - cut_start < min(budget, 2.0) - 1e-6 and evidence_s < 2.0 - 1e-6:
             slot["status"], slot["reason"] = "unsupported", "coarse_unlocalizable(too_short)"
             entry["outcome"] = "rejected"
             entry["raw_head"] = str(parsed)[:200]
             log.append(entry)
             continue
-        source["start_s"], source["end_s"] = round(abs_start, 3), round(abs_end, 3)
+        flags = []
+        if evidence_s > budget + 1e-6:
+            # 证据本身超预算（如 7.5s 对白 vs 5.5s 槽）——不截断，标记交
+            # 槽长自适应（content_preserving 模式）扩槽
+            flags.append("evidence_exceeds_budget")
+            source["evidence_interval"] = [round(ev_start, 3), round(ev_end, 3)]
+        source["start_s"], source["end_s"] = round(cut_start, 3), round(cut_end, 3)
         source["anchor"] = "localized"
         source["caption"] = parsed["evidence"] or source.get("caption") or ""
-        entry.update({"outcome": "localized", "interval": [abs_start, abs_end],
+        entry.update({"outcome": "localized",
+                      "evidence_interval": [round(ev_start, 3), round(ev_end, 3)],
+                      "cut_interval": [round(cut_start, 3), round(cut_end, 3)],
+                      "flags": flags,
                       "evidence": parsed["evidence"], "confidence": parsed["confidence"]})
         log.append(entry)
     if log and output_dir is not None:
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(output_dir) / "localize_log.json").write_text(
-            json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+        # V5 P2：追加式日志（旧 write_text 覆盖——pipeline 里 localize 有
+        # 多个调用点，后一次把前一次的记录抹掉，验收时只剩最后一轮）
+        from datetime import datetime as _dt
+
+        log_path = Path(output_dir) / "localize_log.json"
+        try:
+            history = json.loads(log_path.read_text(encoding="utf-8"))
+            history = history if isinstance(history, list) else []
+        except (OSError, ValueError):
+            history = []
+        for row in log:
+            row["run_ts"] = _dt.now().isoformat(timespec="seconds")
+        history.extend(log)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps(history, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
     return log
 
 
@@ -466,3 +503,41 @@ def blind_video_check(video_path, *, runner) -> dict:
         "event_relations": str(payload.get("event_relations") or ""),
         "prompt_version": BLIND_VIDEO_PROMPT_VERSION,
     }
+
+
+# ---------------------------------------------------------------- 恢复状态机
+# V5 P2（外审六轮硬修改②）：失败→分类→对应工具。next_action 决定恢复路径：
+# 只有 index_insufficient（当前索引真没有）才触发 gap_watch 主动补看——
+# evidence_timing 是时间协议错误（素材可能就在眼前），identity_mismatch
+# 是绑定没确认好，都不是"去电影其他地方找"的理由。
+RECOVERY_NEXT_ACTION = {
+    "identity_mismatch": "verify_identity",     # 绑定复核，不换素材
+    "evidence_timing": "relocalize",            # 修时间协议重新定位
+    "evidence_mismatch": "retry_candidates",    # 换候选（层1→层2）
+    "localize_rejected": "relocalize_then_gap", # 先重定位，仍拒才 gap_watch
+    "index_insufficient": "gap_watch",          # 唯一直接触发主动补看
+    "budget_exhausted": "stop",                 # 恢复预算耗尽，如实 blocked
+}
+
+
+def classify_slot_failure(slot: dict, verdict: dict | None,
+                          det_check: dict | None = None) -> str:
+    """失败槽 → reason_code（恢复队列的消费键）。
+
+    判序（先具体后宽泛）：时间协议错（normalize 降级痕迹）> 身份缺人（det
+    violations 提及该槽）> 定位拒绝 > 重搜无候选 > 证据不匹配。"""
+    idx = int(slot.get("slot_idx", -1))
+    reason = str(slot.get("reason") or "")
+    failure = str((verdict or {}).get("failure_reason") or "")
+    if "evidence outside clip" in failure or "outside clip" in reason:
+        return "evidence_timing"
+    if det_check:
+        violations = "; ".join(str(v) for v in det_check.get("violations") or [])
+        compact = violations.replace(" ", "")
+        if f"[{idx}]" in compact or f",{idx}]" in compact or f"[{idx}," in compact:
+            return "identity_mismatch"          # det 点名该槽（缺人/未解释切换）
+    if "coarse_unlocalizable" in reason:
+        return "localize_rejected"
+    if "no eligible candidate" in reason or "index unavailable" in reason:
+        return "index_insufficient"
+    return "evidence_mismatch"
