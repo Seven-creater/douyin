@@ -96,6 +96,28 @@ def test_candidates_are_observations_not_self_assigned_functions(tmp_path):
     assert story["slots"][0]["source"]["required_evidence_interval"] == [12.0, 16.0]
 
 
+def test_candidate_preserves_container_and_usable_intervals(tmp_path):
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    story = _story(video)
+    story["source_scope"] = {"start_s": 5.0, "end_s": 35.0}
+    story["slots"][0]["source"]["required_evidence_interval"] = [12.0, 16.0]
+    rows = [{"start_s": 0.0, "end_s": 40.0, "dialogue": [
+        {"utterance_id": "core", "utterance_interval": [12.0, 16.0],
+         "original": "核心观点。"},
+    ]}]
+    candidates = build_editorial_candidates(
+        story, rows, [{"shot_idx": 1, "start_s": 2.0, "end_s": 8.0}],
+        runner=_Runner(), output_dir=tmp_path,
+        editorial={"candidate_min": 2, "candidate_max": 5})
+    visual = next(row for row in candidates if row["kind"] == "visual")
+    dialogue = next(row for row in candidates if row["kind"] == "dialogue")
+    assert dialogue["container_interval"] == [0.0, 40.0]
+    assert dialogue["source_interval"] == [12.0, 16.0]
+    assert visual["container_interval"] == [2.0, 8.0]
+    assert visual["source_interval"] == [5.0, 8.0]
+
+
 def test_two_candidates_are_allowed_but_one_is_blocked(tmp_path):
     video = tmp_path / "source.mp4"
     video.write_bytes(b"video")

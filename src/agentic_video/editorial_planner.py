@@ -144,8 +144,10 @@ def _dialogue_rows(scoped_rows: list[dict], scope: tuple[float, float]) -> list[
             if key in seen:
                 continue
             seen.add(key)
+            container = _interval([source.get("start_s"), source.get("end_s")])
             rows.append({
                 "kind": "dialogue", "source_interval": list(interval),
+                "container_interval": list(container or interval),
                 "utterance_ids": [str(line.get("utterance_id") or "")],
                 "utterance_intervals": [list(interval)],
                 "transcript_text": str(line.get("original") or
@@ -170,6 +172,7 @@ def _shot_rows(shots: list[dict], scope: tuple[float, float], *,
             continue
         rows.append({
             "kind": "visual", "source_interval": list(clipped),
+            "container_interval": list(interval),
             "shot_ids": [shot.get("shot_idx", shot.get("index"))],
             "utterance_ids": [], "utterance_intervals": [],
             "transcript_text": "", "dialogue": [],
