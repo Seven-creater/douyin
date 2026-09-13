@@ -647,15 +647,20 @@ def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path
     output_dir.mkdir(parents=True, exist_ok=True)
     source_out = output_dir / "source_only" / "rendered.mp4"
     mix_out = output_dir / "bgm_mix" / "rendered.mp4"
+    source_audio = content_master.parent / "source_audio.m4a"
     source_out.parent.mkdir(parents=True, exist_ok=True); mix_out.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(content_master, source_out)
     ffmpeg_bin = cfg.perception.get("ffmpeg_bin", "ffmpeg")
+    extract_args = ["-y", "-loglevel", "error", "-i", str(content_master),
+                    "-map", "0:a:0", "-vn", "-c:a", "copy", str(source_audio)]
+    common.run_ffmpeg(ffmpeg_bin, extract_args, timeout_s=300)
     render_duration = float(duration_s) if duration_s is not None else None
     fade_out = max(0.0, render_duration - 1.0) if render_duration is not None else 0.0
-    audio_filter = (f"[1:a]volume={2 * float(mix_volume):g},afade=t=in:st=0:d=0.5,"
+    audio_filter = (f"[2:a]volume={2 * float(mix_volume):g},afade=t=in:st=0:d=0.5,"
                     f"afade=t=out:st={fade_out:g}:d=1.0[bg];"
-                    "[0:a]volume=2.0[ra];[ra][bg]amix=inputs=2:duration=first[au]")
-    args = ["-y", "-loglevel", "error", "-i", str(content_master), "-stream_loop", "-1", "-i", str(bgm_path),
+                    "[1:a]volume=2.0[ra];[ra][bg]amix=inputs=2:duration=first[au]")
+    args = ["-y", "-loglevel", "error", "-i", str(content_master),
+            "-i", str(source_audio), "-stream_loop", "-1", "-i", str(bgm_path),
             "-filter_complex", audio_filter, "-map", "0:v:0", "-map", "[au]"]
     if render_duration is not None:
         args += ["-t", f"{render_duration:g}"]
@@ -670,10 +675,13 @@ def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path
     if frames != mix_frames:
         raise RuntimeError("audio variants changed video frames")
     manifest = {"content_master": str(content_master), "content_master_sha256": master_hash,
+                "source_audio": str(source_audio),
+                "source_audio_sha256": _sha256_file(source_audio),
                 "source_only": {"path": str(source_out), "sha256": source_hash, "frame_md5": frames},
                 "bgm_mix": {"path": str(mix_out), "sha256": mix_hash, "frame_md5": mix_frames,
                             "bgm_sha256": _sha256_file(bgm_path), "bgm_path": str(bgm_path),
                             "mix_volume": float(mix_volume), "fade_in_s": 0.5, "fade_out_s": 1.0},
-                "video_identical": frames == mix_frames, "commands": [args]}
+                "video_identical": frames == mix_frames,
+                "commands": [extract_args, args]}
     (output_dir / "audio_variants_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"source_only": source_out, "bgm_mix": mix_out}

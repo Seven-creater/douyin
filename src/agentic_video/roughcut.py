@@ -362,7 +362,8 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
     variants = {name: Path(str((automated.get("variants") or {}).get(name) or ""))
                 for name in ("source_only", "bgm_mix")}
     master = Path(str(automated.get("content_master") or ""))
-    artifacts = {"content_master": master, **variants}
+    source_audio = Path(str(audio_manifest.get("source_audio") or ""))
+    artifacts = {"content_master": master, "source_audio": source_audio, **variants}
     missing = [name for name, path in artifacts.items() if not path.is_file()]
     if missing:
         _failure(output_dir, "infrastructure", [f"acceptance_artifact_missing:{name}" for name in missing])
@@ -371,6 +372,9 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
     if _sha256_file(master) != expected_master:
         _failure(output_dir, "infrastructure", ["content_master_hash_mismatch"])
         raise RuntimeError("roughcut blocked: content master changed")
+    if _sha256_file(source_audio) != str(audio_manifest.get("source_audio_sha256") or ""):
+        _failure(output_dir, "infrastructure", ["source_audio_hash_mismatch"])
+        raise RuntimeError("roughcut blocked: source audio changed")
     for name, path in variants.items():
         expected = str((audio_manifest.get(name) or {}).get("sha256") or "")
         if not expected or _sha256_file(path) != expected:
@@ -381,7 +385,7 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
         json.dumps(human, ensure_ascii=False, indent=2), encoding="utf-8")
     evidence = {"automated_acceptance": str(automated_path),
                 "variants": {name: str(path) for name, path in variants.items()},
-                "content_master": str(master)}
+                "content_master": str(master), "source_audio": str(source_audio)}
     if human_reasons:
         failure_class = ("audio" if any("speech" in reason or "music" in reason
                                         for reason in human_reasons) else "content")
@@ -399,7 +403,8 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
                 "acceptance": str(output_dir / "acceptance.json"),
                 **{key: automated[key] for key in (
                     "story_plan_sha256", "retrieval_sha256",
-                    "content_master_sha256", "content_frames_framemd5")}}
+                    "content_master_sha256", "source_audio_sha256",
+                    "content_frames_framemd5")}}
     (output_dir / "render_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_dir / "rendered.mp4"
@@ -566,11 +571,12 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     audio_manifest = json.loads((output_dir / "variants" / "audio_variants_manifest.json").read_text(encoding="utf-8"))
     shared = {"story_plan_sha256": plan["story_plan_sha256"], "retrieval_sha256": retrieval_hash,
               "content_master_sha256": _sha256_file(master_path),
+              "source_audio_sha256": audio_manifest["source_audio_sha256"],
               "content_frames_framemd5": audio_manifest["source_only"]["frame_md5"]}
     variant_paths = {key: str(value) for key, value in variants.items()}
     for variant_name in ("source_only", "bgm_mix"):
         variant_manifest = {**shared, "audio_variant": variant_name,
-                            "audio_sha256": audio_manifest[variant_name]["sha256"]}
+                            "audio_variant_sha256": audio_manifest[variant_name]["sha256"]}
         (output_dir / "variants" / variant_name / "manifest.json").write_text(
             json.dumps(variant_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     gate_evidence = {"variants": variant_paths, "content_master": str(master_path), **shared}

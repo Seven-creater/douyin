@@ -141,7 +141,9 @@ def test_finalize_delivery_only_after_human_acceptance(tmp_path):
     source = variants_dir / "source_only" / "rendered.mp4"
     mix = variants_dir / "bgm_mix" / "rendered.mp4"
     master = tmp_path / "content_master.mp4"
-    for path, payload in ((source, b"source"), (mix, b"mix"), (master, b"master")):
+    source_audio = tmp_path / "source_audio.m4a"
+    for path, payload in ((source, b"source"), (mix, b"mix"),
+                          (master, b"master"), (source_audio, b"audio")):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
     digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -150,6 +152,7 @@ def test_finalize_delivery_only_after_human_acceptance(tmp_path):
         "variants": {"source_only": str(source), "bgm_mix": str(mix)},
         "content_master": str(master),
         "content_master_sha256": digest(master),
+        "source_audio_sha256": digest(source_audio),
         "story_plan_sha256": "story",
         "retrieval_sha256": "retrieval",
         "content_frames_framemd5": "frames",
@@ -158,6 +161,8 @@ def test_finalize_delivery_only_after_human_acceptance(tmp_path):
         json.dumps(automated), encoding="utf-8")
     (variants_dir / "audio_variants_manifest.json").write_text(json.dumps({
         "video_identical": True,
+        "source_audio": str(source_audio),
+        "source_audio_sha256": digest(source_audio),
         "source_only": {"sha256": digest(source)},
         "bgm_mix": {"sha256": digest(mix)},
     }), encoding="utf-8")
