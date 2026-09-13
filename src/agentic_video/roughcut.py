@@ -69,6 +69,9 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int,
         arc = [{"role": "context", "event_ids": [e["id"] for e in events[:2]]}]
     win_start = min(float(r.get("start_s") or 0) for r in rows)
     win_end = max(float(r.get("end_s") or 0) for r in rows)
+    for event in events:                      # 相对化：validate 以参考时长为界
+        event["interval"] = [round(event["interval"][0] - win_start, 3),
+                             round(event["interval"][1] - win_start, 3)]
     # participants 换成合成实体 id（validate 要求 id 在 entities 内）：
     # 事件区间与镜头重叠的实体名 → 对应合成实体
     for event in events:
@@ -83,7 +86,9 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int,
         "reference": {"id": f"roughcut_w{window_idx}",
                       "uri": reference_uri, "sha256": "",
                       "duration_s": round(win_end - win_start, 3), "fps": 24.0},
-        "provenance": {"model": ROUGHCAST_PROGRAM_SOURCE},
+        "provenance": {"model": ROUGHCAST_PROGRAM_SOURCE,
+                     "prompt_version": "roughcut_v1",
+                     "tool_calls": [], "seed": ""},
         "status": "supported",
         "evidence": [{"source": f"window_{window_idx}_annotations"}],
         "intent": {"topic": "素材侧粗剪控制实验（单窗保真搬运）",
