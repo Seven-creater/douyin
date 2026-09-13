@@ -219,12 +219,15 @@ def _build_plan(rows: list[dict], spec: dict, spec_hash: str, *, theme: str, vid
         source = _source_from_row(row, scope, {**stage, "id": stage_id})
         required = bool(stage.get("required"))
         status = "supported" if row and source["end_s"] > source["start_s"] else "unsupported"
+        focus_query = str((spec.get("focus_utterance") or {}).get("query") or "")
+        purpose = str(stage.get("purpose") or stage_id)
+        stage_need = f"{purpose}：{focus_query}" if stage_id == "core_statement" and focus_query else purpose
         slots.append({
             "slot_idx": index, "stage_id": stage_id, "role": _stage_role(stage_id, index), "required": required,
             "target_interval": [0.0, 0.0], "source": source, "status": status,
             "reason": "" if status == "supported" else ("required_stage_no_evidence" if required else "optional_stage_no_evidence"),
             "transition_reason": "opening" if index == 0 else ("cutaway" if not required else "entity_continuity"),
-            "need_spec": {"required": required, "need": stage.get("purpose") or stage_id, "must_have": [stage.get("purpose") or stage_id], "must_not": [], "evidence_mode": stage.get("evidence_type") or "both", "entity_requirements": {}, "stage_id": stage_id},
+            "need_spec": {"required": required, "need": stage_need, "must_have": [stage_need], "must_not": [], "evidence_mode": stage.get("evidence_type") or "both", "entity_requirements": {}, "stage_id": stage_id},
         })
     active = [slot for slot in slots if slot["status"] in {"supported", "uncertain"}]
     each = preferred / max(1, len(active))
