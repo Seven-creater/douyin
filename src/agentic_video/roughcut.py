@@ -17,7 +17,8 @@ from src.config import AppConfig, repo_root
 
 logger = logging.getLogger(__name__)
 ROUGHCAST_PROGRAM_SOURCE = "roughcut_spec"
-FAILURE_CLASSES = {"content", "scope", "verification", "infrastructure", "audio", "budget"}
+FAILURE_CLASSES = {"content", "scope", "verification", "infrastructure", "audio",
+                   "budget", "editorial"}
 
 
 def _sha256_json(value: object) -> str:
@@ -33,8 +34,9 @@ def _read_spec(spec: Path | dict) -> tuple[dict, str]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     else:
         payload = deepcopy(spec)
-    if not isinstance(payload, dict) or payload.get("spec_version") != "roughcut_v2":
-        raise ValueError("roughcut spec_version must be roughcut_v2")
+    if not isinstance(payload, dict) or payload.get("spec_version") not in {
+            "roughcut_v2", "roughcut_v3"}:
+        raise ValueError("roughcut spec_version must be roughcut_v2 or roughcut_v3")
     required = {"source", "source_scope", "focus_utterance", "stages", "duration", "audio_variants"}
     missing = sorted(required - set(payload))
     if missing:
@@ -53,6 +55,19 @@ def _read_spec(spec: Path | dict) -> tuple[dict, str]:
         if not isinstance(stage, dict) or not str(stage.get("id") or "").strip() \
                 or not str(stage.get("purpose") or "").strip():
             raise ValueError(f"roughcut stage[{index}] requires id and purpose")
+    if payload["spec_version"] == "roughcut_v3":
+        editorial = payload.get("editorial")
+        if not isinstance(editorial, dict):
+            raise ValueError("roughcut_v3 requires editorial policy")
+        if int(editorial.get("candidate_min", 0)) != 2 \
+                or int(editorial.get("candidate_max", 0)) != 5:
+            raise ValueError("roughcut_v3 editorial candidates must be 2..5")
+        if editorial.get("variant_ids") != [
+                "viewpoint", "question_answer", "core_close"]:
+            raise ValueError("roughcut_v3 editorial variant_ids invalid")
+        if editorial.get("av_sync") != "locked" \
+                or editorial.get("source_order") != "chronological":
+            raise ValueError("roughcut_v3 requires locked chronological editing")
     return payload, _sha256_json(payload)
 
 
@@ -254,7 +269,7 @@ def _build_plan(rows: list[dict], spec: dict, spec_hash: str, *, theme: str, vid
         "plan_complete": not any(slot["status"] == "unsupported" and slot["required"] for slot in slots),
         "entity_contract": {"protagonist": None, "persistence": "local_scene_ids", "relaxed": True}, "narrative_form": {"name": "explicit_stages", "slot_functions": [slot["stage_id"] for slot in slots]},
         "roughcut_spec": deepcopy(spec), "roughcut_spec_sha256": spec_hash,
-        "provenance": {"program_source": ROUGHCAST_PROGRAM_SOURCE, "roughcut_spec_sha256": spec_hash, "source_sha256": source_hash, "transcript_sha256": transcript_hash, "input_hash": _sha256_json([{k: row.get(k) for k in ("video", "window_idx", "start_s", "end_s", "event_id")} for row in rows]), "stage_schema": "roughcut_v2"},
+        "provenance": {"program_source": ROUGHCAST_PROGRAM_SOURCE, "roughcut_spec_sha256": spec_hash, "source_sha256": source_hash, "transcript_sha256": transcript_hash, "input_hash": _sha256_json([{k: row.get(k) for k in ("video", "window_idx", "start_s", "end_s", "event_id")} for row in rows]), "stage_schema": str(spec.get("spec_version") or "roughcut_v2")},
         "source_video": video,
     }
 
@@ -284,7 +299,8 @@ def _failure(output_dir: Path, failure_class: str, reasons: list[str], *,
     (output_dir / "render_manifest.json").write_text(json.dumps({"delivery": "blocked", "acceptance": payload}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _roughcut_blind_reasons(blinds: dict) -> tuple[list[str], float]:
+def _roughcut_blind_reasons(blinds: dict, *,
+                            editorial_required: bool = False) -> tuple[list[str], float]:
     """Evaluate the roughcut contract, not the full-story protagonist contract.
 
     ``consistent_protagonist`` belongs to the general multi-scene story gate.  A
@@ -307,6 +323,15 @@ def _roughcut_blind_reasons(blinds: dict) -> tuple[list[str], float]:
             reasons.append(f"blind_{name}_addressee_missing")
         if report.get("speaker_addressee_stable") is not True:
             reasons.append(f"blind_{name}_speaker_addressee_unstable")
+        if editorial_required:
+            if report.get("opening_reason_clear") is not True:
+                reasons.append(f"blind_{name}_opening_reason_unclear")
+            if report.get("functionless_span_present") is not False:
+                reasons.append(f"blind_{name}_functionless_span")
+            if report.get("transitions_have_clear_function") is not True:
+                reasons.append(f"blind_{name}_transitions_unclear")
+            if report.get("ending_intentional") is not True:
+                reasons.append(f"blind_{name}_ending_unintentional")
         if report.get("speech_clear") is not True:
             reasons.append(f"blind_{name}_speech_unclear")
         if name == "bgm_mix" and report.get("music_present") is not True:
@@ -321,7 +346,8 @@ def _roughcut_blind_reasons(blinds: dict) -> tuple[list[str], float]:
     return reasons, similarity
 
 
-def _human_acceptance_reasons(payload: dict | None) -> list[str]:
+def _human_acceptance_reasons(payload: dict | None, *,
+                              editorial_required: bool = False) -> list[str]:
     """Return the explicit manual gate failures required for final delivery."""
     if payload is None:
         return ["human_acceptance_pending"]
@@ -335,6 +361,12 @@ def _human_acceptance_reasons(payload: dict | None) -> list[str]:
                   "bgm_mix_music_present"):
         if payload.get(field) is not True:
             reasons.append(f"human_{field}_not_confirmed")
+    if editorial_required:
+        for field in ("core_meaning_preserved", "opening_reason_clear",
+                      "no_functionless_shots", "all_cuts_have_editorial_reason",
+                      "ending_intentional"):
+            if payload.get(field) is not True:
+                reasons.append(f"human_{field}_not_confirmed")
     return reasons
 
 
@@ -374,6 +406,12 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
     master = Path(str(automated.get("content_master") or ""))
     source_audio = Path(str(audio_manifest.get("source_audio") or ""))
     artifacts = {"content_master": master, "source_audio": source_audio, **variants}
+    editorial_artifacts = {
+        "editorial_candidates": output_dir / "editorial_candidates.json",
+        "edit_plan_candidates": output_dir / "edit_plan_candidates.json",
+        "edit_plan": output_dir / "edit_plan.json",
+    } if automated.get("edit_plan_sha256") else {}
+    artifacts.update(editorial_artifacts)
     missing = [name for name, path in artifacts.items() if not path.is_file()]
     if missing:
         _failure(output_dir, "infrastructure", [f"acceptance_artifact_missing:{name}" for name in missing])
@@ -390,7 +428,17 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
         if not expected or _sha256_file(path) != expected:
             _failure(output_dir, "infrastructure", [f"{name}_hash_mismatch"])
             raise RuntimeError("roughcut blocked: audio variant changed")
-    human_reasons = _human_acceptance_reasons(human)
+    for name, path in editorial_artifacts.items():
+        expected = str(automated.get(f"{name}_sha256") or "")
+        try:
+            actual = _sha256_json(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            actual = ""
+        if not expected or actual != expected:
+            _failure(output_dir, "infrastructure", [f"{name}_hash_mismatch"])
+            raise RuntimeError("roughcut blocked: editorial evidence changed")
+    human_reasons = _human_acceptance_reasons(
+        human, editorial_required=bool(automated.get("edit_plan_sha256")))
     (output_dir / "human_acceptance.json").write_text(
         json.dumps(human, ensure_ascii=False, indent=2), encoding="utf-8")
     evidence = {"automated_acceptance": str(automated_path),
@@ -409,21 +457,31 @@ def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) 
         json.dumps(acceptance, ensure_ascii=False, indent=2), encoding="utf-8")
     shutil.copy2(variants["bgm_mix"], output_dir / "rendered.mp4")
     manifest = {"delivery": "passed", "primary_variant": "bgm_mix",
-                "variants": {name: str(path) for name, path in variants.items()},
-                "acceptance": str(output_dir / "acceptance.json"),
-                **{key: automated[key] for key in (
-                    "story_plan_sha256", "retrieval_sha256",
-                    "content_master_sha256", "source_audio_sha256",
-                    "content_frames_framemd5")}}
+                 "variants": {name: str(path) for name, path in variants.items()},
+                 "acceptance": str(output_dir / "acceptance.json"),
+                 **{key: automated[key] for key in (
+                     "story_plan_sha256", "retrieval_sha256",
+                     "content_master_sha256", "source_audio_sha256",
+                     "content_frames_framemd5")},
+                 **{key: automated[key] for key in (
+                     "editorial_candidates_sha256", "edit_plan_candidates_sha256",
+                     "edit_plan_sha256", "selected_edit_plan_id")
+                    if automated.get(key) is not None}}
     (output_dir / "render_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return output_dir / "rendered.mp4"
 
 
 def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | None = None, *, theme: str = "", output_dir: Path, target_duration_s: float | None = None, runner=None, force: bool = False, spec: Path | dict | None = None, allow_unverified: bool = False, human_acceptance: Path | dict | None = None) -> Path:
-    """Run the complete V5 roughcut gate. ``allow_unverified`` is test-only."""
+    """Run the complete V5.1 roughcut gate. ``allow_unverified`` is test-only."""
+    from src.agentic_video.editorial_planner import (
+        build_editorial_candidates, edit_plan_execution_inputs,
+        evaluate_edit_plan, plan_edit_variants, review_editorial_preview,
+        select_edit_plan)
     from src.agentic_video.recipe_v2 import new_recipe
-    from src.agentic_video.renderer import derive_audio_variants, render_recipe
+    from src.agentic_video.renderer import (derive_audio_variants,
+                                             render_editorial_preview,
+                                             render_recipe)
     from src.agentic_video.story_planner import fit_slot_intervals, story_plan_execution_inputs, validate_story_plan
     from src.agentic_video.verify_slots import blind_video_check, deterministic_story_check, localize_coarse_slots, verify_slots
     from src.library.build_index import load_index
@@ -438,6 +496,10 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
             return output_dir / "rendered.mp4"
     spec = spec or repo_root() / "config" / "roughcuts" / "lxh1_w15.json"
     rough_spec, spec_hash = _read_spec(spec)
+    editorial_mode = rough_spec.get("spec_version") == "roughcut_v3"
+    if not editorial_mode and not allow_unverified:
+        _failure(output_dir, "editorial", ["legacy_spec_not_editorial"])
+        raise RuntimeError("roughcut blocked: roughcut_v3 required for delivery")
     if target_duration_s is not None:
         requested = float(target_duration_s)
         if not float(rough_spec["duration"].get("min_s", 12.0)) <= requested <= float(rough_spec["duration"].get("max_s", 26.4)):
@@ -469,6 +531,7 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     if not scoped:
         _failure(output_dir, "content", ["no_scoped_candidates"]); raise RuntimeError("roughcut blocked: no scoped candidates")
     ingestion_manifest = cfg.paths.library_dir / "shots" / f"{source}__narrative" / "result.json"
+    ingestion = {}
     try:
         ingestion = json.loads(ingestion_manifest.read_text(encoding="utf-8"))
         video_sha256 = str((ingestion.get("params") or {}).get("video_sha256") or "")
@@ -525,13 +588,15 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     if verification.get("failed_slots") or verification.get("uncertain_slots"):
         _failure(output_dir, "verification", [f"verify_failed:{verification.get('failed_slots')}", f"verify_uncertain:{verification.get('uncertain_slots')}"])
         raise RuntimeError("roughcut blocked: verification")
-    try:
-        fit_slot_intervals(plan, mode="content_preserving")
-    except ValueError as exc:
-        _failure(output_dir, "budget", [str(exc)]); raise
-    plan_errors = validate_story_plan(plan)
-    if plan_errors:
-        _failure(output_dir, "scope", plan_errors); raise RuntimeError("roughcut blocked after duration fit")
+    if not editorial_mode:
+        try:
+            fit_slot_intervals(plan, mode="content_preserving")
+        except ValueError as exc:
+            _failure(output_dir, "budget", [str(exc)]); raise
+        plan_errors = validate_story_plan(plan)
+        if plan_errors:
+            _failure(output_dir, "scope", plan_errors)
+            raise RuntimeError("roughcut blocked after duration fit")
     plan_for_hash = deepcopy(plan)
     plan_for_hash.pop("story_plan_sha256", None)
     plan_for_hash.pop("retrieval_sha256", None)
@@ -543,19 +608,126 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     if allow_unverified:
         _failure(output_dir, "infrastructure", ["allow_unverified_offline_test"]); raise RuntimeError("roughcut is not deliverable when allow_unverified=true")
     (output_dir / "story_plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    edit_artifacts = {}
+    selected_edit_plan = None
+    editorial_candidates = []
+    if editorial_mode:
+        settings = rough_spec["editorial"]
+        shots = list(((ingestion.get("output") or {}).get("shots") or []))
+        try:
+            editorial_candidates = build_editorial_candidates(
+                plan, scoped, shots, runner=runner, output_dir=output_dir,
+                editorial=settings)
+        except RuntimeError as exc:
+            _failure(output_dir, "editorial", [str(exc)])
+            raise
+        except Exception as exc:
+            _failure(output_dir, "infrastructure", [
+                f"editorial_candidates:{type(exc).__name__}:{exc}"])
+            raise
+        candidates_path = output_dir / "editorial_candidates.json"
+        candidates_path.write_text(json.dumps(editorial_candidates, ensure_ascii=False,
+                                              indent=2), encoding="utf-8")
+        candidates_hash = _sha256_json(editorial_candidates)
+        try:
+            plan_candidates = plan_edit_variants(
+                plan, editorial_candidates, runner=runner, output_dir=output_dir)
+        except Exception as exc:
+            _failure(output_dir, "infrastructure", [
+                f"edit_plan:{type(exc).__name__}:{exc}"])
+            raise
+        plan_candidates_path = output_dir / "edit_plan_candidates.json"
+        plan_candidates_path.write_text(json.dumps(plan_candidates, ensure_ascii=False,
+                                                   indent=2), encoding="utf-8")
+        plan_candidates_hash = _sha256_json(plan_candidates)
+        edit_checks = {}
+        edit_reviews = {}
+        preview_paths = {}
+        seen_sequences = {}
+        for variant in plan_candidates["variants"]:
+            plan_id = str(variant["plan_id"])
+            check = evaluate_edit_plan(variant, plan, editorial_candidates,
+                                       editorial=settings)
+            sequence = tuple(row.get("candidate_id")
+                             for row in variant.get("segments") or [])
+            if check["passed"] and sequence in seen_sequences:
+                check["passed"] = False
+                check["errors"].append(
+                    f"duplicate_edit_sequence:{seen_sequences[sequence]}")
+            elif check["passed"]:
+                seen_sequences[sequence] = plan_id
+            edit_checks[plan_id] = check
+            if not check["passed"]:
+                continue
+            preview_asset, preview_retrieval = edit_plan_execution_inputs(
+                variant, plan, editorial_candidates,
+                audio_policy={"audio_mode": "source"})
+            try:
+                preview = render_editorial_preview(
+                    cfg, preview_asset, preview_retrieval,
+                    output_dir / "editorial_previews" / plan_id)
+                preview_paths[plan_id] = str(preview)
+                edit_reviews[plan_id] = review_editorial_preview(preview, runner=runner)
+            except Exception as exc:
+                _failure(output_dir, "infrastructure", [
+                    f"editorial_preview_{plan_id}:{type(exc).__name__}:{exc}"],
+                    evidence={"editorial_previews": preview_paths})
+                raise
+        (output_dir / "editorial_verification.json").write_text(json.dumps({
+            "deterministic": edit_checks, "blind_reviews": edit_reviews,
+            "previews": preview_paths,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        selected_edit_plan, edit_gate = select_edit_plan(
+            plan_candidates["variants"], edit_checks, edit_reviews)
+        (output_dir / "editorial_gate.json").write_text(
+            json.dumps(edit_gate, ensure_ascii=False, indent=2), encoding="utf-8")
+        if selected_edit_plan is None:
+            reasons = sorted({reason for row in edit_gate["rankings"]
+                              for reason in row.get("reasons") or []}) \
+                or ["no_eligible_edit_plan"]
+            failure_class = ("infrastructure" if any(
+                reason == "editorial_preview_parse_failed" for reason in reasons)
+                else "editorial")
+            debug = Path(next(iter(preview_paths.values()))) if preview_paths else None
+            _failure(output_dir, failure_class, reasons, debug=debug,
+                     evidence={"editorial_previews": preview_paths})
+            raise RuntimeError("roughcut blocked: editorial gate")
+        edit_plan_path = output_dir / "edit_plan.json"
+        edit_plan_path.write_text(json.dumps(selected_edit_plan, ensure_ascii=False,
+                                             indent=2), encoding="utf-8")
+        edit_artifacts = {
+            "editorial_candidates_sha256": candidates_hash,
+            "edit_plan_candidates_sha256": plan_candidates_hash,
+            "edit_plan_sha256": _sha256_json(selected_edit_plan),
+            "selected_edit_plan_id": selected_edit_plan["plan_id"],
+            "editorial_previews": preview_paths,
+        }
+
+    render_duration = (float(selected_edit_plan["duration_s"])
+                       if selected_edit_plan else float(plan["target_duration_s"]))
     recipe = new_recipe(reference_id=plan["reference_id"], reference_uri=video,
                         sha256=str(plan["provenance"].get("source_sha256") or ""),
-                        duration_s=float(plan["target_duration_s"]), fps=24.0)
+                        duration_s=render_duration, fps=24.0)
     bgm_setting = str((cfg.library.get("narrative_render") or {}).get("bgm_path") or "data/library/bgm/template_7682.m4a")
     bgm_path = Path(bgm_setting) if Path(bgm_setting).is_absolute() else repo_root() / bgm_setting
     bgm_hash = hashlib.sha256(bgm_path.read_bytes()).hexdigest() if bgm_path.exists() else None
-    asset_plan, retrieval = story_plan_execution_inputs(plan, recipe, audio_policy={"audio_mode": "source", "bgm_volume": 0.25, "bgm_path": str(bgm_path), "bgm_sha256": bgm_hash})
+    audio_policy = {"audio_mode": "source", "bgm_volume": 0.25,
+                    "bgm_path": str(bgm_path), "bgm_sha256": bgm_hash}
+    if selected_edit_plan:
+        asset_plan, retrieval = edit_plan_execution_inputs(
+            selected_edit_plan, plan, editorial_candidates,
+            audio_policy=audio_policy)
+    else:
+        asset_plan, retrieval = story_plan_execution_inputs(
+            plan, recipe, audio_policy=audio_policy)
     retrieval_hash = _sha256_json(retrieval)
     plan["retrieval_sha256"] = retrieval_hash
     asset_plan["story_plan_sha256"] = plan["story_plan_sha256"]
     asset_plan["retrieval_sha256"] = retrieval_hash
     asset_plan["source_sha256"] = plan["provenance"].get("source_sha256")
     asset_plan["transcript_sha256"] = plan["provenance"].get("transcript_sha256")
+    asset_plan.update(edit_artifacts)
     try:
         content_master = render_recipe(cfg, recipe, asset_plan, retrieval,
                                        output_dir / "content_master_render", force=True)
@@ -564,7 +736,9 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
         raise
     master_path = output_dir / "content_master.mp4"; shutil.copy2(content_master, master_path)
     try:
-        variants = derive_audio_variants(cfg, master_path, output_dir / "variants", bgm_path=bgm_path, mix_volume=0.25, duration_s=float(plan["target_duration_s"]))
+        variants = derive_audio_variants(cfg, master_path, output_dir / "variants",
+                                         bgm_path=bgm_path, mix_volume=0.25,
+                                         duration_s=render_duration)
     except FileNotFoundError as exc:
         _failure(output_dir, "audio", [f"bgm_missing:{exc}"]); raise
     except Exception as exc:
@@ -576,13 +750,15 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
         except Exception as exc:
             _failure(output_dir, "infrastructure", [f"blind_{name}:{type(exc).__name__}:{exc}"]); raise
     (output_dir / "blind_review.json").write_text(json.dumps(blinds, ensure_ascii=False, indent=2), encoding="utf-8")
-    reasons, recap_similarity = _roughcut_blind_reasons(blinds)
+    reasons, recap_similarity = _roughcut_blind_reasons(
+        blinds, editorial_required=editorial_mode)
     from src.agentic_video.renderer import _sha256_file
     audio_manifest = json.loads((output_dir / "variants" / "audio_variants_manifest.json").read_text(encoding="utf-8"))
     shared = {"story_plan_sha256": plan["story_plan_sha256"], "retrieval_sha256": retrieval_hash,
               "content_master_sha256": _sha256_file(master_path),
               "source_audio_sha256": audio_manifest["source_audio_sha256"],
-              "content_frames_framemd5": audio_manifest["source_only"]["frame_md5"]}
+              "content_frames_framemd5": audio_manifest["source_only"]["frame_md5"],
+              **edit_artifacts}
     variant_paths = {key: str(value) for key, value in variants.items()}
     for variant_name in ("source_only", "bgm_mix"):
         variant_manifest = {**shared, "audio_variant": variant_name,
@@ -591,13 +767,22 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
             json.dumps(variant_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     gate_evidence = {"variants": variant_paths, "content_master": str(master_path), **shared}
     if reasons:
-        failure_class = "audio" if any("speech" in reason or "music" in reason for reason in reasons) else "content"
+        if any("parse_failed" in reason for reason in reasons):
+            failure_class = "infrastructure"
+        elif any("speech" in reason or "music" in reason for reason in reasons):
+            failure_class = "audio"
+        elif editorial_mode and any(token in reason for reason in reasons for token in (
+                "opening", "functionless", "transition", "ending")):
+            failure_class = "editorial"
+        else:
+            failure_class = "content"
         _failure(output_dir, failure_class, reasons, debug=variants["bgm_mix"],
                  evidence=gate_evidence)
         raise RuntimeError("roughcut blocked: blind acceptance")
     automated = {"passed": True, "gate": "automated", "delivery": "awaiting_human",
                  "reasons": [], "variants": variant_paths,
                  "content_master": str(master_path),
+                 "duration_s": render_duration,
                  "blind_summary_similarity": round(recap_similarity, 4), **shared}
     automated_path = output_dir / "automated_acceptance.json"
     automated_path.write_text(json.dumps(automated, ensure_ascii=False, indent=2),

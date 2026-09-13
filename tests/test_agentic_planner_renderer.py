@@ -293,6 +293,21 @@ def test_render_cache_key_sensitive_to_copy_track():
     assert a["sha256"] != b["sha256"]
 
 
+def test_render_cache_key_sensitive_to_selected_edit_plan():
+    from src.agentic_video.renderer import render_cache_key
+
+    recipe = _recipe()
+    retrieval = [{"slot_idx": 0, "picked": {
+        "video": "a.mp4", "source_start_s": 10, "source_end_s": 16}}]
+    base = {"slots": [{"slot_idx": 0, "start_s": 0, "end_s": 6}],
+            "edit_plan_sha256": "plan-a", "selected_edit_plan_id": "viewpoint"}
+    changed = {**base, "edit_plan_sha256": "plan-b"}
+    kwargs = {"canvas_width": 1920, "canvas_height": 1080,
+              "narrative_mode": True}
+    assert render_cache_key(recipe, base, retrieval, **kwargs)["sha256"] != \
+        render_cache_key(recipe, changed, retrieval, **kwargs)["sha256"]
+
+
 def test_scaled_recipe_strips_reference_text_ops_for_narrative_render():
     """2026-09-10 v5 帧验：参考 Recipe 的 text_layer_animation（黄色 NANCHANG 字幕
     转录）被 drawtext 烧到鬼灭画面上。叙事执行视图必须剔除文字层；缩放与否都剔。"""

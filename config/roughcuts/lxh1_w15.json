@@ -1,5 +1,5 @@
 {
-  "spec_version": "roughcut_v2",
+  "spec_version": "roughcut_v3",
   "source": "luoxiaohei1",
   "base_window": 15,
   "source_scope": {
@@ -36,6 +36,18 @@
     "preferred_s": 22.0,
     "min_s": 12.0,
     "max_s": 26.4
+  },
+  "editorial": {
+    "candidate_min": 2,
+    "candidate_target_min": 3,
+    "candidate_target_max": 5,
+    "candidate_max": 5,
+    "variant_ids": ["viewpoint", "question_answer", "core_close"],
+    "render_strategy": "preview_all_ranked_top1",
+    "av_sync": "locked",
+    "source_order": "chronological",
+    "min_segments": 2,
+    "min_source_gap_s": 0.25
   },
   "audio_variants": ["source_only", "bgm_mix"]
 }

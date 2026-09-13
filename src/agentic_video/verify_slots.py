@@ -515,7 +515,7 @@ BLIND_VIDEO_PROMPT = """你是第一次观看这条短视频的观众，没有�
 写 false 并在 switch_points 给出大致时间；不确定也写 false 并说明原因。
 画面内字幕/烧录文字属于视频内容，可作判断依据。"""
 
-BLIND_VIDEO_PROMPT_VERSION = "blind_v3"   # V5：粗剪另报可复述的核心判断与局部说话关系
+BLIND_VIDEO_PROMPT_VERSION = "blind_v4"   # V5.1：增加真实成片的编辑功能盲验
 
 
 def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
@@ -528,14 +528,18 @@ def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
 
     prompt = BLIND_VIDEO_PROMPT
     if roughcut:
-        prompt += ('\n这是素材侧粗剪验收：不要猜官方角色名；补充两个布尔字段：'
+        prompt += ('\n这是素材侧粗剪验收：不要猜官方角色名，也不知道任何编辑计划；'
+                   '只根据实际成片补充字段：'
                    '{"speech_clear":true,"music_present":true,'
                    '"speaker_description":"主要说话者的可见外观",'
                    '"addressee_description":"他说话对象的可见外观",'
                    '"speaker_addressee_stable":true,'
-                   '"core_statement":"完整复述主要说话者表达的核心判断"}。'
+                   '"core_statement":"完整复述主要说话者表达的核心判断",'
+                   '"first_three_seconds_summary":"前三秒建立了什么观看理由",'
+                   '"opening_reason_clear":true,"functionless_span_present":false,'
+                   '"transitions_have_clear_function":true,"ending_intentional":true}。'
                    'speaker/addressee 只用本场景局部外观描述；core_statement 必须复述观点，'
-                   '不能只写“讨论了某话题”。')
+                   '不能只写“讨论了某话题”；不要因为存在切点就默认剪辑合理。')
     answer = runner.watch(prepare_watch_copy(video_path), prompt,
                           max_new_tokens=1024)
     block = extract_json_block(answer.text)
@@ -566,6 +570,20 @@ def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
         "speaker_addressee_stable": (payload.get("speaker_addressee_stable")
                                       if isinstance(payload.get("speaker_addressee_stable"), bool)
                                       else None),
+        "first_three_seconds_summary": str(payload.get("first_three_seconds_summary") or ""),
+        "opening_reason_clear": (payload.get("opening_reason_clear")
+                                  if isinstance(payload.get("opening_reason_clear"), bool)
+                                  else None),
+        "functionless_span_present": (payload.get("functionless_span_present")
+                                       if isinstance(payload.get("functionless_span_present"), bool)
+                                       else None),
+        "transitions_have_clear_function": (
+            payload.get("transitions_have_clear_function")
+            if isinstance(payload.get("transitions_have_clear_function"), bool)
+            else None),
+        "ending_intentional": (payload.get("ending_intentional")
+                               if isinstance(payload.get("ending_intentional"), bool)
+                               else None),
         "prompt_version": BLIND_VIDEO_PROMPT_VERSION,
     }
 

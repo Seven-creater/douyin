@@ -329,6 +329,10 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
         "audio_mode": asset_plan.get("audio_mode"),
         "audio_policy": asset_plan.get("audio_policy"),
         "source_scope": asset_plan.get("source_scope"),
+        "editorial_candidates_sha256": asset_plan.get("editorial_candidates_sha256"),
+        "edit_plan_candidates_sha256": asset_plan.get("edit_plan_candidates_sha256"),
+        "edit_plan_sha256": asset_plan.get("edit_plan_sha256"),
+        "selected_edit_plan_id": asset_plan.get("selected_edit_plan_id"),
         "bgm": bgm_hash,
         "source_intervals": [[row.get("slot_idx"),
                                (row.get("picked") or {}).get("source_start_s"),
@@ -389,6 +393,72 @@ def render_canvas(cfg: AppConfig, narrative_mode: bool) -> tuple[int, int]:
     width = int(section.get("width") or RENDER_CANVAS_DEFAULT[0])
     height = int(section.get("height") or RENDER_CANVAS_DEFAULT[1])
     return width, height
+
+
+def render_editorial_preview(cfg: AppConfig, asset_plan: dict,
+                             retrieval: list[dict], output_dir: Path) -> Path:
+    """Render the real hard-cut sequence at low cost before choosing a plan.
+
+    The preview intentionally has no plan labels or synthetic overlays.  It is
+    640px/12fps H.264 with source audio, so the blind reviewer sees actual cut
+    timing and audible sentence boundaries without paying for a formal render.
+    """
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    work = output_dir / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
+    ffprobe = cfg.perception.get("ffprobe_bin", "ffprobe")
+    by_slot = {int(row["slot_idx"]): row for row in retrieval}
+    segments, commands = [], []
+    for slot in asset_plan.get("slots") or []:
+        index = int(slot["slot_idx"])
+        picked = (by_slot.get(index) or {}).get("picked") or {}
+        if not picked:
+            raise ValueError(f"editorial preview slot {index} has no source")
+        source = Path(str(picked["video"]))
+        start = float(picked["source_start_s"])
+        duration = float(picked["source_end_s"]) - start
+        destination = work / f"segment_{index:04d}.mp4"
+        has_audio = _has_audio_stream(ffprobe, source)
+        args = ["-y", "-loglevel", "error", "-ss", f"{start:g}",
+                "-t", f"{duration:g}", "-i", str(source)]
+        if not has_audio:
+            args.extend(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+        crop = source_subtitle_treatment(cfg, str(picked.get("video_stem") or ""))
+        vf = ",".join(value for value in (
+            crop, "scale='min(640,iw)':-2", "fps=12") if value)
+        args.extend(["-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0",
+                     "-vf", vf,
+                     "-t", f"{duration:g}", "-c:v", "libx264", "-preset",
+                     "ultrafast", "-crf", "32", "-pix_fmt", "yuv420p",
+                     "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
+                     str(destination)])
+        common.run_ffmpeg(ffmpeg, args, timeout_s=max(120, duration * 10))
+        commands.append([ffmpeg, *args])
+        segments.append(destination)
+    if not segments:
+        raise ValueError("editorial preview has no segments")
+    concat_file = work / "concat.txt"
+    concat_file.write_text("".join(f"file '{path.as_posix()}'\n" for path in segments),
+                           encoding="utf-8")
+    preview = output_dir / "preview.mp4"
+    subtitles = write_story_subtitles(asset_plan, retrieval,
+                                      output_dir / "subtitles.srt")
+    subtitle_args = (["-vf", _subtitle_filter(subtitles)]
+                     if subtitles.read_text(encoding="utf-8").strip() else [])
+    args = ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
+            "-i", str(concat_file), *subtitle_args,
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-crf", "32", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a",
+            "96k", "-ar", "48000", "-ac", "2", str(preview)]
+    common.run_ffmpeg(ffmpeg, args, timeout_s=180)
+    commands.append([ffmpeg, *args])
+    (output_dir / "preview_manifest.json").write_text(json.dumps({
+        "preview_version": "editorial_preview_v1", "segment_count": len(segments),
+        "width_max": 640, "fps": 12, "commands": commands,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return preview
 
 
 def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: list[dict],

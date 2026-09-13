@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--no-mask-backend", action="store_true")
 
     roughcut = sub.add_parser(
-        "roughcut", help="single-window rough cut control experiment (V5 P5)")
+        "roughcut", help="scene-scoped editorial control experiment (V5.1)")
     roughcut.add_argument("--spec", default="config/roughcuts/lxh1_w15.json",
                           help="RoughcutSpec JSON (default: lxh1_w15)")
     roughcut.add_argument("--source", default=None,

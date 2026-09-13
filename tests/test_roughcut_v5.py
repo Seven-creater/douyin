@@ -7,7 +7,7 @@ import pytest
 
 from src.agentic_video.roughcut import (_build_plan, _human_acceptance_reasons,
                                         _failure, _hydrate_transcript_rows, _overlap,
-                                        _roughcut_blind_reasons,
+                                        _read_spec, _roughcut_blind_reasons,
                                         _summary_similarity,
                                         finalize_roughcut_delivery)
 from src.agentic_video.story_planner import fit_slot_intervals
@@ -28,6 +28,21 @@ def _spec():
         "duration": {"preferred_s": 22.0, "min_s": 12.0, "max_s": 26.4},
         "audio_variants": ["source_only", "bgm_mix"],
     }
+
+
+def test_v3_spec_locks_editorial_control_experiment():
+    spec = _spec()
+    spec["spec_version"] = "roughcut_v3"
+    spec["editorial"] = {
+        "candidate_min": 2, "candidate_max": 5,
+        "variant_ids": ["viewpoint", "question_answer", "core_close"],
+        "av_sync": "locked", "source_order": "chronological",
+    }
+    parsed, digest = _read_spec(spec)
+    assert parsed["editorial"]["candidate_min"] == 2
+    assert len(digest) == 64
+    with pytest.raises(ValueError, match="candidates must be 2..5"):
+        _read_spec({**spec, "editorial": {**spec["editorial"], "candidate_min": 3}})
 
 
 def test_cross_scope_container_is_candidate_but_final_evidence_is_inside():
@@ -122,6 +137,27 @@ def test_roughcut_blind_uses_local_speaker_contract_not_general_protagonist():
     assert similarity >= 0.2
 
 
+def test_editorial_final_blind_requires_opening_function_and_ending():
+    base = {
+        "parsed": True, "story_in_one_sentence": "人和妖不能简单判断好坏",
+        "core_statement": "人和妖的好坏都不是绝对的",
+        "speaker_description": "人物A", "addressee_description": "人物B",
+        "speaker_addressee_stable": True, "speech_clear": True,
+        "music_present": False, "opening_reason_clear": True,
+        "functionless_span_present": False,
+        "transitions_have_clear_function": True, "ending_intentional": True,
+    }
+    reasons, _ = _roughcut_blind_reasons(
+        {"source_only": base, "bgm_mix": {**base, "music_present": True}},
+        editorial_required=True)
+    assert reasons == []
+    reasons, _ = _roughcut_blind_reasons(
+        {"source_only": {**base, "functionless_span_present": True},
+         "bgm_mix": {**base, "music_present": True}},
+        editorial_required=True)
+    assert "blind_source_only_functionless_span" in reasons
+
+
 def test_human_acceptance_requires_restatement_and_audio_checks():
     assert _human_acceptance_reasons(None) == ["human_acceptance_pending"]
     approved = {
@@ -134,6 +170,12 @@ def test_human_acceptance_requires_restatement_and_audio_checks():
     assert _human_acceptance_reasons(approved) == []
     assert "human_bgm_mix_music_present_not_confirmed" in _human_acceptance_reasons(
         {**approved, "bgm_mix_music_present": False})
+    editorial = {**approved, "core_meaning_preserved": True,
+                 "opening_reason_clear": True, "no_functionless_shots": True,
+                 "all_cuts_have_editorial_reason": True, "ending_intentional": True}
+    assert _human_acceptance_reasons(editorial, editorial_required=True) == []
+    assert "human_ending_intentional_not_confirmed" in _human_acceptance_reasons(
+        {**editorial, "ending_intentional": False}, editorial_required=True)
 
 
 def test_finalize_delivery_only_after_human_acceptance(tmp_path):
