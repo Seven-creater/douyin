@@ -55,7 +55,7 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int,
                 seen_entities.add(key)
                 entities.append({"id": f"ent_{len(entities)}",
                                  "name_or_role": key,
-                                 "type": "person_or_creature",
+                                 "kind": "person",
                                  "evidence": [{"source": f"window_{window_idx}"}],
                                  "confidence": 0.6, "status": "uncertain"})
     # arc：按固定角色序聚合（hook→context→conflict→…），最多 4 段
@@ -77,7 +77,7 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int,
         "evidence": [{"source": f"window_{window_idx}_annotations"}],
         "intent": {"topic": "素材侧粗剪控制实验（单窗保真搬运）",
                    "message": "验证索引→检索→定位→成片链在真实源窗口上的可用性",
-                   "content_type": "roughcut",
+                   "content_type": "screen_story",
                    "protagonist": "uncertain", "goal": "uncertain",
                    "problem": "uncertain", "motivation": "uncertain",
                    "change": "uncertain", "outcome": "uncertain",
