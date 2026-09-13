@@ -113,9 +113,21 @@ class OmniRunner:
         fps = float(self.cfg.get("fps", 2.0))
         if self.cfg.get("use_qwen_omni_utils"):
             # 官方 README 路径（逐字对齐；三处 use_audio_in_video=True 必须一致）
+            # V5 P1（外审六轮指控⑧）：此前 fps 读而未传——配置写 2 不代表
+            # 模型真按 2fps 收帧。尝试传参；旧版 qwen_omni_utils 不收 fps
+            # kwarg 时回退并显式记录实际采样由 processor 默认决定。
             from qwen_omni_utils import process_mm_info
 
-            audios, images, videos = process_mm_info(conversation, use_audio_in_video=True)
+            try:
+                audios, images, videos = process_mm_info(
+                    conversation, use_audio_in_video=True, fps=fps)
+                self._last_sampling = {"requested_fps": fps, "fps_passed": True}
+            except TypeError:
+                audios, images, videos = process_mm_info(
+                    conversation, use_audio_in_video=True)
+                self._last_sampling = {"requested_fps": fps, "fps_passed": False,
+                                       "note": "qwen_omni_utils 不收 fps kwarg——"
+                                               "实际采样率=processor 默认"}
             text = self._processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = self._processor(
                 text=text, audio=audios, images=images, videos=videos,
@@ -155,6 +167,21 @@ class OmniRunner:
         frames_est = None
         if duration_s is not None:
             frames_est = round(duration_s * float(self.cfg.get("fps", 2.0)))
+        # V5 P1 观测正确性：requested_fps/是否真的传下去/实际输入视频帧数
+        # （second_per_grid_ts 命名各异，取 inputs 里第一个含 grid/second 时间
+        # 轴的键长度）——"Omni 是不是抽得太稀"从此有据可查。
+        actual_frames = None
+        for key, value in (inputs or {}).items():
+            if "second_per_grid" in str(key):
+                try:
+                    actual_frames = int(value.shape[-1])
+                except (AttributeError, ValueError):
+                    pass
+                break
+        self._last_sampling = {**(getattr(self, "_last_sampling", {}) or {}),
+                               "frames_estimate": frames_est,
+                               "actual_sampled_frames": actual_frames,
+                               "estimated": True}
 
         return self._generate(inputs, max_new_tokens=max_new_tokens,
                               use_audio_in_video=True, frames_estimate=frames_est,

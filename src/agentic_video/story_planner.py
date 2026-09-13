@@ -315,6 +315,9 @@ def _candidates_for_arc(segment: dict, source_rows: list[dict]) -> list[dict]:
         if row.get("story_role") == role:
             score += 0.20
         candidate = {**row, "semantic_score": score}
+        # 离线路径（无 E5 相似度）：event/role 命中是唯一相关性代理，保留
+        # 准入门槛——外审六轮的角色降级针对的是有 cosine 的在线路径
+        # （score_slot_candidates），那里语义分可以自己说话。
         if row.get("event_id") in event_ids or row.get("story_role") == role:
             scored.append(candidate)
     return sorted(scored, key=lambda row: (-row["semantic_score"],
@@ -947,14 +950,25 @@ def score_slot_candidates(cfg, rows, embeddings, *, query, query_embedding, role
     excluded = zones.excluded_row_indices([row for _idx, row in scoped], cfg)
     allowed = [pair for pair_idx, pair in enumerate(scoped) if pair_idx not in excluded]
     cosine = (embeddings @ query_embedding.reshape(-1)).ravel()
-    compatible = COMPATIBLE_ROLES.get(role, {role})
     min_score = float((cfg.library.get("retrieve") or {}).get("min_cosine", 0.18))
+    # V5 P1（外审六轮硬修改⑥）：源 story_role 从硬过滤降为**弱 tie-breaker**——
+    # 原片的 climax 完全可以承担新短片的 counter_evidence（外审受控反例：
+    # climax 候选相似度 0.99 也进不了 context 槽的候选池）。幅度弱且可配置
+    # （role_affinity_weight=0 即关），配 P9 的 ablation 证明其价值。
+    affinity_w = float((cfg.library.get("retrieve") or {}).get("role_affinity_weight", 1.0))
+    compatible = COMPATIBLE_ROLES.get(role, {role})
     used = set(used_rows or ())
     group = []
     for row_idx, row in allowed:
-        if row.get("story_role") not in compatible or row_idx in used:
+        if row_idx in used:
             continue
-        role_bonus = 0.15 if row.get("story_role") == role else 0.0
+        row_role = row.get("story_role")
+        if row_role == role:
+            role_bonus = 0.05 * affinity_w
+        elif row_role in compatible:
+            role_bonus = 0.02 * affinity_w
+        else:
+            role_bonus = 0.0                       # 不禁入、不罚——语义说了算
         dialogue_bonus = min(0.08, 0.02 * len(row.get("dialogue") or []))
         score = float(cosine[row_idx]) + role_bonus + dialogue_bonus
         group.append({
