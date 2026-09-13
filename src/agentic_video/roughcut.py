@@ -79,6 +79,17 @@ def _text(line: dict) -> str:
     return str(line.get("original") or line.get("translation_zh") or line.get("text") or "").strip()
 
 
+def _summary_similarity(left: str, right: str) -> float:
+    """Loose character-bigram similarity for two independent blind summaries."""
+    import unicodedata
+    def grams(value: str) -> set[str]:
+        compact = "".join(ch.lower() for ch in str(value or "")
+                          if ch.isalnum() or unicodedata.category(ch).startswith("L"))
+        return {compact[i:i + 2] for i in range(max(0, len(compact) - 1))}
+    a, b = grams(left), grams(right)
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
 def _line_interval(line: dict) -> tuple[float, float] | None:
     value = line.get("utterance_interval") or line.get("required_evidence_interval")
     if not (isinstance(value, (list, tuple)) and len(value) == 2):
@@ -421,8 +432,18 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
             reasons.append(f"blind_{name}_speech_unclear")
         if name == "bgm_mix" and report.get("music_present") is not True:
             reasons.append("blind_bgm_mix_music_missing")
+        if report.get("speaker_addressee_stable") is not True:
+            reasons.append(f"blind_{name}_speaker_addressee_unstable")
+        if not str(report.get("story_in_one_sentence") or "").strip():
+            reasons.append(f"blind_{name}_story_missing")
+    recap_similarity = _summary_similarity(
+        str(blinds.get("source_only", {}).get("story_in_one_sentence") or ""),
+        str(blinds.get("bgm_mix", {}).get("story_in_one_sentence") or ""))
+    if recap_similarity < 0.2:
+        reasons.append(f"blind_variant_story_mismatch:{recap_similarity:.3f}")
     if reasons:
-        _failure(output_dir, "content", reasons); raise RuntimeError("roughcut blocked: blind acceptance")
+        failure_class = "audio" if any("speech" in reason or "music" in reason for reason in reasons) else "content"
+        _failure(output_dir, failure_class, reasons); raise RuntimeError("roughcut blocked: blind acceptance")
     from src.agentic_video.renderer import _sha256_file
     audio_manifest = json.loads((output_dir / "variants" / "audio_variants_manifest.json").read_text(encoding="utf-8"))
     shared = {"story_plan_sha256": plan["story_plan_sha256"], "retrieval_sha256": retrieval_hash,
@@ -433,7 +454,7 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
                             "audio_sha256": audio_manifest[variant_name]["sha256"]}
         (output_dir / "variants" / variant_name / "manifest.json").write_text(
             json.dumps(variant_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    acceptance = {"passed": True, "failure_class": None, "reasons": [], "delivery": "passed", "variants": {key: str(value) for key, value in variants.items()}, "content_master": str(master_path), **shared}
+    acceptance = {"passed": True, "failure_class": None, "reasons": [], "delivery": "passed", "variants": {key: str(value) for key, value in variants.items()}, "content_master": str(master_path), "blind_summary_similarity": round(recap_similarity, 4), **shared}
     (output_dir / "acceptance.json").write_text(json.dumps(acceptance, ensure_ascii=False, indent=2), encoding="utf-8")
     shutil.copy2(variants["bgm_mix"], output_dir / "rendered.mp4")
     (output_dir / "render_manifest.json").write_text(json.dumps({"delivery": "passed", "primary_variant": "bgm_mix", "variants": {key: str(value) for key, value in variants.items()}, **shared, "acceptance": str(output_dir / "acceptance.json")}, ensure_ascii=False, indent=2), encoding="utf-8")

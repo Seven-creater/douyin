@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.agentic_video.roughcut import _build_plan, _hydrate_transcript_rows, _overlap
+from src.agentic_video.roughcut import (_build_plan, _hydrate_transcript_rows,
+                                        _overlap, _summary_similarity)
 from src.agentic_video.story_planner import fit_slot_intervals
 from src.agentic_video.verify_slots import localize_coarse_slots, parse_localization
 from src.agentic_video.renderer import write_story_subtitles
@@ -89,3 +90,9 @@ def test_subtitles_require_full_verified_utterance_and_skip_punctuation(tmp_path
     write_story_subtitles(asset, retrieval, out)
     text = out.read_text(encoding="utf-8")
     assert "完整证据" in text and "画外尾句" not in text and "，" not in text
+
+
+def test_blind_variant_summary_similarity_tolerates_small_paraphrase():
+    assert _summary_similarity("两个人讨论人和妖不能简单判断好坏",
+                               "两人讨论不能按人或妖简单判断好坏") >= 0.2
+    assert _summary_similarity("两个人讨论好坏", "森林里发生战斗") < 0.2

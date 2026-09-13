@@ -515,7 +515,10 @@ def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
     prompt = BLIND_VIDEO_PROMPT
     if roughcut:
         prompt += ('\n这是素材侧粗剪验收：不要猜官方角色名；补充两个布尔字段：'
-                   '{"speech_clear":true,"music_present":true}。')
+                   '{"speech_clear":true,"music_present":true,'
+                   '"speaker_description":"主要说话者的可见外观",'
+                   '"addressee_description":"他说话对象的可见外观",'
+                   '"speaker_addressee_stable":true}。speaker/addressee 只用本场景局部外观描述。')
     answer = runner.watch(prepare_watch_copy(video_path), prompt,
                           max_new_tokens=1024)
     block = extract_json_block(answer.text)
@@ -540,6 +543,11 @@ def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
         "event_relations": str(payload.get("event_relations") or ""),
         "speech_clear": payload.get("speech_clear") if isinstance(payload.get("speech_clear"), bool) else None,
         "music_present": payload.get("music_present") if isinstance(payload.get("music_present"), bool) else None,
+        "speaker_description": str(payload.get("speaker_description") or ""),
+        "addressee_description": str(payload.get("addressee_description") or ""),
+        "speaker_addressee_stable": (payload.get("speaker_addressee_stable")
+                                      if isinstance(payload.get("speaker_addressee_stable"), bool)
+                                      else None),
         "prompt_version": BLIND_VIDEO_PROMPT_VERSION,
     }
 
