@@ -111,6 +111,26 @@ def test_two_candidates_are_allowed_but_one_is_blocked(tmp_path):
             editorial={"candidate_min": 2, "candidate_max": 5})
 
 
+def test_boundary_dialogue_fragment_and_over_budget_shot_are_not_candidates(tmp_path):
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"video")
+    rows = [{"dialogue": [
+        {"utterance_id": "partial", "utterance_interval": [-2.0, 1.0],
+         "original": "scope 边界上被截断的半句"},
+        {"utterance_id": "core", "utterance_interval": [10.0, 18.0],
+         "original": "人和妖一样，很难定义好坏。"},
+        {"utterance_id": "close", "utterance_interval": [25.0, 30.0],
+         "original": "后续完整回应。"},
+    ]}]
+    candidates = build_editorial_candidates(
+        _story(video), rows,
+        [{"shot_idx": 99, "start_s": 0.0, "end_s": 40.0}],
+        runner=_Runner(), output_dir=tmp_path,
+        editorial={"candidate_min": 2, "candidate_max": 5})
+    assert [row["source_interval"] for row in candidates] == [
+        [10.0, 18.0], [25.0, 30.0]]
+
+
 def test_three_fixed_plans_are_materialized_from_candidate_ids(tmp_path):
     story, settings, candidates = _build(tmp_path)
     plans = plan_edit_variants(story, candidates, runner=_Runner(), output_dir=tmp_path)

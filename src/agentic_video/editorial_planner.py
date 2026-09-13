@@ -135,13 +135,17 @@ def _dialogue_rows(scoped_rows: list[dict], scope: tuple[float, float]) -> list[
                                  [line.get("start_s"), line.get("end_s")])
             if not interval or not _overlap(interval, scope):
                 continue
-            clipped = (max(interval[0], scope[0]), min(interval[1], scope[1]))
-            key = (str(line.get("utterance_id") or ""), clipped)
+            # A boundary fragment is not a verified semantic unit.  Containers
+            # may overlap scope, but an editorial dialogue candidate must keep
+            # its complete immutable ASR utterance inside the approved scope.
+            if not _contained(interval, scope):
+                continue
+            key = (str(line.get("utterance_id") or ""), interval)
             if key in seen:
                 continue
             seen.add(key)
             rows.append({
-                "kind": "dialogue", "source_interval": list(clipped),
+                "kind": "dialogue", "source_interval": list(interval),
                 "utterance_ids": [str(line.get("utterance_id") or "")],
                 "utterance_intervals": [list(interval)],
                 "transcript_text": str(line.get("original") or
@@ -151,14 +155,18 @@ def _dialogue_rows(scoped_rows: list[dict], scope: tuple[float, float]) -> list[
     return sorted(rows, key=lambda row: tuple(row["source_interval"]))
 
 
-def _shot_rows(shots: list[dict], scope: tuple[float, float]) -> list[dict]:
+def _shot_rows(shots: list[dict], scope: tuple[float, float], *,
+               max_duration_s: float) -> list[dict]:
     rows = []
     for shot in shots:
         interval = _interval([shot.get("start_s"), shot.get("end_s")])
         if not interval or not _overlap(interval, scope):
             continue
         clipped = (max(interval[0], scope[0]), min(interval[1], scope[1]))
-        if clipped[1] - clipped[0] < 0.5:
+        duration = clipped[1] - clipped[0]
+        # Candidate intervals are immutable.  A single shot longer than the
+        # whole output budget can never participate in an eligible edit plan.
+        if duration < 0.5 or duration > max_duration_s + 1e-6:
             continue
         rows.append({
             "kind": "visual", "source_interval": list(clipped),
@@ -173,7 +181,9 @@ def _candidate_pool(story_plan: dict, scoped_rows: list[dict], shots: list[dict]
                     *, candidate_max: int) -> list[dict]:
     scope, required, _video = _story_inputs(story_plan)
     dialogue = _dialogue_rows(scoped_rows, scope)
-    visuals = _shot_rows(shots, scope)
+    max_duration = float((story_plan.get("duration_policy") or {}).get(
+        "max_s", scope[1] - scope[0]))
+    visuals = _shot_rows(shots, scope, max_duration_s=max_duration)
     if not required:
         return []
     core_start, core_end = min(item[0] for item in required), max(item[1] for item in required)
