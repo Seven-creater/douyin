@@ -532,9 +532,10 @@ def test_compile_form_need_enum_first_then_legacy_keywords():
     事实红线）；不可映射回退空（上层走角色模板）。"""
     from src.agentic_video.narrative_form import (compile_form_need,
                                                   normalize_form_function)
-    # enum 精确命中
+    # enum 精确命中（V5 P3：在场条件从 must_have 移入 continuity_requirement
+    # 结构化承载——must_have 只写纯内容条件）
     assert compile_form_need("counter_evidence")["must_have"] \
-        == ["主角的关键行动可见", "主角在场"]
+        == ["主角的关键行动可见"]
     # badcase 原句一：「展示主角在专业领域的成就，强化其能力形象」
     spec = compile_form_need("展示主角在专业领域的成就，强化其能力形象")
     assert spec == compile_form_need("evidence_expansion")      # 归一到模板，零原文透传
@@ -595,3 +596,52 @@ def test_uncertain_sentinel_no_longer_masks_original_dialogue():
     assert anchored is not None
     start, end = anchored
     assert start <= 2977.5 and end >= 2985.0 - 1e-6   # 锚行完整落入
+
+
+def test_slot_spec_structured_invariants():
+    """V5 P3（外审六轮硬修改⑤）property 测试：遍历全部 role×form_function
+    组合——required ⟺ 硬在场(all_of)；optional ⟺ one_of 三分支；
+    must_have 不再含无条件"主角在场"（V4_C3 同槽矛盾的病灶）。"""
+    from src.agentic_video.narrative_form import (ROLE_ENTITY_REQUIREMENTS,
+                                                  _FORM_ENTITY_REQUIREMENTS,
+                                                  _FORM_FUNCTION_NEEDS,
+                                                  continuity_requirement,
+                                                  slot_entity_requirements)
+    roles = list(ROLE_ENTITY_REQUIREMENTS)
+    forms = list(_FORM_ENTITY_REQUIREMENTS) + [""]      # 含无 form 回退
+    for role in roles:
+        for form in forms:
+            spec = slot_entity_requirements(role, form)
+            cont = continuity_requirement(spec["protagonist"])
+            if spec["protagonist"] == "required":
+                assert "all_of" in cont and cont["all_of"][0]["type"] == "protagonist_present"
+            else:
+                assert "one_of" in cont
+                assert {b["type"] for b in cont["one_of"]} == {
+                    "protagonist_present", "linked_to_mainline_entity",
+                    "establishing_context"}
+            # 反例钉死（V4_C3 病灶）：context+counter_evidence 不得再是 optional
+            if role == "context" and form == "counter_evidence":
+                assert spec["protagonist"] == "required"
+    # must_have 全库不含无条件在场句（在场由结构化字段承载）
+    for spec in _FORM_FUNCTION_NEEDS.values():
+        for item in spec["must_have"]:
+            assert item.strip() != "主角在场"
+
+
+def test_slot_sequence_carries_structured_continuity():
+    """resolve_slot_sequence 产出的槽带 continuity_requirement，且
+    thin-arc 模板路径的 context+counter_evidence 槽是 required（外审六轮
+    指控⑤的端到端复现与修复验证）。"""
+    program = valid_program()
+    program["arc"] = [program["arc"][0]]                # 薄弧 → Form 模板
+    program["utterances"] = [{"id": f"u{i}", "interval": [0.0, 2.0], "speaker_id": None,
+                              "original": "x", "translation_zh": "x",
+                              "evidence": [], "confidence": 0.9, "status": "uncertain"}
+                             for i in range(4)]
+    slots, _ = resolve_slot_sequence(program)
+    by_role = {slot["role"]: slot for slot in slots}
+    counter = by_role["context"]
+    assert counter["form_function"] == "counter_evidence"
+    assert counter["entity_requirements"]["protagonist"] == "required"
+    assert counter["continuity_requirement"]["all_of"][0]["type"] == "protagonist_present"

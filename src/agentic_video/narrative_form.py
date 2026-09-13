@@ -28,16 +28,38 @@ ROLE_ENTITY_REQUIREMENTS = {
     "resolution": {"protagonist": "required"},
 }
 
+# V5 P3（外审六轮硬修改⑤）：人物/连续性逻辑**结构化**——optional 槽的在场
+# 条件不再塞进 must_have 自然语言（"主角在场，或与主线直接关联的他人/环境
+# 信息"这种 OR 字符串 deterministic check 无法可靠解析），改为
+# continuity_requirement.one_of 结构化分支；must_have 只写纯内容条件。
+# "主角在场"类在场条件只出现在 protagonist=required 的槽（property 测试钉死）。
+CONTINUITY_ONE_OF_OPTIONAL = [
+    {"type": "protagonist_present"},
+    {"type": "linked_to_mainline_entity"},
+    {"type": "establishing_context"},
+]
+
+# 每 form_function 的实体要求（角色模板与 form 模板的合并结果）——
+# 需求（need/must_have）仍来自 _FORM_FUNCTION_NEEDS，在场逻辑在此结构化。
+_FORM_ENTITY_REQUIREMENTS = {
+    "premise": {"protagonist": "required"},
+    "counter_evidence": {"protagonist": "required"},
+    "evidence_expansion": {"protagonist": "optional"},
+    "payoff": {"protagonist": "required"},
+    "confrontation": {"protagonist": "required"},
+    "decisive_action": {"protagonist": "required"},
+}
+
 _FORM_FUNCTION_NEEDS = {
     "premise": {
         "need": "开场呈现主角的处境或一个关于主角的待检验断言，让观众想看后续",
-        "must_have": ["主角在场的可见处境"],
+        "must_have": ["主角的可见处境"],              # 在场条件结构化承载
         "must_not": ["与主角无关的纯环境空镜"],
         "evidence_mode": "visual",
     },
     "counter_evidence": {
         "need": "用主角的可见行动直接反驳开场断言——观众看到的是'做得到'",
-        "must_have": ["主角的关键行动可见", "主角在场"],
+        "must_have": ["主角的关键行动可见"],
         "must_not": ["主角不在场的纯环境镜头", "平淡过场"],
         "evidence_mode": "visual",
     },
@@ -49,7 +71,7 @@ _FORM_FUNCTION_NEEDS = {
     },
     "payoff": {
         "need": "用一个具体的收束动作或细节完成情绪落地（和解/启程/轻细节）",
-        "must_have": ["收束性画面（和解/启程/定格/轻细节特写）", "主角在场"],
+        "must_have": ["收束性画面（和解/启程/定格/轻细节特写）"],
         "must_not": ["悬而未决的新冲突", "与前槽行动无关的新场景"],
         "evidence_mode": "both",
     },
@@ -96,17 +118,38 @@ NARRATIVE_FORMS = {
 _FORM_FUNCTION_NEEDS.update({
     "confrontation": {
         "need": "呈现主角面对的问题具象化为可见的冲突或危险",
-        "must_have": ["冲突/危险可见", "主角在场"],
+        "must_have": ["冲突/危险可见"],
         "must_not": ["主角不在场的纯环境镜头"],
         "evidence_mode": "visual",
     },
     "decisive_action": {
         "need": "呈现主角的关键行动与情绪峰值",
-        "must_have": ["高潮动作或情绪峰值画面", "主角在场"],
+        "must_have": ["高潮动作或情绪峰值画面"],
         "must_not": ["平淡过场"],
         "evidence_mode": "visual",
     },
 })
+
+
+def slot_entity_requirements(role: str, form_function: str | None = None) -> dict:
+    """槽的最终实体要求（V5 P3 单源）：form_function 级要求覆盖角色级——
+    counter_evidence（context 槽用它）承载主角反驳行动，必须是 required
+    （V4_C3 病灶：must_have 要求主角在场而 entity_requirements 说 optional
+    的同槽矛盾）。两者都 optional 才 optional。"""
+    role_req = ROLE_ENTITY_REQUIREMENTS.get(role) or {}
+    form_req = _FORM_ENTITY_REQUIREMENTS.get(str(form_function or "")) or {}
+    if form_req.get("protagonist") == "required" or role_req.get("protagonist") == "required":
+        return {"protagonist": "required"}
+    return {"protagonist": "optional"}
+
+
+def continuity_requirement(protagonist_req: str) -> dict:
+    """在场条件的结构化表达：required → 硬在场；optional → one_of 分支
+    （protagonist_present / linked_to_mainline_entity / establishing_context）。
+    deterministic check 消费结构化字段而非解析自然语言 OR 句。"""
+    if protagonist_req == "required":
+        return {"all_of": [{"type": "protagonist_present"}]}
+    return {"one_of": deepcopy(CONTINUITY_ONE_OF_OPTIONAL)}
 
 THIN_ARC_SLOTS = 3      # 参考弧段数低于此 → Form 模板槽序列接管
 
@@ -143,15 +186,11 @@ def resolve_slot_sequence(narrative: dict, *, form_name: str | None = None
     if len(arc) >= THIN_ARC_SLOTS:
         for segment in arc:
             role = segment["role"]
-            requirements = deepcopy(ROLE_ENTITY_REQUIREMENTS.get(role))
             # 模板决定哪些位置必须同主体：参考该槽事件零参与者（环境/反应/
             # 收束镜头位）→ 主角要求降为可选，不由角色名一刀切。
             participants = set()
             for event_id in segment.get("event_ids") or []:
                 participants |= set((events.get(event_id) or {}).get("participants") or [])
-            if requirements and requirements.get("protagonist") == "required" \
-                    and not participants:
-                requirements["protagonist"] = "optional"
             # V4 C：form_function 消费顺序 = canonical enum（narrative_agent
             # 双字段输出）→ legacy 关键词归一 → 角色名回退。自由中文整句
             # 直接当 form_function 是 V3 转换丢失的根因。
@@ -161,21 +200,33 @@ def resolve_slot_sequence(narrative: dict, *, form_name: str | None = None
             else:
                 form_function = (normalize_form_function(
                     str(segment.get("function") or "")) or role)
+            effective = slot_entity_requirements(role, form_function)
+            # 模板决定哪些位置必须同主体：参考该槽事件零参与者（环境/反应/
+            # 收束镜头位）→ 主角要求降为可选，不由角色名一刀切。
+            if effective.get("protagonist") == "required" and not participants:
+                effective = {"protagonist": "optional"}
             slots.append({
                 "role": role,
                 "required": role in {"hook", "conflict", "climax", "resolution"},
-                "entity_requirements": requirements,
+                # V5 P3：form_function 级要求覆盖角色级（counter_evidence
+                # 承载主角反驳行动必须 required）+ 在场条件结构化
+                "entity_requirements": effective,
+                "continuity_requirement": continuity_requirement(
+                    effective["protagonist"]),
                 "form_function": form_function,
                 "event_ids": list(segment.get("event_ids") or []),
             })
     else:
         form = NARRATIVE_FORMS.get(form_name) or NARRATIVE_FORMS["classic_arc"]
         for template in form["slots"]:
+            effective = slot_entity_requirements(template["role"],
+                                                 template["form_function"])
             slots.append({
                 "role": template["role"],
                 "required": bool(template.get("required")),
-                "entity_requirements": deepcopy(
-                    ROLE_ENTITY_REQUIREMENTS.get(template["role"])),
+                "entity_requirements": effective,
+                "continuity_requirement": continuity_requirement(
+                    effective["protagonist"]),
                 "form_function": template["form_function"],
                 "event_ids": [],
             })
