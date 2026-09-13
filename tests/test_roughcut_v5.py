@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.agentic_video.roughcut import _build_plan, _overlap
+from src.agentic_video.roughcut import _build_plan, _hydrate_transcript_rows, _overlap
 from src.agentic_video.story_planner import fit_slot_intervals
 from src.agentic_video.verify_slots import localize_coarse_slots, parse_localization
 from src.agentic_video.renderer import write_story_subtitles
@@ -36,6 +36,19 @@ def test_cross_scope_container_is_candidate_but_final_evidence_is_inside():
     assert source["container_interval"] == [2955.0, 2995.0]
     assert source["utterance_interval"] == [2977.5, 2984.0]
     assert source.get("required_evidence_interval") is None
+
+
+def test_old_window_view_is_hydrated_to_full_transcript_segment(tmp_path):
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(json.dumps({"segments": [{"start_ms": 100000, "end_ms": 115000,
+                                                     "text": "完整语义证据"}]}), encoding="utf-8")
+    rows = [{"start_s": 95, "end_s": 105, "dialogue": [{"start_s": 100, "end_s": 105,
+                                                            "original": "旧窗口截断"}]}]
+    _hydrate_transcript_rows(rows, transcript)
+    line = rows[0]["dialogue"][0]
+    assert line["utterance_interval"] == [100.0, 115.0]
+    assert line["overlap_interval"] == [100.0, 105.0]
+    assert line["partial"] is True
 
 
 def test_relative_localization_records_origin_and_normalizes(tmp_path):

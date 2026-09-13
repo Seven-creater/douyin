@@ -101,6 +101,38 @@ def _row_dialogue(row: dict) -> list[dict]:
             if isinstance(line, dict) and _line_interval(line)]
 
 
+def _hydrate_transcript_rows(rows: list[dict], transcript_path: Path) -> str:
+    """Restore immutable ASR segments; row views retain only their overlap."""
+    raw = Path(transcript_path).read_bytes()
+    payload = json.loads(raw.decode("utf-8"))
+    segments = []
+    for index, segment in enumerate(payload.get("segments") or []):
+        try:
+            start = float(segment.get("start_ms")) / 1000.0
+            end = float(segment.get("end_ms")) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if end > start:
+            segments.append((f"utt_{index:05d}", start, end, str(segment.get("text") or "")))
+    for row in rows:
+        row_start, row_end = _interval(row)
+        view = []
+        for utterance_id, start, end, text in segments:
+            if end <= row_start or start >= row_end:
+                continue
+            overlap_start, overlap_end = max(start, row_start), min(end, row_end)
+            view.append({"utterance_id": utterance_id,
+                         "utterance_interval": [round(start, 3), round(end, 3)],
+                         "overlap_interval": [round(overlap_start, 3), round(overlap_end, 3)],
+                         "partial": overlap_start > start + 1e-6 or overlap_end < end - 1e-6,
+                         "start_s": round(overlap_start, 3), "end_s": round(overlap_end, 3),
+                         "original": text, "translation_zh": None, "confidence": 0.7})
+        if view:
+            row["dialogue"] = view
+        row["transcript_sha256"] = hashlib.sha256(raw).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _pick_stage_rows(rows: list[dict], spec: dict, scope: dict) -> dict[str, dict | None]:
     """Select stage evidence deterministically; event containers may cross scope."""
     eligible = [row for row in rows if _overlap(row, scope)]
@@ -114,7 +146,11 @@ def _pick_stage_rows(rows: list[dict], spec: dict, scope: dict) -> dict[str, dic
     if not core:
         query = str(focus.get("query") or "")
         core = [row for row in eligible if query and query in str(row.get("caption") or row.get("event_summary") or "")]
-    core_row = core[0] if core else None
+    core_row = max(core, key=lambda row: (
+        int(_interval(row)[0] <= float(candidate[0]) and _interval(row)[1] >= float(candidate[1])),
+        max(0.0, min(_interval(row)[1], float(candidate[1]))
+            - max(_interval(row)[0], float(candidate[0]))),
+        -abs(_interval(row)[0] - float(candidate[0])))) if core else None
     core_start = _interval(core_row)[0] if core_row else float(candidate[0])
     core_end = _interval(core_row)[1] if core_row else float(candidate[1])
     before = [row for row in eligible if _interval(row)[1] <= core_start and row is not core_row]
@@ -260,6 +296,15 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
         _failure(output_dir, "infrastructure", [f"index_load:{type(exc).__name__}:{exc}"])
         raise
     scope = rough_spec["source_scope"]
+    transcript_path = cfg.paths.library_dir / "sources" / source / "narrative_transcript.json"
+    if not transcript_path.is_file():
+        _failure(output_dir, "infrastructure", [f"transcript_missing:{transcript_path}"])
+        raise FileNotFoundError(transcript_path)
+    try:
+        _hydrate_transcript_rows(rows, transcript_path)
+    except Exception as exc:
+        _failure(output_dir, "infrastructure", [f"transcript_parse:{type(exc).__name__}:{exc}"])
+        raise
     scoped = [row for row in rows if str(row.get("video_stem") or "").startswith(f"{source}__") and _overlap(row, scope)]
     if not scoped:
         _failure(output_dir, "content", ["no_scoped_candidates"]); raise RuntimeError("roughcut blocked: no scoped candidates")
