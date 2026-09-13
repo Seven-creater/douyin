@@ -62,6 +62,27 @@ def test_verify_slots_structured_verdicts(tmp_path):
     assert ok["failed_slots"] == [] and ok["uncertain_slots"] == []
 
 
+def test_verify_slots_normalizes_absolute_condition_evidence(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"fake")
+    plan = {"slots": [{"slot_idx": 0, "status": "supported", "role": "conflict",
+                       "target_interval": [0, 20], "need_spec": {"need": "核心判断"},
+                       "source": {"video": str(video), "start_s": 2965.0, "end_s": 3005.0}}]}
+
+    class Runner:
+        def watch(self, *_args, **_kwargs):
+            return SimpleNamespace(text=json.dumps({"verdict": "pass", "conditions": [
+                {"condition": "核心判断", "met": True, "evidence_interval": [2977.5, 2990.63]}],
+                "missing": [], "failure_reason": "", "needs_context": False,
+                "what_is_visible": "人物讨论人与妖的好坏"}))
+
+    result = verify_slots(None, plan, runner=Runner())
+    condition = result["results"][0]["conditions"][0]
+    assert result["failed_slots"] == []
+    assert condition["raw_timebase"] == "absolute"
+    assert condition["evidence_interval"] == [12.5, 25.63]
+
+
 def test_verify_slots_widens_context_once_when_requested(tmp_path):
     plan = _verify_plan(tmp_path)
     runner = _VerifyRunner("uncertain", needs_context=True)

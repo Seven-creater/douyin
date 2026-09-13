@@ -159,8 +159,20 @@ def verify_slots(cfg, story_plan: dict, *, runner, slot_idxs=None,
                 interval = condition.get("evidence_interval")
                 if condition.get("met") and isinstance(interval, list) \
                         and len(interval) == 2:
-                    if (float(interval[0]) >= clip_duration
-                            or float(interval[1]) > clip_duration + 1.0):
+                    raw_interval = [float(interval[0]), float(interval[1])]
+                    relative_ok = 0 <= raw_interval[0] < raw_interval[1] <= clip_duration + 1.0
+                    absolute_ok = start <= raw_interval[0] < raw_interval[1] <= end + 1.0
+                    condition["raw_evidence_interval"] = raw_interval
+                    if absolute_ok and not relative_ok:
+                        condition["raw_timebase"] = "absolute"
+                        condition["normalized_absolute_interval"] = raw_interval
+                        condition["evidence_interval"] = [round(raw_interval[0] - start, 3),
+                                                          round(raw_interval[1] - start, 3)]
+                    elif relative_ok:
+                        condition["raw_timebase"] = "relative"
+                        condition["normalized_absolute_interval"] = [round(start + raw_interval[0], 3),
+                                                                      round(start + raw_interval[1], 3)]
+                    else:
                         condition["met"] = False
                         condition["evidence_interval"] = None
                         demoted = True
