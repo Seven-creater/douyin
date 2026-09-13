@@ -355,17 +355,18 @@ def _final_audio_args(audio_mode: str, render_duration: float, *, bgm_volume: fl
 
     mix = 原声为主 + BGM 低混（外审三轮十节：验证靠对白成立的素材，交付
     必须保留对白——原声 volume 1.0，BGM 按 mix_volume≈0.25 垫底）。
-    **amix normalize=0 必须显式**：默认 1/inputs 归一会把原声压半。
+    兼容旧 FFmpeg（其 amix 无 normalize 选项）：两路输入先各乘 2，再让
+    amix 默认按 inputs=2 归一，等效得到原声 1.0、BGM mix_volume。
     bgm = 7682 纯文案公式（BGM 整轨替换）；bgm 缺失回退素材原声（调用方
     记 audio_fallback）。输入布局：[0]=视频（masked）[1]=原声（concat）
     [2]=BGM(loop)——原声取 concat 而非 masked，规避 mask 后端丢音轨。"""
     if audio_mode == "mix" and has_bgm:
         fade_out = max(0.0, render_duration - 1.0)
         filter_complex = (
-            f"[1:a]volume=1.0[ra];"
-            f"[2:a]volume={mix_volume:g},afade=t=in:st=0:d=0.5,"
+            f"[1:a]volume=2.0[ra];"
+            f"[2:a]volume={2 * mix_volume:g},afade=t=in:st=0:d=0.5,"
             f"afade=t=out:st={fade_out:g}:d=1.0[bg];"
-            f"[ra][bg]amix=inputs=2:duration=first:normalize=0[au]")
+            f"[ra][bg]amix=inputs=2:duration=first[au]")
         return (["-stream_loop", "-1", "-i", "__BGM__"],
                 filter_complex,
                 ["-map", "0:v", "-map", "[au]"])
@@ -651,9 +652,9 @@ def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path
     ffmpeg_bin = cfg.perception.get("ffmpeg_bin", "ffmpeg")
     render_duration = float(duration_s) if duration_s is not None else None
     fade_out = max(0.0, render_duration - 1.0) if render_duration is not None else 0.0
-    audio_filter = (f"[1:a]volume={float(mix_volume):g},afade=t=in:st=0:d=0.5,"
+    audio_filter = (f"[1:a]volume={2 * float(mix_volume):g},afade=t=in:st=0:d=0.5,"
                     f"afade=t=out:st={fade_out:g}:d=1.0[bg];"
-                    "[0:a]volume=1.0[ra];[ra][bg]amix=inputs=2:duration=first:normalize=0[au]")
+                    "[0:a]volume=2.0[ra];[ra][bg]amix=inputs=2:duration=first[au]")
     args = ["-y", "-loglevel", "error", "-i", str(content_master), "-stream_loop", "-1", "-i", str(bgm_path),
             "-filter_complex", audio_filter, "-map", "0:v:0", "-map", "[au]"]
     if render_duration is not None:

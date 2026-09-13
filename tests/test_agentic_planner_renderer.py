@@ -373,14 +373,13 @@ def test_render_cache_key_sensitive_to_subtitle_crop():
     assert base["sha256"] != same["sha256"] != changed["sha256"]
 
 
-def test_final_audio_args_mix_uses_amix_without_normalization():
-    """V4 D2：mix = 原声 1.0 + BGM 低混；amix normalize=0 必须显式（默认
-    1/inputs 会把原声压半）；bgm 模式维持整轨替换；无 bgm 回退原声。"""
+def test_final_audio_args_mix_compensates_old_amix_normalization():
+    """V4 D2：旧 FFmpeg 没有 normalize 选项，用预增益补偿默认 1/2。"""
     from src.agentic_video.renderer import _final_audio_args
     pre, fc, maps = _final_audio_args("mix", 22.0, bgm_volume=0.9,
                                       mix_volume=0.25, has_bgm=True)
-    assert "amix=inputs=2:duration=first:normalize=0" in fc
-    assert "volume=1.0[ra]" in fc and "volume=0.25" in fc
+    assert "amix=inputs=2:duration=first" in fc and "normalize=" not in fc
+    assert "volume=2.0[ra]" in fc and "volume=0.5" in fc
     assert maps == ["-map", "0:v", "-map", "[au]"]
     assert pre == ["-stream_loop", "-1", "-i", "__BGM__"]
     _, fc_bgm, maps_bgm = _final_audio_args("bgm", 22.0, bgm_volume=0.9,
