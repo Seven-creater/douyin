@@ -227,13 +227,10 @@ def _build_plan(rows: list[dict], spec: dict, spec_hash: str, *, theme: str, vid
     transcript_payload = [{"utterance_id": line.get("utterance_id"), "interval": line.get("utterance_interval") or [line.get("start_s"), line.get("end_s")], "text": _text(line)}
                          for row in rows for line in _row_dialogue(row)]
     source_hash = next((str(row.get("video_sha256")) for row in rows if row.get("video_sha256")), None)
-    if source_hash is None and Path(video).exists():
-        digest = hashlib.sha256()
-        with Path(video).open("rb") as handle:
-            for block in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(block)
-        source_hash = digest.hexdigest()
-    source_hash = source_hash or _sha256_json({"video": video, "scope": scope})
+    # A 4K feature can be >10 GiB.  Its ingestion manifest owns the full-file
+    # hash; never silently re-read the whole movie in a roughcut run.
+    source_hash = source_hash or _sha256_json({"video": video, "scope": scope,
+                                              "unverified_hash_fallback": True})
     transcript_hash = next((str(row.get("transcript_sha256")) for row in rows if row.get("transcript_sha256")), _sha256_json(transcript_payload))
     return {
         "story_plan_version": "1.1", "plan_kind": "roughcut", "theme": theme.strip(), "library": str(spec["source"]), "reference_id": "roughcut_w15",
@@ -308,6 +305,17 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     scoped = [row for row in rows if str(row.get("video_stem") or "").startswith(f"{source}__") and _overlap(row, scope)]
     if not scoped:
         _failure(output_dir, "content", ["no_scoped_candidates"]); raise RuntimeError("roughcut blocked: no scoped candidates")
+    ingestion_manifest = cfg.paths.library_dir / "shots" / f"{source}__narrative" / "result.json"
+    try:
+        ingestion = json.loads(ingestion_manifest.read_text(encoding="utf-8"))
+        video_sha256 = str((ingestion.get("params") or {}).get("video_sha256") or "")
+    except (OSError, ValueError):
+        video_sha256 = ""
+    if not video_sha256:
+        _failure(output_dir, "infrastructure", ["source_hash_missing"])
+        raise RuntimeError("roughcut blocked: source hash missing from ingestion manifest")
+    for row in scoped:
+        row["video_sha256"] = video_sha256
     scoped.sort(key=lambda row: _interval(row)[0]); video = str(scoped[0].get("video") or "")
     try:
         plan = _build_plan(scoped, rough_spec, spec_hash, theme=theme or str((rough_spec.get("focus_utterance") or {}).get("query") or ""), video=video)
