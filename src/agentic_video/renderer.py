@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import subprocess
 from copy import deepcopy
@@ -225,11 +226,20 @@ def write_story_subtitles(asset_plan: dict, retrieval: list[dict], output: Path)
                 # V5 P0：subtitle 真值走 text_availability（None/sentinel
                 # 回落 original——中文源对白现在有可用字幕文本）
                 subtitle = dialogue_text(line) or ""
-                if not subtitle:
+                import unicodedata
+                if not subtitle or not any(ch.isalnum() or unicodedata.category(ch).startswith("L")
+                                           for ch in subtitle):
                     continue
-                start = target_start + max(0.0, float(line.get("start_s") or source_start)
+                line_interval = line.get("utterance_interval") or [line.get("start_s"), line.get("end_s")]
+                if not (isinstance(line_interval, list) and len(line_interval) == 2):
+                    continue
+                line_start, line_end = float(line_interval[0]), float(line_interval[1])
+                actual_interval = picked.get("actual_rendered_source_interval") or [source_start, float(picked.get("source_end_s") or source_start)]
+                if line_start < float(actual_interval[0]) - 1e-6 or line_end > float(actual_interval[1]) + 1e-6:
+                    continue
+                start = target_start + max(0.0, line_start
                                            - source_start)
-                end = target_start + max(0.0, float(line.get("end_s") or source_start)
+                end = target_start + max(0.0, line_end
                                          - source_start)
                 start, end = max(target_start, start), min(target_end, end)
                 if end - start >= 0.1:
@@ -304,6 +314,11 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
     距底 16.7~21.1% 的字幕带，改 0.23 后旧缓存差点直接命中）。"""
     import hashlib
 
+    policy = asset_plan.get("audio_policy") or {}
+    bgm_path = policy.get("bgm_path") or asset_plan.get("bgm_path")
+    bgm_hash = policy.get("bgm_sha256") or asset_plan.get("bgm_sha256")
+    if not bgm_hash and bgm_path and Path(str(bgm_path)).exists():
+        bgm_hash = _sha256_file(Path(str(bgm_path)))
     payload = json.dumps({
         "reference": recipe.get("reference"),
         "operations": recipe.get("operations"),
@@ -312,11 +327,19 @@ def render_cache_key(recipe: dict, asset_plan: dict, retrieval: list[dict], *,
         "exec_policy": 4,
         "copy_cues": asset_plan.get("copy_cues"),
         "audio_mode": asset_plan.get("audio_mode"),
+        "audio_policy": asset_plan.get("audio_policy"),
+        "source_scope": asset_plan.get("source_scope"),
+        "bgm": bgm_hash,
+        "source_intervals": [[row.get("slot_idx"),
+                               (row.get("picked") or {}).get("source_start_s"),
+                               (row.get("picked") or {}).get("source_end_s")]
+                              for row in retrieval],
         "theme": asset_plan.get("theme"),
         "slots": asset_plan.get("slots"),
         "picked": [[row.get("slot_idx"),
                     (row.get("picked") or {}).get("video"),
-                    (row.get("picked") or {}).get("source_start_s")]
+                    (row.get("picked") or {}).get("source_start_s"),
+                    (row.get("picked") or {}).get("source_end_s")]
                    for row in retrieval],
         "canvas": [canvas_width, canvas_height], "narrative": narrative_mode,
         "subtitle_crops": subtitle_crops or [],
@@ -534,6 +557,8 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
         if audio_mode == "mix" and has_bgm:
             # mix 三输入：[0]=masked(视频) [1]=concat(原声) [2]=bgm(loop)
             # -vf（视频滤镜链/字幕烧录）与 -filter_complex（音频终混）并存
+            pre_inputs = [str(bgm_path) if item == "__BGM__" else str(item)
+                          for item in pre_inputs]
             args = (["-y", "-loglevel", "error", "-i", str(masked_video),
                      "-i", str(concat_video), *pre_inputs,
                      "-vf", filter_chain,
@@ -585,3 +610,69 @@ def render_recipe(cfg: AppConfig, recipe: dict, asset_plan: dict, retrieval: lis
     cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2),
                           encoding="utf-8")
     return final
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def frame_md5(ffmpeg_bin: str, video: Path) -> str:
+    """Return deterministic video-only framemd5 for variant equality checks."""
+    proc = subprocess.run([ffmpeg_bin, "-v", "error", "-i", str(video), "-map", "0:v:0",
+                           "-f", "framemd5", "-"], capture_output=True, text=True,
+                          cwd=repo_root(), check=False, timeout=600)
+    if proc.returncode:
+        raise RuntimeError(f"framemd5 failed: {(proc.stderr or '')[-300:]}")
+    return hashlib.md5(proc.stdout.encode("utf-8")).hexdigest()
+
+
+def derive_audio_variants(cfg: AppConfig, content_master: Path, output_dir: Path, *,
+                          bgm_path: Path, mix_volume: float = 0.25,
+                          duration_s: float | None = None) -> dict[str, Path]:
+    """Derive source-only and BGM-mix files from exactly one video master.
+
+    Video packets are copied in both branches, so frame identity is physical,
+    not merely asserted by a shared plan hash.
+    """
+    content_master, output_dir, bgm_path = Path(content_master), Path(output_dir), Path(bgm_path)
+    if not content_master.exists():
+        raise FileNotFoundError(content_master)
+    if not bgm_path.exists():
+        raise FileNotFoundError(bgm_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_out = output_dir / "source_only" / "rendered.mp4"
+    mix_out = output_dir / "bgm_mix" / "rendered.mp4"
+    source_out.parent.mkdir(parents=True, exist_ok=True); mix_out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(content_master, source_out)
+    ffmpeg_bin = cfg.perception.get("ffmpeg_bin", "ffmpeg")
+    render_duration = float(duration_s) if duration_s is not None else None
+    fade_out = max(0.0, render_duration - 1.0) if render_duration is not None else 0.0
+    audio_filter = (f"[1:a]volume={float(mix_volume):g},afade=t=in:st=0:d=0.5,"
+                    f"afade=t=out:st={fade_out:g}:d=1.0[bg];"
+                    "[0:a]volume=1.0[ra];[ra][bg]amix=inputs=2:duration=first:normalize=0[au]")
+    args = ["-y", "-loglevel", "error", "-i", str(content_master), "-stream_loop", "-1", "-i", str(bgm_path),
+            "-filter_complex", audio_filter, "-map", "0:v:0", "-map", "[au]"]
+    if render_duration is not None:
+        args += ["-t", f"{render_duration:g}"]
+    args += ["-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", str(mix_out)]
+    if "__BGM__" in " ".join(args):
+        raise RuntimeError("unresolved __BGM__ placeholder")
+    common.run_ffmpeg(ffmpeg_bin, args, timeout_s=max(300, int((render_duration or 60) * 20)))
+    master_hash = _sha256_file(content_master)
+    source_hash, mix_hash = _sha256_file(source_out), _sha256_file(mix_out)
+    frames = frame_md5(ffmpeg_bin, source_out)
+    mix_frames = frame_md5(ffmpeg_bin, mix_out)
+    if frames != mix_frames:
+        raise RuntimeError("audio variants changed video frames")
+    manifest = {"content_master": str(content_master), "content_master_sha256": master_hash,
+                "source_only": {"path": str(source_out), "sha256": source_hash, "frame_md5": frames},
+                "bgm_mix": {"path": str(mix_out), "sha256": mix_hash, "frame_md5": mix_frames,
+                            "bgm_sha256": _sha256_file(bgm_path), "bgm_path": str(bgm_path),
+                            "mix_volume": float(mix_volume), "fade_in_s": 0.5, "fade_out_s": 1.0},
+                "video_identical": frames == mix_frames, "commands": [args]}
+    (output_dir / "audio_variants_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"source_only": source_out, "bgm_mix": mix_out}

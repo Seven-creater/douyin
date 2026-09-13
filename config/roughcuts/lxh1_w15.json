@@ -1,0 +1,41 @@
+{
+  "spec_version": "roughcut_v2",
+  "source": "luoxiaohei1",
+  "base_window": 15,
+  "source_scope": {
+    "start_s": 2965.0,
+    "end_s": 3005.0,
+    "reason": "w15 关键对白及相邻上下文"
+  },
+  "focus_utterance": {
+    "utterance_id": null,
+    "candidate_interval": [2977.5, 2990.63],
+    "query": "人和妖不能简单按类别判断好坏"
+  },
+  "stages": [
+    {
+      "id": "setup",
+      "required": false,
+      "purpose": "建立说话双方和语境",
+      "evidence_type": "visual|dialogue|both"
+    },
+    {
+      "id": "core_statement",
+      "required": true,
+      "purpose": "完整表达核心判断",
+      "evidence_type": "dialogue"
+    },
+    {
+      "id": "response",
+      "required": false,
+      "purpose": "保留必要回应或人物反应",
+      "evidence_type": "visual|dialogue|both"
+    }
+  ],
+  "duration": {
+    "preferred_s": 22.0,
+    "min_s": 12.0,
+    "max_s": 26.4
+  },
+  "audio_variants": ["source_only", "bgm_mix"]
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from pathlib import Path
 
 from src.agentic_video.long_video import (index_selected_windows, resolve_source_video,
@@ -175,16 +176,33 @@ def run_source_transcript(cfg, source: str, video: Path, *, force: bool = False,
 
 def attach_transcript_to_shots(result_path: Path, transcript: dict) -> Path:
     envelope = json.loads(Path(result_path).read_text(encoding="utf-8"))
+    segments = []
+    for index, segment in enumerate(transcript.get("segments") or []):
+        start = float(segment.get("start_ms") or 0) / 1000
+        end = float(segment.get("end_ms") or 0) / 1000
+        if end <= start:
+            continue
+        segments.append((f"utt_{index:05d}", segment, start, end))
     for shot in envelope["output"]["shots"]:
         dialogue = []
-        for segment in transcript.get("segments") or []:
-            start = float(segment.get("start_ms") or 0) / 1000
-            end = float(segment.get("end_ms") or 0) / 1000
+        shot_start = float(shot["start_s"])
+        shot_end = float(shot["end_s"])
+        for utterance_id, segment, start, end in segments:
             if end <= float(shot["start_s"]) or start >= float(shot["end_s"]):
                 continue
+            overlap_start = max(start, shot_start)
+            overlap_end = min(end, shot_end)
             dialogue.append({
-                "start_s": round(max(start, float(shot["start_s"])), 3),
-                "end_s": round(min(end, float(shot["end_s"])), 3),
+                "utterance_id": utterance_id,
+                "utterance_interval": [round(start, 3), round(end, 3)],
+                "overlap_interval": [round(overlap_start, 3),
+                                      round(overlap_end, 3)],
+                "partial": overlap_start > start + 1e-6
+                          or overlap_end < end - 1e-6,
+                # Compatibility aliases remain the shot-local overlap.  Code
+                # that needs complete evidence must consume utterance_interval.
+                "start_s": round(overlap_start, 3),
+                "end_s": round(overlap_end, 3),
                 "original": str(segment.get("text") or ""),
                 # V5 P0（外审六轮硬修改①）：生产端不再写 sentinel 字符串——
                 # null=没有数据；"uncertain"=一段字符串，`or` 短路会遮蔽
@@ -400,7 +418,16 @@ def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
             end = max(time_offset_s, min(window_end, end))
             if end <= start:
                 continue
+            utterance_id = str(line.get("utterance_id") or "").strip()
+            if not utterance_id:
+                token = f"{start:.3f}|{end:.3f}|{line.get('original') or ''}"
+                utterance_id = "utt_ann_" + hashlib.sha1(token.encode(
+                    "utf-8")).hexdigest()[:12]
             dialogue.append({
+                "utterance_id": utterance_id,
+                "utterance_interval": [round(start, 3), round(end, 3)],
+                "overlap_interval": [round(start, 3), round(end, 3)],
+                "partial": False,
                 "start_s": round(start, 3), "end_s": round(end, 3),
                 "original": str(line.get("original") or ""),
                 # V5 P0：模型输出 sentinel（uncertain/unknown）归一为 None，

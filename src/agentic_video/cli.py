@@ -100,11 +100,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     roughcut = sub.add_parser(
         "roughcut", help="single-window rough cut control experiment (V5 P5)")
-    roughcut.add_argument("--source", required=True)
-    roughcut.add_argument("--window", type=int, required=True)
-    roughcut.add_argument("--theme", required=True)
+    roughcut.add_argument("--spec", default="config/roughcuts/lxh1_w15.json",
+                          help="RoughcutSpec JSON (default: lxh1_w15)")
+    roughcut.add_argument("--source", default=None,
+                          help="legacy override; must match spec source")
+    roughcut.add_argument("--window", type=int, default=None,
+                          help="legacy window label (spec base_window is authoritative)")
+    roughcut.add_argument("--theme", default="")
     roughcut.add_argument("--output", required=True)
-    roughcut.add_argument("--target-duration", type=float, default=22.0)
+    roughcut.add_argument("--target-duration", type=float, default=None)
+    roughcut.add_argument("--unverified", action="store_true",
+                          help="offline control test only; never deliverable")
     roughcut.add_argument("--force", action="store_true")
 
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
@@ -313,10 +319,17 @@ def _render(args, cfg) -> dict:
 
 def _roughcut(args, cfg) -> dict:
     from src.agentic_video.roughcut import run_roughcut
+    runner = None
+    if not args.unverified:
+        from src.perception.omni_runner import OmniRunner
+        runner = OmniRunner(cfg.perception.get("omni") or {},
+                            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
 
     final = run_roughcut(cfg, args.source, args.window, theme=args.theme,
                          output_dir=Path(args.output),
-                         target_duration_s=args.target_duration, force=args.force)
+                         target_duration_s=args.target_duration, force=args.force,
+                         spec=Path(args.spec), runner=runner,
+                         allow_unverified=args.unverified)
     return {"output": str(final)}
 
 

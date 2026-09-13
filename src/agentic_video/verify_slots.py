@@ -200,6 +200,7 @@ LOCALIZE_PROMPT = """你是素材证据定位员。观看影片 {video} 的 {sta
 输出格式（铁律）：**只输出一个 JSON 对象，之后不得再输出任何内容**——
 不要输出多个候选、不要重复输出、不要附加任何文字：
 {{"found": true, "start": {start:g}, "end": {end:g},
+"timebase": "absolute|relative",
 "evidence": "该片段内可见/可听内容的一句话（写实，不外推）", "confidence": 0.0}}
 start/end 用影片**绝对时间**（即 {start:g}~{end:g} 范围内的秒数）。
 
@@ -251,6 +252,7 @@ def parse_localization(raw: str) -> dict | None:
         return {
             "found": bool(payload.get("found")),
             "interval": [float(v) for v in interval] if interval else None,
+            "timebase": str(payload.get("timebase") or "").strip().lower() or None,
             "evidence": str(payload.get("evidence") or "")[:160],
             "confidence": confidence,
         }
@@ -316,20 +318,45 @@ def localize_coarse_slots(cfg, story_plan: dict, *, runner,
             entry["parsed"] = parsed
             log.append(entry)
             continue
-        rel_start, rel_end = parsed["interval"]
-        # 探针实锤：模型常报**绝对时间**（窗口 4095-4140 里答 start=4121）——
-        # 旧代码按相对秒处理 → 4095+4121 越界夹到窗尾 → 区间零长 → 4/4
-        # "too_short" 拒绝（窗口明明有内容，模型也明明找到了）。判定：区间
-        # 值落在窗口绝对范围内 → 直接当绝对坐标用。
+        raw_start, raw_end = parsed["interval"]
+        raw_timebase = parsed.get("timebase")
         clip_duration = win_end - win_start
-        if rel_start > clip_duration and win_start <= rel_start < win_end:
-            ev_start = rel_start                        # 绝对时间制式
+        if raw_timebase not in {"absolute", "relative"}:
+            absolute = win_start <= raw_start < raw_end <= win_end
+            relative = 0.0 <= raw_start < raw_end <= clip_duration
+            if absolute == relative:
+                parsed = None
+                entry["outcome"] = "rejected"
+                entry["error"] = "ambiguous_or_missing_timebase"
+                log.append(entry)
+                slot["status"], slot["reason"] = "unsupported", \
+                    "coarse_unlocalizable(timebase_ambiguous)"
+                continue
+            raw_timebase = "absolute" if absolute else "relative"
+        if raw_timebase == "absolute":
+            ev_start, ev_end = raw_start, raw_end
         else:
-            ev_start = min(win_end, max(win_start, win_start + rel_start))
-        ev_end = (rel_end if win_start <= rel_end <= win_end
-                  else ev_start + 0.0)
-        ev_end = max(ev_end, ev_start + 0.5)            # 证据至少半秒可辨
-        ev_end = min(ev_end, win_end)
+            ev_start, ev_end = win_start + raw_start, win_start + raw_end
+        if not (win_start <= ev_start < ev_end <= win_end):
+            entry.update({"outcome": "rejected",
+                          "error": "normalized_interval_outside_input_clip"})
+            log.append(entry)
+            slot["status"], slot["reason"] = "unsupported", \
+                "coarse_unlocalizable(interval_outside_clip)"
+            continue
+        if ev_end - ev_start < 0.5:
+            ev_end = min(win_end, ev_start + 0.5)
+            if ev_end <= ev_start:
+                entry.update({"outcome": "rejected", "error": "too_short"})
+                log.append(entry)
+                slot["status"], slot["reason"] = "unsupported", \
+                    "coarse_unlocalizable(too_short)"
+                continue
+        entry.update({"raw_interval": [raw_start, raw_end],
+                      "raw_timebase": raw_timebase,
+                      "input_clip_interval": [win_start, win_end],
+                      "timebase_origin_s": win_start,
+                      "normalized_absolute_interval": [ev_start, ev_end]})
         # V5 P2（外审六轮硬修改⑥-2）：**证据区间 ≠ 剪辑区间**——证据先完整
         # 保留（旧代码 abs_end=start+budget 把 120-122s 的证据切成 120-125.5
         # 再硬砍 122-125.5 的事件尾巴）；不足预算的余量做 pre/post roll：
@@ -351,10 +378,16 @@ def localize_coarse_slots(cfg, story_plan: dict, *, runner,
             # 证据本身超预算（如 7.5s 对白 vs 5.5s 槽）——不截断，标记交
             # 槽长自适应（content_preserving 模式）扩槽
             flags.append("evidence_exceeds_budget")
-            source["evidence_interval"] = [round(ev_start, 3), round(ev_end, 3)]
+        source["evidence_interval"] = [round(ev_start, 3), round(ev_end, 3)]
+        source["required_evidence_interval"] = [round(ev_start, 3), round(ev_end, 3)]
         source["start_s"], source["end_s"] = round(cut_start, 3), round(cut_end, 3)
         source["anchor"] = "localized"
         source["caption"] = parsed["evidence"] or source.get("caption") or ""
+        source["localization"] = {
+            "raw_interval": [raw_start, raw_end], "raw_timebase": raw_timebase,
+            "input_clip_interval": [win_start, win_end], "timebase_origin_s": win_start,
+            "normalized_absolute_interval": [round(ev_start, 3), round(ev_end, 3)],
+        }
         entry.update({"outcome": "localized",
                       "evidence_interval": [round(ev_start, 3), round(ev_end, 3)],
                       "cut_interval": [round(cut_start, 3), round(cut_end, 3)],
@@ -471,7 +504,7 @@ BLIND_VIDEO_PROMPT = """你是第一次观看这条短视频的观众，没有�
 BLIND_VIDEO_PROMPT_VERSION = "blind_v2"   # V4：盲看输入改为终版（含烧录文案+终混音）
 
 
-def blind_video_check(video_path, *, runner) -> dict:
+def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
     """V3 P3：渲染后盲看（零上下文）——只看成片回答主体一致性/故事性。
 
     不给 Story Plan / 文案 / 参考语境（V1 红线3：看过计划的模型自报答对
@@ -479,7 +512,11 @@ def blind_video_check(video_path, *, runner) -> dict:
     """
     from src.perception.common import prepare_watch_copy
 
-    answer = runner.watch(prepare_watch_copy(video_path), BLIND_VIDEO_PROMPT,
+    prompt = BLIND_VIDEO_PROMPT
+    if roughcut:
+        prompt += ('\n这是素材侧粗剪验收：不要猜官方角色名；补充两个布尔字段：'
+                   '{"speech_clear":true,"music_present":true}。')
+    answer = runner.watch(prepare_watch_copy(video_path), prompt,
                           max_new_tokens=1024)
     block = extract_json_block(answer.text)
     try:
@@ -501,6 +538,8 @@ def blind_video_check(video_path, *, runner) -> dict:
                           if isinstance(item, dict)],
         "story_in_one_sentence": str(payload.get("story_in_one_sentence") or ""),
         "event_relations": str(payload.get("event_relations") or ""),
+        "speech_clear": payload.get("speech_clear") if isinstance(payload.get("speech_clear"), bool) else None,
+        "music_present": payload.get("music_present") if isinstance(payload.get("music_present"), bool) else None,
         "prompt_version": BLIND_VIDEO_PROMPT_VERSION,
     }
 

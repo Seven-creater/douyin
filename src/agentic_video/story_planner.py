@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import unicodedata
 from pathlib import Path
 
 from src.agentic_video.narrative import ARC_ROLES, validate_narrative_program
@@ -24,6 +25,8 @@ STORY_PLAN_VERSION = "1.1"   # V4（外审三轮）：转移分类学（cutaway�
 # 旧 45..75 把整类模板挡在门外。上界 75 保持不动（全部现有测试时长都在区间内）。
 STORY_MIN_TARGET_DURATION_S = 20.0
 STORY_MAX_TARGET_DURATION_S = 75.0
+ROUGH_CUT_MIN_TARGET_DURATION_S = 12.0
+ROUGH_CUT_MAX_TARGET_DURATION_S = 26.4
 # 必选弧角色（厚参考弧路径用；薄弧路径的 required 由 Narrative Form 模板提供）
 REQUIRED_ROLES = frozenset({"hook", "conflict", "climax", "resolution"})
 
@@ -304,6 +307,31 @@ def rank_story_path(candidate_groups: list[list[dict]],
     return path
 
 
+def _dialogue_has_content(line: dict) -> bool:
+    """Ignore punctuation-only ASR tiles while retaining short words/interjections."""
+    text = dialogue_text(line)
+    if not text:
+        return False
+    return any(ch.isalnum() or unicodedata.category(ch).startswith("L")
+               for ch in text)
+
+
+def _dialogue_interval(line: dict, *, required: bool = False) -> tuple[float, float] | None:
+    """Read canonical full utterance intervals with legacy compatibility."""
+    interval = line.get("utterance_interval") or line.get("required_evidence_interval")
+    if not (isinstance(interval, list) and len(interval) == 2):
+        interval = [line.get("start_s"), line.get("end_s")]
+    try:
+        start, end = float(interval[0]), float(interval[1])
+    except (TypeError, ValueError):
+        return None
+    if end <= start:
+        return None
+    if required or _dialogue_has_content(line):
+        return start, end
+    return None
+
+
 def fit_slot_intervals(story_plan: dict, *, mode: str = "template_faithful") -> None:
     """V5 P5（外审六轮）：槽长自适应——content_preserving 模式下证据/对白
     比等分预算长时扩槽（w15 的 7.5s 对白 vs 5.5s 槽不硬切）；template_faithful
@@ -317,6 +345,70 @@ def fit_slot_intervals(story_plan: dict, *, mode: str = "template_faithful") -> 
     if not slots:
         return
     original_total = float(story_plan.get("target_duration_s") or 0)
+    if story_plan.get("plan_kind") == "roughcut":
+        preferred = float((story_plan.get("duration_policy") or {}).get(
+            "preferred_s", original_total) or original_total)
+        minimum = float((story_plan.get("duration_policy") or {}).get(
+            "min_s", ROUGH_CUT_MIN_TARGET_DURATION_S))
+        ceiling = float((story_plan.get("duration_policy") or {}).get(
+            "max_s", ROUGH_CUT_MAX_TARGET_DURATION_S))
+        needed_all = []
+        for slot in slots:
+            source = slot.get("source") or {}
+            evidence = source.get("required_evidence_interval") \
+                or source.get("evidence_interval")
+            evidence_len = 0.0
+            if isinstance(evidence, list) and len(evidence) == 2:
+                evidence_len = max(0.0, float(evidence[1]) - float(evidence[0]))
+            dialogue_len = max(((_dialogue_interval(line) or (0.0, 0.0))[1]
+                                - (_dialogue_interval(line) or (0.0, 0.0))[0]
+                                for line in source.get("dialogue") or []), default=0.0)
+            source_len = max(0.0, float(source.get("end_s") or 0)
+                             - float(source.get("start_s") or 0))
+            # The rendered source interval is itself evidence (including
+            # bounded pre/post roll); never assign a shorter target interval and
+            # let FFmpeg silently trim it.
+            required_len = max(evidence_len, dialogue_len, source_len)
+            if required_len > ceiling + 1e-6:
+                raise ValueError("budget_infeasible: required evidence exceeds roughcut ceiling")
+            needed_all.append(required_len)
+        active_total = sum(needed_all)
+        if active_total < minimum:
+            # Keep the preferred/minimum target as a *budget*, not as a license to
+            # invent filler.  Optional context stages may use their real source
+            # interval; if there is no such interval the caller must block rather
+            # than pad with black/forest footage.
+            context_capacity = sum(
+                max(0.0, float((slot.get("source") or {}).get("end_s") or 0)
+                    - float((slot.get("source") or {}).get("start_s") or 0))
+                for slot in slots if not (slot.get("need_spec") or {}).get("required"))
+            active_total = min(ceiling, max(active_total, min(minimum,
+                                                               active_total + context_capacity)))
+        if active_total > ceiling + 1e-6:
+            raise ValueError("budget_infeasible: required evidence cannot fit roughcut budget")
+        story_plan["duration_extension_reason"] = (
+            "content_preserving: required evidence and bounded context roll"
+            if abs(active_total - preferred) > 1e-6 else "")
+        story_plan["target_duration_s"] = round(active_total, 3)
+        cursor = 0.0
+        live_count = len(slots)
+        # Allocate required evidence first, then distribute only the remaining
+        # real context budget.  The old max(equal, required) loop could sum to
+        # >26.4s even when active_total was within the cap.
+        remaining = max(0.0, active_total - sum(needed_all))
+        lengths = list(needed_all)
+        for idx in range(live_count):
+            share = remaining / max(1, live_count - idx)
+            lengths[idx] += share
+            remaining -= share
+        for slot, length in zip(slots, lengths):
+            slot["target_interval"] = [round(cursor, 3), round(cursor + length, 3)]
+            cursor += length
+        # The final slot absorbs rounding only; no slot may leave the declared cap.
+        if cursor > ceiling + 1e-6:
+            raise ValueError("budget_infeasible: duration rounding exceeded ceiling")
+        story_plan["target_duration_s"] = round(cursor, 3)
+        return
     equal = original_total / max(1, len(slots))
     needed_all = []
     for slot in slots:
@@ -324,7 +416,8 @@ def fit_slot_intervals(story_plan: dict, *, mode: str = "template_faithful") -> 
         ev = source.get("evidence_interval")
         ev_len = float(ev[1]) - float(ev[0]) if ev else 0.0
         anchor_lines = source.get("dialogue") or []
-        anchor_len = max((float(l.get("end_s", 0)) - float(l.get("start_s", 0))
+        anchor_len = max(((_dialogue_interval(l) or (0.0, 0.0))[1]
+                          - (_dialogue_interval(l) or (0.0, 0.0))[0]
                           for l in anchor_lines), default=0.0)
         needed = max(equal, ev_len, anchor_len)
         needed_all.append(min(15.0, max(3.0, needed)))
@@ -476,7 +569,7 @@ def _rank_runs(candidate_groups: list[list[dict]], hard: list[bool],
 
 def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                          theme: str, library: str, target_duration_s: float,
-                         cfg=None) -> dict:
+                         cfg=None, source_scope: dict | None = None) -> dict:
     resolved, form_name = resolve_slot_sequence(narrative)
     specs = _build_specs(narrative)
     hard = _hard_continuity(specs)
@@ -531,6 +624,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
         if key is not None:
             row_use_counts[key] = row_use_counts.get(key, 0) + 1
     slot_duration = target_duration_s / max(1, len(resolved))
+    roughcut_mode = bool(narrative.get("roughcut_spec"))
     slots = []
     for idx, segment in enumerate(resolved):
         start = round(idx * slot_duration, 6)
@@ -538,8 +632,10 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                     else (idx + 1) * slot_duration, 6)
         picked = path[idx]
         dialogue = list((picked or {}).get("dialogue") or [])
-        source_start = float((picked or {}).get("source_start_s", 0))
-        source_end = float((picked or {}).get("source_end_s", 0))
+        container_start = float((picked or {}).get("source_start_s", 0))
+        container_end = float((picked or {}).get("source_end_s", 0))
+        source_start, source_end = clip_to_source_scope(
+            container_start, container_end, source_scope)
         if dialogue:
             source_start = min([source_start] +
                                [float(line.get("start_s", source_start)) for line in dialogue])
@@ -571,7 +667,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                     source_trimmed = True
                 source_start, source_end = evidence["start_s"], evidence["end_s"]
                 evidence_anchor = evidence.get("anchor")
-                if evidence_anchor != "coarse" \
+                if not roughcut_mode and evidence_anchor != "coarse" \
                         and source_end - source_start > slot_budget + 1e-6:
                     source_end = source_start + slot_budget   # 单镜头超预算兜底截断
                 evidence_caption = evidence["caption"] or None
@@ -591,10 +687,12 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                 else:
                     source_end = source_start + slot_budget
                     source_trimmed = True
-        if picked:
+        if picked and not roughcut_mode:
             dialogue = [line for line in dialogue
                         if float(line.get("start_s", source_start)) >= source_start - 1e-6
                         and float(line.get("end_s", source_end)) <= source_end + 1e-6]
+        elif picked:
+            dialogue = [dict(line) for line in dialogue]
         source = {
             "video": str((picked or {}).get("video") or ""),
             "video_stem": str((picked or {}).get("video_stem") or ""),
@@ -602,6 +700,7 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "shot_idx": (picked or {}).get("shot_idx"),
             "shot_indices": evidence_shots or list((picked or {}).get("shot_indices") or []),
             "start_s": source_start, "end_s": source_end,
+            "container_interval": [container_start, container_end],
             "event_id": str((picked or {}).get("event_id") or ""),
             "causal_predecessors": list((picked or {}).get("causal_predecessors") or []),
             "caption": str(evidence_caption or (picked or {}).get("caption") or ""),
@@ -618,6 +717,19 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
             "focus_x": min(1.0, max(0.0, float((picked or {}).get("focus_x", 0.5)))),
             "dialogue": dialogue,
         }
+        roughcut_reason = ""
+        if roughcut_mode:
+            full_intervals = [interval for line in dialogue
+                              if _dialogue_has_content(line)
+                              for interval in [_dialogue_interval(line)] if interval]
+            if full_intervals:
+                source["utterance_interval"] = [
+                    min(interval[0] for interval in full_intervals),
+                    max(interval[1] for interval in full_intervals)]
+                source["candidate_evidence_interval"] = list(source["utterance_interval"])
+            if source_scope and not source_scope_contains(source_start, source_end,
+                                                          source_scope):
+                roughcut_reason = "scope_violation"
         transition_reason = "opening"
         if idx and picked and path[idx - 1]:
             previous = path[idx - 1]
@@ -635,6 +747,8 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                        else "uncertain" if picked else "unsupported")
         reason = ("unexplained_entity_switch" if transition_reason == "unexplained"
                   else "" if picked else "library_insufficient")
+        if roughcut_reason:
+            slot_status, reason = "unsupported", roughcut_reason
         if not picked and not specs[idx]["required"]:
             reason = "optional_slot_no_evidence"           # 可选槽：记录后跳过
         slots.append({
@@ -666,6 +780,8 @@ def _assemble_story_plan(narrative: dict, candidate_groups: list[list[dict]], *,
                            "slot_functions": [slot.get("form_function")
                                               for slot in resolved]},
         "entity_contract": contract,
+        "source_scope": deepcopy(source_scope) if source_scope else None,
+        "plan_kind": "roughcut" if roughcut_mode else "narrative",
         # 情绪峰值提示（参考弧 climax 段在参考时长中的比例）：P2 起透传给
         # copywriter 对齐卡点连发，emotion_curve 首次有了消费者。
         "emotion_peak_hint": _emotion_peak_hint(narrative),
@@ -982,15 +1098,53 @@ def _row_in_library(row: dict, library: str) -> bool:
                for prefix in prefixes)
 
 
+def _row_interval(row: dict) -> tuple[float, float]:
+    """Return the immutable container interval for an index row."""
+    return (float(row.get("source_start_s", row.get("start_s", 0)) or 0),
+            float(row.get("source_end_s", row.get("end_s", 0)) or 0))
+
+
+def source_scope_overlap(row: dict, source_scope: dict | None) -> bool:
+    """A container may cross the scope boundary, but must overlap it."""
+    if not source_scope:
+        return True
+    scope_start = float(source_scope.get("start_s", 0) or 0)
+    scope_end = float(source_scope.get("end_s", 0) or 0)
+    start, end = _row_interval(row)
+    return end > scope_start + 1e-6 and start < scope_end - 1e-6
+
+
+def source_scope_contains(start: float, end: float,
+                         source_scope: dict | None) -> bool:
+    """Final evidence/cut intervals must be fully inside the declared scope."""
+    if not source_scope:
+        return True
+    scope_start = float(source_scope.get("start_s", 0) or 0)
+    scope_end = float(source_scope.get("end_s", 0) or 0)
+    return (start >= scope_start - 1e-6 and end <= scope_end + 1e-6
+            and end > start + 1e-6)
+
+
+def clip_to_source_scope(start: float, end: float,
+                         source_scope: dict | None) -> tuple[float, float]:
+    """Intersect a container interval with scope for candidate inspection."""
+    if not source_scope:
+        return start, end
+    return (max(start, float(source_scope.get("start_s", 0) or 0)),
+            min(end, float(source_scope.get("end_s", 0) or 0)))
+
+
 def score_slot_candidates(cfg, rows, embeddings, *, query, query_embedding, role,
-                          library, slot_budget_s, top_k=12,
-                          used_rows=None) -> list[dict]:
+                           library, slot_budget_s, top_k=12,
+                           used_rows=None, source_scope: dict | None = None) -> list[dict]:
     """单槽候选打分（从 build_story_plan_from_index 抽出，初次规划与 P3 重搜共用）。
 
     返回按 semantic_score 降序的合并事件候选；used_rows 中的行（其它槽已选）
     被排除，重搜不会换汤不换药地撞回同一段素材。
     """
-    scoped = [(idx, row) for idx, row in enumerate(rows) if _row_in_library(row, library)]
+    scoped = [(idx, row) for idx, row in enumerate(rows)
+              if _row_in_library(row, library)
+              and source_scope_overlap(row, source_scope)]
     excluded = zones.excluded_row_indices([row for _idx, row in scoped], cfg)
     allowed = [pair for pair_idx, pair in enumerate(scoped) if pair_idx not in excluded]
     cosine = (embeddings @ query_embedding.reshape(-1)).ravel()
@@ -1031,7 +1185,8 @@ def score_slot_candidates(cfg, rows, embeddings, *, query, query_embedding, role
 
 def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: str,
                                 target_duration_s: float = 60.0,
-                                top_k: int = 12) -> tuple[dict, list[list[dict]]]:
+                                top_k: int = 12,
+                                source_scope: dict | None = None) -> tuple[dict, list[list[dict]]]:
     """Semantic shortlist per arc slot, followed by a globally coherent path."""
     errors = validate_narrative_program(narrative)
     if errors:
@@ -1048,12 +1203,16 @@ def build_story_plan_from_index(cfg, narrative: dict, *, theme: str, library: st
     candidate_groups = [
         score_slot_candidates(cfg, rows, embeddings, query=query,
                               query_embedding=query_embedding, role=segment["role"],
-                              library=library, slot_budget_s=slot_budget, top_k=top_k)
+                              library=library, slot_budget_s=slot_budget, top_k=top_k,
+                              source_scope=source_scope)
         for segment, query, query_embedding in zip(resolved, queries, query_embeddings)]
     plan = _assemble_story_plan(narrative, candidate_groups, theme=theme, library=library,
-                                target_duration_s=target_duration_s, cfg=cfg)
+                                 target_duration_s=target_duration_s, cfg=cfg,
+                                 source_scope=source_scope)
     plan["retrieval_meta"] = {"rows_total": len(rows), "top_k": top_k,
-                              "slot_budget_s": round(slot_budget, 3)}
+                               "slot_budget_s": round(slot_budget, 3)}
+    if source_scope:
+        plan["source_scope"] = deepcopy(source_scope)
     return plan, candidate_groups
 
 
@@ -1088,6 +1247,7 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
               if idx != slot_idx and other.get("status") in {"supported", "uncertain"}
               and other.get("source", {}).get("video")]
     rejected = list(rejected or [])
+    source_scope = story_plan.get("source_scope")
     contract = story_plan.get("entity_contract") or {}
     protagonist = contract.get("protagonist")
     registry = load_entity_registry(cfg)
@@ -1105,6 +1265,8 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
 
     def _eligible(row: dict) -> bool:
         if not str(row.get("video") or ""):
+            return False
+        if not source_scope_overlap(row, story_plan.get("source_scope")):
             return False
         if anchor_keys and not (anchor_keys & row_identity_keys(row, registry)):
             return False
@@ -1138,7 +1300,8 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
         fresh = score_slot_candidates(cfg, rows, embeddings, query=query,
                                       query_embedding=query_embedding, role=role,
                                       library=story_plan["library"],
-                                      slot_budget_s=budget, top_k=top_k)
+                                      slot_budget_s=budget, top_k=top_k,
+                                      source_scope=story_plan.get("source_scope"))
         pick = next((row for row in fresh if _eligible(row)), None)
         if pick is not None:
             attempts.append({"level": 2, "picked": pick})
@@ -1151,6 +1314,8 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
     trial_slot = trial["slots"][slot_idx]
     source_start = float(picked.get("source_start_s", 0))
     source_end = float(picked.get("source_end_s", 0))
+    source_start, source_end = clip_to_source_scope(
+        source_start, source_end, story_plan.get("source_scope"))
     budget = float(trial_slot["target_interval"][1]) - float(trial_slot["target_interval"][0])
     trimmed = False
     caption = str(picked.get("caption") or "")
@@ -1160,7 +1325,8 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
         "；".join(filter(None, [reason, str(picked.get("query") or ""), caption])))
     if evidence is not None:
         source_start, source_end = evidence["start_s"], evidence["end_s"]
-        if evidence.get("anchor") != "coarse" \
+        if story_plan.get("plan_kind") != "roughcut" \
+                and evidence.get("anchor") != "coarse" \
                 and evidence["end_s"] - evidence["start_s"] > budget + 1e-6:
             source_end = source_start + budget          # 单镜头超预算兜底
         trimmed = (abs(evidence["start_s"] - float(picked.get("source_start_s", 0))) > 1e-6
@@ -1177,14 +1343,21 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
             source_start, source_end = anchored
         elif source_end - source_start > 2 * budget + 1e-6:
             pass                                         # coarse：完整区间交 localize
-        else:
+        elif story_plan.get("plan_kind") != "roughcut":
             source_end = source_start + budget
         trimmed = True
+    replacement_dialogue = ([dict(line) for line in (picked.get("dialogue") or [])]
+                            if story_plan.get("plan_kind") == "roughcut" else
+                            [line for line in (picked.get("dialogue") or [])
+                             if float(line.get("start_s", source_start)) >= source_start - 1e-6
+                             and float(line.get("end_s", source_end)) <= source_end + 1e-6])
     trial_slot["source"] = {
         "video": str(picked.get("video") or ""), "video_stem": str(picked.get("video_stem") or ""),
         "window_idx": picked.get("window_idx"),
         "shot_idx": picked.get("shot_idx"), "shot_indices": shot_indices,
         "start_s": source_start, "end_s": source_end,
+        "container_interval": [float(picked.get("source_start_s", source_start)),
+                               float(picked.get("source_end_s", source_end))],
         "event_id": str(picked.get("event_id") or ""), "caption": caption,
         "causal_predecessors": list(picked.get("causal_predecessors") or []),
         "entity_ids": list(picked.get("entity_ids") or []),
@@ -1194,10 +1367,18 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
                      if isinstance(binding, dict)],
         "anchor": (evidence or {}).get("anchor"),
         "focus_x": min(1.0, max(0.0, float(picked.get("focus_x", 0.5)))),
-        "dialogue": [line for line in (picked.get("dialogue") or [])
-                     if float(line.get("start_s", source_start)) >= source_start - 1e-6
-                     and float(line.get("end_s", source_end)) <= source_end + 1e-6],
+        "dialogue": replacement_dialogue,
     }
+    if story_plan.get("plan_kind") == "roughcut":
+        from src.library.text_availability import dialogue_text as _dialogue_text
+        intervals = []
+        for line in replacement_dialogue:
+            text = _dialogue_text(line)
+            interval = line.get("utterance_interval") or [line.get("start_s"), line.get("end_s")]
+            if text and isinstance(interval, list) and len(interval) == 2:
+                intervals.append((float(interval[0]), float(interval[1])))
+        if intervals:
+            trial_slot["source"]["required_evidence_interval"] = [min(x[0] for x in intervals), max(x[1] for x in intervals)]
     errors = validate_story_plan(trial)
     if errors:
         return {"slot_idx": slot_idx, "status": "failed",
@@ -1224,7 +1405,8 @@ def re_search_slot(cfg, story_plan: dict, slot_idx: int, *, theme: str,
             "start_s": trial_slot["source"]["start_s"]}
 
 
-def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, list[dict]]:
+def story_plan_execution_inputs(story_plan: dict, recipe: dict, *,
+                                audio_policy: dict | None = None) -> tuple[dict, list[dict]]:
     """Adapt a traceable story path to the existing deterministic renderer contract."""
     errors = validate_story_plan(story_plan)
     if errors:
@@ -1254,6 +1436,10 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
 
     slots, retrieval = [], []
     for item in story_plan["slots"]:
+        if item.get("status") == "unsupported" and not (item.get("need_spec") or {}).get("required"):
+            # Optional stage with no evidence is omitted; never materialize a
+            # black segment merely to keep a stage placeholder.
+            continue
         start, end = map(float, item["target_interval"])
         active = [op for op in execution_recipe.get("operations") or []
                   if float(op["interval"][0]) <= end and float(op["interval"][1]) >= start]
@@ -1280,6 +1466,14 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
                 "event_id": source.get("event_id"),
                 "causal_predecessors": source.get("causal_predecessors") or [],
                 "dialogue": source.get("dialogue") or [],
+                "bindings": source.get("bindings") or [],
+                "required_evidence_interval": source.get("required_evidence_interval"),
+                "actual_rendered_source_interval": source.get("actual_rendered_source_interval")
+                or [float(source["start_s"]), float(source["end_s"])],
+                "utterance_interval": source.get("utterance_interval"),
+                "required_evidence_interval": source.get("required_evidence_interval"),
+                "actual_rendered_source_interval": source.get("actual_rendered_source_interval")
+                or [float(source["start_s"]), float(source["end_s"])],
                 "focus_x": float(source.get("focus_x", 0.5)),
             }
         retrieval.append({
@@ -1292,7 +1486,13 @@ def story_plan_execution_inputs(story_plan: dict, recipe: dict) -> tuple[dict, l
         "narrative_program_required": True, "slots": slots,
         # 文案轨（7682 型模板）：cues 已在成片时间轴，渲染时压制对白翻译字幕
         "copy_cues": (story_plan.get("copy") or {}).get("cues"),
-        "audio_mode": (story_plan.get("copy") or {}).get("audio_mode"),
+        "audio_mode": ((audio_policy or {}).get("audio_mode")
+                       if audio_policy is not None else
+                       (story_plan.get("copy") or {}).get("audio_mode")),
+        "audio_policy": deepcopy(audio_policy) if audio_policy is not None else None,
+        "source_scope": deepcopy(story_plan.get("source_scope")),
+        "story_plan_sha256": story_plan.get("story_plan_sha256"),
+        "retrieval_sha256": story_plan.get("retrieval_sha256"),
     }
     return asset_plan, retrieval
 
@@ -1320,9 +1520,26 @@ def validate_story_plan(plan: dict) -> list[str]:
     if not str(plan.get("library") or "").strip():
         errors.append("library missing")
     duration = float(plan.get("target_duration_s") or 0)
-    if not STORY_MIN_TARGET_DURATION_S <= duration <= STORY_MAX_TARGET_DURATION_S:
+    roughcut = plan.get("plan_kind") == "roughcut"
+    duration_policy = plan.get("duration_policy") or {}
+    min_duration = float(duration_policy.get("min_s", ROUGH_CUT_MIN_TARGET_DURATION_S)) \
+        if roughcut else STORY_MIN_TARGET_DURATION_S
+    max_duration = float(duration_policy.get("max_s", ROUGH_CUT_MAX_TARGET_DURATION_S)) \
+        if roughcut else STORY_MAX_TARGET_DURATION_S
+    if not min_duration <= duration <= max_duration:
         errors.append("target_duration_s outside "
-                      f"{STORY_MIN_TARGET_DURATION_S:g}..{STORY_MAX_TARGET_DURATION_S:g}")
+                      f"{min_duration:g}..{max_duration:g}")
+    source_scope = plan.get("source_scope") if roughcut else None
+    if roughcut:
+        if not isinstance(source_scope, dict):
+            errors.append("roughcut source_scope missing")
+        else:
+            try:
+                scope_start, scope_end = float(source_scope["start_s"]), float(source_scope["end_s"])
+                if scope_end <= scope_start:
+                    errors.append("roughcut source_scope invalid")
+            except (KeyError, TypeError, ValueError):
+                errors.append("roughcut source_scope invalid")
     slots = plan.get("slots")
     if not isinstance(slots, list) or not slots:
         return errors + ["slots must be non-empty"]
@@ -1348,6 +1565,12 @@ def validate_story_plan(plan: dict) -> list[str]:
             errors.append(f"{prefix}.target_interval invalid")
         else:
             start, end = map(float, interval)
+            zero_optional = roughcut and slot.get("status") == "unsupported" \
+                and not (slot.get("need_spec") or {}).get("required")
+            if zero_optional:
+                if abs(start - last_end) > 1e-5 or abs(end - start) > 1e-5:
+                    errors.append(f"{prefix}.target_interval invalid optional omission")
+                continue
             if abs(start - last_end) > 1e-5 or end <= start or end > duration + 1e-6:
                 errors.append(f"{prefix}.target_interval not continuous")
             last_end = end
@@ -1364,6 +1587,21 @@ def validate_story_plan(plan: dict) -> list[str]:
                 errors.append(f"{prefix}.source.event_id missing")
             if float(source.get("end_s") or 0) <= float(source.get("start_s") or 0):
                 errors.append(f"{prefix}.source interval invalid")
+            if roughcut and isinstance(source_scope, dict):
+                start_s, end_s = float(source.get("start_s") or 0), float(source.get("end_s") or 0)
+                if not source_scope_contains(start_s, end_s, source_scope):
+                    errors.append(f"{prefix}.source interval outside source_scope")
+                for key in ("required_evidence_interval", "actual_rendered_source_interval"):
+                    interval_value = source.get(key)
+                    if interval_value is not None:
+                        if not (isinstance(interval_value, list) and len(interval_value) == 2):
+                            errors.append(f"{prefix}.{key} invalid")
+                        else:
+                            a, b = map(float, interval_value)
+                            if not source_scope_contains(a, b, source_scope):
+                                errors.append(f"{prefix}.{key} outside source_scope")
+                            if b <= a:
+                                errors.append(f"{prefix}.{key} non-positive")
             if slot.get("transition_reason") == "unexplained":
                 errors.append(f"{prefix} has unexplained entity switch")
     if abs(last_end - duration) > 1e-5:
