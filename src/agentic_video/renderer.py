@@ -11,6 +11,7 @@ from typing import Protocol
 from src.agentic_video.recipe_v2 import validate_recipe_v2
 from src.config import AppConfig
 from src.config import repo_root
+from src.library.text_availability import dialogue_text
 from src.perception import common
 
 MASK_OPS = {"tracked_mask_fill", "subject_cutout_composite", "mask_wipe",
@@ -221,8 +222,10 @@ def write_story_subtitles(asset_plan: dict, retrieval: list[dict], output: Path)
             target_start = float(slot["start_s"])
             target_end = float(slot["end_s"])
             for line in picked.get("dialogue") or []:
-                subtitle = str(line.get("translation_zh") or "").strip()
-                if not subtitle or subtitle == "uncertain":
+                # V5 P0：subtitle 真值走 text_availability（None/sentinel
+                # 回落 original——中文源对白现在有可用字幕文本）
+                subtitle = dialogue_text(line) or ""
+                if not subtitle:
                     continue
                 start = target_start + max(0.0, float(line.get("start_s") or source_start)
                                            - source_start)

@@ -128,3 +128,39 @@ def test_merge_dialogue_prefers_asr_timing_and_keeps_model_translation():
     assert merge_dialogue(asr, []) == asr
     # 无 ASR 时用模型对白兜底
     assert merge_dialogue([], model) == model
+
+
+def test_index_meta_guard_rejects_stale_embedding(tmp_path):
+    """V5 P0：rows 计数相同但 search_text 变化（uncertain 修复即此情形）
+    → rows_sha256 变 → 旧 emb 拒载（外审六轮：count 不足以证明一致）。"""
+    import json as _json
+    import numpy as np
+    import pytest
+    from src.library import build_index as bi
+
+    out = tmp_path / "index"
+    out.mkdir()
+    rows = [{"row_idx": 0, "caption": "旧文本", "search_text": "旧文本"},
+            {"row_idx": 1, "caption": "x", "search_text": "x"}]
+    (out / "shots.jsonl").write_text(
+        "\n".join(_json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    np.save(out / "cap_emb.npy", np.zeros((2, 4), dtype="float32"))
+    (out / "index_meta.json").write_text(_json.dumps({
+        "schema_version": bi.INDEX_SCHEMA_VERSION,
+        "search_text_rule_version": bi.SEARCH_TEXT_RULE,
+        "embedding_model": "e5-default",
+        "rows_count": 2,
+        "rows_sha256": bi._rows_sha256(rows)}), encoding="utf-8")
+
+    class _Cfg:
+        paths = type("P", (), {"library_dir": tmp_path})()
+        library = {"embed": {"model": "e5-default"}}
+
+    loaded_rows, emb = bi.load_index(_Cfg)
+    assert len(loaded_rows) == 2                          # 一致时正常加载
+
+    rows[0]["search_text"] = "新文本（uncertain 修复后的真对白）"
+    (out / "shots.jsonl").write_text(
+        "\n".join(_json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="rows_sha256"):
+        bi.load_index(_Cfg)

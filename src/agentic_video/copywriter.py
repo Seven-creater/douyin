@@ -94,11 +94,14 @@ def _ask_llm(runner, story_plan: dict) -> dict | None:
 
 
 def _usable_dialogue_seconds(slot: dict) -> float:
-    """槽内可用对白累计秒数（translation_zh 有效 = 真实台词而非 uncertain）。"""
+    """槽内可用对白累计秒数（V5 P0 起真值判定走 text_availability——
+    translation_zh sentinel 回落 original 真文本，中文源对白不再被
+    "uncertain" 字符串整体遮蔽）。"""
+    from src.library.text_availability import dialogue_text
+
     seconds = 0.0
     for line in (slot.get("source") or {}).get("dialogue") or []:
-        translation = str(line.get("translation_zh") or "").strip()
-        if not translation or translation in {"uncertain", "unknown"}:
+        if not dialogue_text(line):
             continue
         try:
             seconds += max(0.0, float(line.get("end_s") or 0)

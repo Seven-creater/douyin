@@ -14,6 +14,7 @@ from src.agentic_video.narrative_form import (ROLE_ENTITY_REQUIREMENTS,
 from src.agentic_video import zones
 from src.library.entity_registry import (load_entity_registry, row_identity_keys,
                                          shared_identity_keys)
+from src.library.text_availability import dialogue_text, usable_text
 
 STORY_PLAN_VERSION = "1.1"   # V4（外审三轮）：转移分类学（cutaway）+ bindings/
 # anchor 透传 + form 编译变更已非加性语义。1.0 旧计划只读兼容（validate
@@ -86,9 +87,9 @@ _ROLE_NEED_TEMPLATES = {
 
 
 def _usable(value: str) -> str | None:
-    """六问字段可用性：unknown/not_applicable/空 都不是可引用的内容。"""
-    text = str(value or "").strip()
-    return text if text and text not in {"unknown", "not_applicable", "uncertain"} else None
+    """六问字段可用性：unknown/not_applicable/空 都不是可引用的内容
+    （V5 P0 起委托 text_availability 单一规则）。"""
+    return usable_text(value)
 
 
 def slot_need_spec(narrative: dict, segment: dict, idx: int) -> dict:
@@ -694,9 +695,8 @@ def _text_shingles(text: str) -> set[str]:
 
 
 def _dialogue_shingles(lines: list[dict]) -> set[str]:
-    """对白行（translation_zh 优先）的 shingle 集。"""
-    text = "；".join(str(line.get("translation_zh")
-                         or line.get("original") or "") for line in lines or [])
+    """对白行（translation_zh 优先，sentinel 回落 original）的 shingle 集。"""
+    text = "；".join(t for t in (dialogue_text(line) for line in lines or []) if t)
     return _text_shingles(text)
 
 

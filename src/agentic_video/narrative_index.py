@@ -10,6 +10,7 @@ from src.agentic_video.long_video import (index_selected_windows, resolve_source
                                            robust_normalize, scan_sparse_features)
 from src.agentic_video.narrative import ARC_ROLES
 from src.agentic_video.zones import zone_config
+from src.library.text_availability import usable_text
 from src.template.schema import extract_json_block
 
 DEFAULT_QUOTAS = {"dialogue": 12, "action": 8, "emotion": 8, "context": 8}
@@ -185,7 +186,11 @@ def attach_transcript_to_shots(result_path: Path, transcript: dict) -> Path:
                 "start_s": round(max(start, float(shot["start_s"])), 3),
                 "end_s": round(min(end, float(shot["end_s"])), 3),
                 "original": str(segment.get("text") or ""),
-                "translation_zh": "uncertain", "confidence": 0.7,
+                # V5 P0（外审六轮硬修改①）：生产端不再写 sentinel 字符串——
+                # null=没有数据；"uncertain"=一段字符串，`or` 短路会遮蔽
+                # original 里的真文本（389 条 uncertain 遮蔽 294 条真对白实锤）。
+                # 中文源的 original 就是中文真文本，无需"翻译"。
+                "translation_zh": None, "confidence": 0.7,
             })
         shot["dialogue"] = dialogue
         shot["dialogue_score"] = max(float(shot.get("dialogue_score", 0)),
@@ -398,7 +403,9 @@ def parse_window_annotations(raw: str, *, valid_shot_ids: set[int],
             dialogue.append({
                 "start_s": round(start, 3), "end_s": round(end, 3),
                 "original": str(line.get("original") or ""),
-                "translation_zh": str(line.get("translation_zh") or "uncertain"),
+                # V5 P0：模型输出 sentinel（uncertain/unknown）归一为 None，
+                # 绝不落成"有内容"的字符串（外审六轮硬修改①生产端）
+                "translation_zh": usable_text(line.get("translation_zh")),
                 "confidence": line_confidence,
             })
         try:

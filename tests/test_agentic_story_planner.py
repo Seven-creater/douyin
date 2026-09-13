@@ -567,3 +567,31 @@ def test_thick_arc_prefers_canonical_form_enum_over_free_text():
     assert slots[0]["form_function"] == "premise"
     assert slots[1]["form_function"] == "evidence_expansion"
     assert slots[2]["form_function"] == "payoff"
+
+
+def test_uncertain_sentinel_no_longer_masks_original_dialogue():
+    """V5 P0（外审六轮硬修改①，w15 实证回放）：translation_zh 是 sentinel
+    "uncertain"/None 时必须回落 original 真文本——修复前「人和妖一样，很难
+    定义好坏」被字符串遮蔽，对白锚定拿到空文本。"""
+    from src.agentic_video.story_planner import _anchor_by_dialogue, _dialogue_shingles
+    from src.library.text_availability import dialogue_text, usable_text
+
+    # 精确匹配而非子串：真对白可以含 "uncertain" 一词
+    assert usable_text("I am uncertain about this.") is not None
+    assert usable_text("  Uncertain ") is None
+    assert usable_text(None) is None and usable_text("") is None
+
+    line = {"start_s": 2977.5, "end_s": 2985.0, "original": "人和妖一样，很难定义好坏",
+            "translation_zh": "uncertain"}          # 库内存量格式
+    assert dialogue_text(line) == "人和妖一样，很难定义好坏"
+    line_null = {**line, "translation_zh": None}     # P0 后生产端新格式
+    assert dialogue_text(line_null) == "人和妖一样，很难定义好坏"
+    assert "人和妖" in "".join(_dialogue_shingles([line]) or []) or \
+        len(_dialogue_shingles([line])) > 0
+
+    from src.agentic_video.story_planner import _text_shingles
+    query = _text_shingles("人和妖的关系 妖精与人类")     # 生产路径：bigram shingle
+    anchored = _anchor_by_dialogue([line], query, 2940.0, 2985.0, 5.5)
+    assert anchored is not None
+    start, end = anchored
+    assert start <= 2977.5 and end >= 2985.0 - 1e-6   # 锚行完整落入

@@ -18,6 +18,8 @@ import sys
 from pathlib import Path
 
 from src.config import AppConfig, ensure_utf8_stdio, load_config, setup_logging
+from src.library.text_availability import dialogue_text as dialogue_text_
+from src.library.text_availability import usable_text
 from src.perception import common
 
 logger = logging.getLogger(__name__)
@@ -56,8 +58,7 @@ def merge_dialogue(asr: list[dict], model: list[dict]) -> list[dict]:
             ratio = overlap / span
             if best is None or ratio > best[0]:
                 best = (ratio, m)
-        if best and best[0] >= 0.5 and str(best[1].get("translation_zh") or "") \
-                not in ("", "uncertain"):
+        if best and best[0] >= 0.5 and usable_text(best[1].get("translation_zh")):
             out["translation_zh"] = best[1]["translation_zh"]
             try:
                 out["confidence"] = round(max(float(out.get("confidence", 0)),
@@ -191,21 +192,44 @@ def collect_rows(cfg: AppConfig) -> list[dict]:
             if window_facets:
                 row["facets"] = facets
             emotion = str(row.get("emotion") or "")
+            # V5 P0：对白真值取数走 text_availability（sentinel→original 回落），
+            # event_summary 同样过滤缺答标记——此前 "uncertain" 字面量进
+            # search_text 污染 E5 语义（外审六轮硬修改①消费端）
             dialogue_text = " ".join(
-                str(line.get("translation_zh") or line.get("original") or "")
-                for line in row.get("dialogue") or [] if isinstance(line, dict))
+                text for text in (dialogue_text_(line)
+                                  for line in row.get("dialogue") or []
+                                  if isinstance(line, dict)) if text)
             row["search_text"] = "；".join(value for value in (
-                cap, str(row.get("event_summary") or ""),
+                cap, usable_text(row.get("event_summary")) or "",
                 "人物：" + "、".join(row.get("entity_names") or []),
                 "叙事角色：" + str(row.get("story_role") or ""),
-                # emotion 落进可检索文本（P1：不再只标注不消费；uncertain 不入）
-                ("情绪：" + emotion) if emotion and emotion != "uncertain" else "",
+                ("情绪：" + emotion) if usable_text(emotion) else "",
                 *_facet_search_terms(facets), dialogue_text,
             ) if value)
             rows.append(row)
     if skipped:
         logger.warning("[index] %d 个镜头无描述（用兜底文案，建议补跑 caption_shots）", skipped)
     return rows
+
+
+INDEX_SCHEMA_VERSION = 2
+SEARCH_TEXT_RULE = "v2_usable_text"
+
+
+def _rows_sha256(rows: list[dict]) -> str:
+    """对真正送去 embedding 的 (row_id, search_text) 做稳定哈希——rows 计数
+    相同但 caption/对白变了（V5 P0 修复 uncertain 遮蔽即此情形）时哈希必变，
+    旧 emb 禁止加载（外审六轮：count 不足以证明索引与文本一一对应）。"""
+    import hashlib
+
+    payload = "\n".join(
+        f"{row.get('row_idx', idx)}\t{row.get('search_text') or row.get('caption') or ''}"
+        for idx, row in enumerate(rows))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _embed_model_id(cfg: AppConfig) -> str:
+    return str((cfg.library.get("embed") or {}).get("model") or "e5-default")
 
 
 def build(cfg: AppConfig) -> Path:
@@ -224,13 +248,24 @@ def build(cfg: AppConfig) -> Path:
     import numpy as np
 
     np.save(out_dir / "cap_emb.npy", emb)
-    logger.info("[index] %d 镜头，emb %s → %s", len(rows), emb.shape, jsonl)
+    (out_dir / "index_meta.json").write_text(json.dumps({
+        "schema_version": INDEX_SCHEMA_VERSION,
+        "search_text_rule_version": SEARCH_TEXT_RULE,
+        "embedding_model": _embed_model_id(cfg),
+        "rows_count": len(rows),
+        "rows_sha256": _rows_sha256(rows),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("[index] %d 镜头，emb %s → %s（meta rows_sha256=%s）",
+                len(rows), emb.shape, jsonl, _rows_sha256(rows)[:12])
     common.emit_status_line("ok", shots=len(rows), dim=list(emb.shape))
     return jsonl
 
 
 def load_index(cfg: AppConfig):
-    """C3 检索入口：返回 (rows, emb)。"""
+    """C3 检索入口：返回 (rows, emb)。
+
+    meta 守卫（V5 P0）：schema/检索文本规则/模型/rows_sha256 任一不匹配 →
+    显式 RuntimeError，防旧 emb 与新文本静默混用。"""
     import numpy as np
 
     out_dir = cfg.paths.library_dir / "index"
@@ -239,6 +274,21 @@ def load_index(cfg: AppConfig):
     emb = np.load(out_dir / "cap_emb.npy")
     if len(rows) != emb.shape[0]:
         raise RuntimeError(f"索引不同步：rows={len(rows)} emb={emb.shape[0]}（重跑 build_index）")
+    meta_path = out_dir / "index_meta.json"
+    if not meta_path.exists():
+        raise RuntimeError("索引缺 index_meta.json（旧版索引）：重跑 build_index 重建")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    expected = {"schema_version": INDEX_SCHEMA_VERSION,
+                "search_text_rule_version": SEARCH_TEXT_RULE,
+                "embedding_model": _embed_model_id(cfg)}
+    mismatches = [f"{key}={meta.get(key)}(期望 {value})"
+                  for key, value in expected.items() if meta.get(key) != value]
+    if str(meta.get("rows_sha256") or "") != _rows_sha256(rows):
+        mismatches.append(f"rows_sha256={str(meta.get('rows_sha256') or '')[:12]}"
+                          "(行文本已变化)")
+    if mismatches:
+        raise RuntimeError("索引元数据过期（" + "; ".join(mismatches)
+                           + "）——重跑 build_index 重建 emb")
     return rows, emb
 
 
