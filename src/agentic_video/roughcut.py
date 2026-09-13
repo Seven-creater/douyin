@@ -67,11 +67,22 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int,
             arc.append({"role": role, "event_ids": role_events[role][:2]})
     if not arc:
         arc = [{"role": "context", "event_ids": [e["id"] for e in events[:2]]}]
+    win_start = min(float(r.get("start_s") or 0) for r in rows)
+    win_end = max(float(r.get("end_s") or 0) for r in rows)
+    # participants 换成合成实体 id（validate 要求 id 在 entities 内）：
+    # 事件区间与镜头重叠的实体名 → 对应合成实体
+    for event in events:
+        overlapping = {name for row in rows
+                       for name in (row.get("entity_names") or [])
+                       if float(row.get("start_s") or 0) <= event["interval"][1]
+                       and float(row.get("end_s") or 0) >= event["interval"][0]}
+        event["participants"] = [e["id"] for e in entities
+                                 if e["name_or_role"] in overlapping][:2]
     return {
         "program_version": "1.0",
         "reference": {"id": f"roughcut_w{window_idx}",
                       "uri": reference_uri, "sha256": "",
-                      "duration_s": 20.0, "fps": 24.0},
+                      "duration_s": round(win_end - win_start, 3), "fps": 24.0},
         "provenance": {"model": ROUGHCAST_PROGRAM_SOURCE},
         "status": "supported",
         "evidence": [{"source": f"window_{window_idx}_annotations"}],
