@@ -111,7 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
     roughcut.add_argument("--target-duration", type=float, default=None)
     roughcut.add_argument("--unverified", action="store_true",
                           help="offline control test only; never deliverable")
+    roughcut.add_argument("--human-acceptance", default=None,
+                          help="human acceptance JSON; normally use roughcut-accept after review")
     roughcut.add_argument("--force", action="store_true")
+
+    roughcut_accept = sub.add_parser(
+        "roughcut-accept", help="finalize an automated roughcut candidate after human review")
+    roughcut_accept.add_argument("--output", required=True,
+                                 help="existing roughcut output directory")
+    roughcut_accept.add_argument("--human-acceptance", required=True,
+                                 help="human acceptance JSON")
 
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
@@ -329,7 +338,17 @@ def _roughcut(args, cfg) -> dict:
                          output_dir=Path(args.output),
                          target_duration_s=args.target_duration, force=args.force,
                          spec=Path(args.spec), runner=runner,
-                         allow_unverified=args.unverified)
+                         allow_unverified=args.unverified,
+                         human_acceptance=(Path(args.human_acceptance)
+                                           if args.human_acceptance else None))
+    return {"output": str(final)}
+
+
+def _roughcut_accept(args, _cfg) -> dict:
+    from src.agentic_video.roughcut import finalize_roughcut_delivery
+
+    final = finalize_roughcut_delivery(Path(args.output),
+                                       Path(args.human_acceptance))
     return {"output": str(final)}
 
 
@@ -384,7 +403,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {"discover": _discover, "benchmark": _benchmark,
                 "index": _index, "facets": _facets, "bootstrap": _bootstrap,
                 "decompose": _decompose,
-                "render": _render, "roughcut": _roughcut, "run": _run}
+                "render": _render, "roughcut": _roughcut,
+                "roughcut-accept": _roughcut_accept, "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
             else handlers[args.command](args)

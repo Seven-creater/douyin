@@ -1,11 +1,15 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from src.agentic_video.roughcut import (_build_plan, _hydrate_transcript_rows,
-                                        _overlap, _summary_similarity)
+from src.agentic_video.roughcut import (_build_plan, _human_acceptance_reasons,
+                                        _hydrate_transcript_rows, _overlap,
+                                        _roughcut_blind_reasons,
+                                        _summary_similarity,
+                                        finalize_roughcut_delivery)
 from src.agentic_video.story_planner import fit_slot_intervals
 from src.agentic_video.verify_slots import localize_coarse_slots, parse_localization
 from src.agentic_video.renderer import write_story_subtitles
@@ -96,3 +100,74 @@ def test_blind_variant_summary_similarity_tolerates_small_paraphrase():
     assert _summary_similarity("两个人讨论人和妖不能简单判断好坏",
                                "两人讨论不能按人或妖简单判断好坏") >= 0.2
     assert _summary_similarity("两个人讨论好坏", "森林里发生战斗") < 0.2
+
+
+def test_roughcut_blind_uses_local_speaker_contract_not_general_protagonist():
+    base = {
+        "parsed": True,
+        "consistent_protagonist": False,
+        "story_in_one_sentence": "一位妖怪向小孩解释人与妖都不能简单判断好坏",
+        "core_statement": "人和妖一样，很难绝对定义好坏",
+        "speech_clear": True,
+        "music_present": False,
+        "speaker_description": "绿皮肤年长妖怪",
+        "addressee_description": "黑发猫耳小孩",
+        "speaker_addressee_stable": True,
+    }
+    mix = {**base, "story_in_one_sentence": "妖怪告诉小孩人和妖的好坏都不是绝对的",
+           "core_statement": "人和妖的好坏都不是绝对的", "music_present": True}
+    reasons, similarity = _roughcut_blind_reasons(
+        {"source_only": base, "bgm_mix": mix})
+    assert reasons == []
+    assert similarity >= 0.2
+
+
+def test_human_acceptance_requires_restatement_and_audio_checks():
+    assert _human_acceptance_reasons(None) == ["human_acceptance_pending"]
+    approved = {
+        "approved": True,
+        "story_in_one_sentence": "两人讨论人和妖不能简单按类别判断好坏",
+        "source_only_speech_clear": True,
+        "bgm_mix_speech_clear": True,
+        "bgm_mix_music_present": True,
+    }
+    assert _human_acceptance_reasons(approved) == []
+    assert "human_bgm_mix_music_present_not_confirmed" in _human_acceptance_reasons(
+        {**approved, "bgm_mix_music_present": False})
+
+
+def test_finalize_delivery_only_after_human_acceptance(tmp_path):
+    variants_dir = tmp_path / "variants"
+    source = variants_dir / "source_only" / "rendered.mp4"
+    mix = variants_dir / "bgm_mix" / "rendered.mp4"
+    master = tmp_path / "content_master.mp4"
+    for path, payload in ((source, b"source"), (mix, b"mix"), (master, b"master")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    automated = {
+        "passed": True,
+        "variants": {"source_only": str(source), "bgm_mix": str(mix)},
+        "content_master": str(master),
+        "content_master_sha256": digest(master),
+        "story_plan_sha256": "story",
+        "retrieval_sha256": "retrieval",
+        "content_frames_framemd5": "frames",
+    }
+    (tmp_path / "automated_acceptance.json").write_text(
+        json.dumps(automated), encoding="utf-8")
+    (variants_dir / "audio_variants_manifest.json").write_text(json.dumps({
+        "video_identical": True,
+        "source_only": {"sha256": digest(source)},
+        "bgm_mix": {"sha256": digest(mix)},
+    }), encoding="utf-8")
+    human = {
+        "approved": True,
+        "story_in_one_sentence": "两人讨论人和妖不能简单判断好坏",
+        "source_only_speech_clear": True,
+        "bgm_mix_speech_clear": True,
+        "bgm_mix_music_present": True,
+    }
+    final = finalize_roughcut_delivery(tmp_path, human)
+    assert final.read_bytes() == b"mix"
+    assert json.loads((tmp_path / "acceptance.json").read_text(encoding="utf-8"))["passed"] is True

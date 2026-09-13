@@ -515,7 +515,7 @@ BLIND_VIDEO_PROMPT = """你是第一次观看这条短视频的观众，没有�
 写 false 并在 switch_points 给出大致时间；不确定也写 false 并说明原因。
 画面内字幕/烧录文字属于视频内容，可作判断依据。"""
 
-BLIND_VIDEO_PROMPT_VERSION = "blind_v2"   # V4：盲看输入改为终版（含烧录文案+终混音）
+BLIND_VIDEO_PROMPT_VERSION = "blind_v3"   # V5：粗剪另报可复述的核心判断与局部说话关系
 
 
 def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
@@ -532,7 +532,10 @@ def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
                    '{"speech_clear":true,"music_present":true,'
                    '"speaker_description":"主要说话者的可见外观",'
                    '"addressee_description":"他说话对象的可见外观",'
-                   '"speaker_addressee_stable":true}。speaker/addressee 只用本场景局部外观描述。')
+                   '"speaker_addressee_stable":true,'
+                   '"core_statement":"完整复述主要说话者表达的核心判断"}。'
+                   'speaker/addressee 只用本场景局部外观描述；core_statement 必须复述观点，'
+                   '不能只写“讨论了某话题”。')
     answer = runner.watch(prepare_watch_copy(video_path), prompt,
                           max_new_tokens=1024)
     block = extract_json_block(answer.text)
@@ -554,6 +557,7 @@ def blind_video_check(video_path, *, runner, roughcut: bool = False) -> dict:
         "switch_points": [item for item in payload.get("switch_points") or []
                           if isinstance(item, dict)],
         "story_in_one_sentence": str(payload.get("story_in_one_sentence") or ""),
+        "core_statement": str(payload.get("core_statement") or ""),
         "event_relations": str(payload.get("event_relations") or ""),
         "speech_clear": payload.get("speech_clear") if isinstance(payload.get("speech_clear"), bool) else None,
         "music_present": payload.get("music_present") if isinstance(payload.get("music_present"), bool) else None,

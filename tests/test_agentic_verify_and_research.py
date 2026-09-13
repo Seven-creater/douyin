@@ -213,6 +213,27 @@ def test_blind_video_check_prompt_carries_zero_context():
     assert "consistent_protagonist" in BLIND_VIDEO_PROMPT
 
 
+def test_roughcut_blind_prompt_requires_claim_restatement():
+    from src.agentic_video.verify_slots import blind_video_check
+    from types import SimpleNamespace
+    import json as _json
+
+    class _Runner:
+        def watch(self, _video, prompt, **_kwargs):
+            assert "core_statement" in prompt
+            assert "不能只写" in prompt
+            return SimpleNamespace(text=_json.dumps({
+                "main_character": "甲和乙", "consistent_protagonist": False,
+                "switch_points": [], "story_in_one_sentence": "甲向乙解释一个观点",
+                "event_relations": "延续", "speech_clear": True,
+                "music_present": False, "speaker_description": "甲",
+                "addressee_description": "乙", "speaker_addressee_stable": True,
+                "core_statement": "人和妖的好坏都不是绝对的"}, ensure_ascii=False))
+
+    result = blind_video_check("fake.mp4", runner=_Runner(), roughcut=True)
+    assert result["core_statement"] == "人和妖的好坏都不是绝对的"
+
+
 def test_blind_video_check_parses_structured_answer():
     from types import SimpleNamespace
     import json as _json

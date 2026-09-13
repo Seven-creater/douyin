@@ -265,13 +265,147 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int, reference_uri: s
     return {"program_version": "roughcut_v2", "reference": {"id": f"roughcut_w{window_idx}", "uri": reference_uri, "sha256": "", "duration_s": 40.0, "fps": 24.0}, "stages": stages, "roughcut_spec": deepcopy(spec) if spec else {"stages": stages}, "provenance": {"program_source": ROUGHCAST_PROGRAM_SOURCE}}
 
 
-def _failure(output_dir: Path, failure_class: str, reasons: list[str], *, debug: Path | None = None) -> None:
+def _failure(output_dir: Path, failure_class: str, reasons: list[str], *,
+             debug: Path | None = None, evidence: dict | None = None) -> None:
     payload = {"passed": False, "failure_class": failure_class if failure_class in FAILURE_CLASSES else "infrastructure", "reasons": reasons, "delivery": "blocked", "debug_preview": str(debug) if debug else None}
+    if evidence:
+        payload.update(deepcopy(evidence))
     (output_dir / "acceptance.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "render_manifest.json").write_text(json.dumps({"delivery": "blocked", "acceptance": payload}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | None = None, *, theme: str = "", output_dir: Path, target_duration_s: float | None = None, runner=None, force: bool = False, spec: Path | dict | None = None, allow_unverified: bool = False) -> Path:
+def _roughcut_blind_reasons(blinds: dict) -> tuple[list[str], float]:
+    """Evaluate the roughcut contract, not the full-story protagonist contract.
+
+    ``consistent_protagonist`` belongs to the general multi-scene story gate.  A
+    scene-scoped dialogue is accepted on its independently reported core claim,
+    stable local speaker/addressee relation, and variant-specific audio checks.
+    """
+    reasons = []
+    for name in ("source_only", "bgm_mix"):
+        report = blinds.get(name) or {}
+        if report.get("parsed") is not True:
+            reasons.append(f"blind_{name}_parse_failed")
+            continue
+        if not str(report.get("story_in_one_sentence") or "").strip():
+            reasons.append(f"blind_{name}_story_missing")
+        if not str(report.get("core_statement") or "").strip():
+            reasons.append(f"blind_{name}_core_statement_missing")
+        if not str(report.get("speaker_description") or "").strip():
+            reasons.append(f"blind_{name}_speaker_missing")
+        if not str(report.get("addressee_description") or "").strip():
+            reasons.append(f"blind_{name}_addressee_missing")
+        if report.get("speaker_addressee_stable") is not True:
+            reasons.append(f"blind_{name}_speaker_addressee_unstable")
+        if report.get("speech_clear") is not True:
+            reasons.append(f"blind_{name}_speech_unclear")
+        if name == "bgm_mix" and report.get("music_present") is not True:
+            reasons.append("blind_bgm_mix_music_missing")
+    source_claim = str((blinds.get("source_only") or {}).get("core_statement") or
+                       (blinds.get("source_only") or {}).get("story_in_one_sentence") or "")
+    mix_claim = str((blinds.get("bgm_mix") or {}).get("core_statement") or
+                    (blinds.get("bgm_mix") or {}).get("story_in_one_sentence") or "")
+    similarity = _summary_similarity(source_claim, mix_claim)
+    if similarity < 0.2:
+        reasons.append(f"blind_variant_story_mismatch:{similarity:.3f}")
+    return reasons, similarity
+
+
+def _human_acceptance_reasons(payload: dict | None) -> list[str]:
+    """Return the explicit manual gate failures required for final delivery."""
+    if payload is None:
+        return ["human_acceptance_pending"]
+    if payload.get("approved") is not True:
+        return ["human_acceptance_rejected" if payload.get("approved") is False
+                else "human_acceptance_invalid:approved"]
+    reasons = []
+    if not str(payload.get("story_in_one_sentence") or "").strip():
+        reasons.append("human_story_missing")
+    for field in ("source_only_speech_clear", "bgm_mix_speech_clear",
+                  "bgm_mix_music_present"):
+        if payload.get(field) is not True:
+            reasons.append(f"human_{field}_not_confirmed")
+    return reasons
+
+
+def _read_human_acceptance(value: Path | dict | None) -> dict | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return deepcopy(value)
+    payload = json.loads(Path(value).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("human acceptance must be a JSON object")
+    return payload
+
+
+def finalize_roughcut_delivery(output_dir: Path, human_acceptance: Path | dict) -> Path:
+    """Finalize an automated candidate without rerunning Omni or rendering."""
+    from src.agentic_video.renderer import _sha256_file
+
+    output_dir = Path(output_dir).resolve()
+    automated_path = output_dir / "automated_acceptance.json"
+    audio_path = output_dir / "variants" / "audio_variants_manifest.json"
+    try:
+        automated = json.loads(automated_path.read_text(encoding="utf-8"))
+        audio_manifest = json.loads(audio_path.read_text(encoding="utf-8"))
+        human = _read_human_acceptance(human_acceptance)
+    except (OSError, ValueError, TypeError) as exc:
+        _failure(output_dir, "infrastructure", [f"acceptance_input:{type(exc).__name__}:{exc}"])
+        raise
+    if automated.get("passed") is not True:
+        _failure(output_dir, "verification", ["automated_acceptance_not_passed"])
+        raise RuntimeError("roughcut blocked: automated acceptance incomplete")
+    if audio_manifest.get("video_identical") is not True:
+        _failure(output_dir, "verification", ["audio_variants_video_mismatch"])
+        raise RuntimeError("roughcut blocked: variant video mismatch")
+    variants = {name: Path(str((automated.get("variants") or {}).get(name) or ""))
+                for name in ("source_only", "bgm_mix")}
+    master = Path(str(automated.get("content_master") or ""))
+    artifacts = {"content_master": master, **variants}
+    missing = [name for name, path in artifacts.items() if not path.is_file()]
+    if missing:
+        _failure(output_dir, "infrastructure", [f"acceptance_artifact_missing:{name}" for name in missing])
+        raise RuntimeError("roughcut blocked: acceptance artifacts missing")
+    expected_master = str(automated.get("content_master_sha256") or "")
+    if _sha256_file(master) != expected_master:
+        _failure(output_dir, "infrastructure", ["content_master_hash_mismatch"])
+        raise RuntimeError("roughcut blocked: content master changed")
+    for name, path in variants.items():
+        expected = str((audio_manifest.get(name) or {}).get("sha256") or "")
+        if not expected or _sha256_file(path) != expected:
+            _failure(output_dir, "infrastructure", [f"{name}_hash_mismatch"])
+            raise RuntimeError("roughcut blocked: audio variant changed")
+    human_reasons = _human_acceptance_reasons(human)
+    (output_dir / "human_acceptance.json").write_text(
+        json.dumps(human, ensure_ascii=False, indent=2), encoding="utf-8")
+    evidence = {"automated_acceptance": str(automated_path),
+                "variants": {name: str(path) for name, path in variants.items()},
+                "content_master": str(master)}
+    if human_reasons:
+        failure_class = ("audio" if any("speech" in reason or "music" in reason
+                                        for reason in human_reasons) else "content")
+        _failure(output_dir, failure_class, human_reasons,
+                 debug=variants["bgm_mix"], evidence=evidence)
+        raise RuntimeError("roughcut blocked: human acceptance")
+    acceptance = {**automated, "passed": True, "failure_class": None,
+                  "reasons": [], "delivery": "passed",
+                  "human_acceptance": str(output_dir / "human_acceptance.json")}
+    (output_dir / "acceptance.json").write_text(
+        json.dumps(acceptance, ensure_ascii=False, indent=2), encoding="utf-8")
+    shutil.copy2(variants["bgm_mix"], output_dir / "rendered.mp4")
+    manifest = {"delivery": "passed", "primary_variant": "bgm_mix",
+                "variants": {name: str(path) for name, path in variants.items()},
+                "acceptance": str(output_dir / "acceptance.json"),
+                **{key: automated[key] for key in (
+                    "story_plan_sha256", "retrieval_sha256",
+                    "content_master_sha256", "content_frames_framemd5")}}
+    (output_dir / "render_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output_dir / "rendered.mp4"
+
+
+def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | None = None, *, theme: str = "", output_dir: Path, target_duration_s: float | None = None, runner=None, force: bool = False, spec: Path | dict | None = None, allow_unverified: bool = False, human_acceptance: Path | dict | None = None) -> Path:
     """Run the complete V5 roughcut gate. ``allow_unverified`` is test-only."""
     from src.agentic_video.recipe_v2 import new_recipe
     from src.agentic_video.renderer import derive_audio_variants, render_recipe
@@ -427,38 +561,35 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
         except Exception as exc:
             _failure(output_dir, "infrastructure", [f"blind_{name}:{type(exc).__name__}:{exc}"]); raise
     (output_dir / "blind_review.json").write_text(json.dumps(blinds, ensure_ascii=False, indent=2), encoding="utf-8")
-    reasons = []
-    for name, report in blinds.items():
-        if not report.get("parsed") or report.get("consistent_protagonist") is not True:
-            reasons.append(f"blind_{name}_not_comprehensible")
-        if report.get("speech_clear") is not True:
-            reasons.append(f"blind_{name}_speech_unclear")
-        if name == "bgm_mix" and report.get("music_present") is not True:
-            reasons.append("blind_bgm_mix_music_missing")
-        if report.get("speaker_addressee_stable") is not True:
-            reasons.append(f"blind_{name}_speaker_addressee_unstable")
-        if not str(report.get("story_in_one_sentence") or "").strip():
-            reasons.append(f"blind_{name}_story_missing")
-    recap_similarity = _summary_similarity(
-        str(blinds.get("source_only", {}).get("story_in_one_sentence") or ""),
-        str(blinds.get("bgm_mix", {}).get("story_in_one_sentence") or ""))
-    if recap_similarity < 0.2:
-        reasons.append(f"blind_variant_story_mismatch:{recap_similarity:.3f}")
-    if reasons:
-        failure_class = "audio" if any("speech" in reason or "music" in reason for reason in reasons) else "content"
-        _failure(output_dir, failure_class, reasons); raise RuntimeError("roughcut blocked: blind acceptance")
+    reasons, recap_similarity = _roughcut_blind_reasons(blinds)
     from src.agentic_video.renderer import _sha256_file
     audio_manifest = json.loads((output_dir / "variants" / "audio_variants_manifest.json").read_text(encoding="utf-8"))
     shared = {"story_plan_sha256": plan["story_plan_sha256"], "retrieval_sha256": retrieval_hash,
               "content_master_sha256": _sha256_file(master_path),
               "content_frames_framemd5": audio_manifest["source_only"]["frame_md5"]}
+    variant_paths = {key: str(value) for key, value in variants.items()}
     for variant_name in ("source_only", "bgm_mix"):
         variant_manifest = {**shared, "audio_variant": variant_name,
                             "audio_sha256": audio_manifest[variant_name]["sha256"]}
         (output_dir / "variants" / variant_name / "manifest.json").write_text(
             json.dumps(variant_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    acceptance = {"passed": True, "failure_class": None, "reasons": [], "delivery": "passed", "variants": {key: str(value) for key, value in variants.items()}, "content_master": str(master_path), "blind_summary_similarity": round(recap_similarity, 4), **shared}
-    (output_dir / "acceptance.json").write_text(json.dumps(acceptance, ensure_ascii=False, indent=2), encoding="utf-8")
-    shutil.copy2(variants["bgm_mix"], output_dir / "rendered.mp4")
-    (output_dir / "render_manifest.json").write_text(json.dumps({"delivery": "passed", "primary_variant": "bgm_mix", "variants": {key: str(value) for key, value in variants.items()}, **shared, "acceptance": str(output_dir / "acceptance.json")}, ensure_ascii=False, indent=2), encoding="utf-8")
-    return output_dir / "rendered.mp4"
+    gate_evidence = {"variants": variant_paths, "content_master": str(master_path), **shared}
+    if reasons:
+        failure_class = "audio" if any("speech" in reason or "music" in reason for reason in reasons) else "content"
+        _failure(output_dir, failure_class, reasons, debug=variants["bgm_mix"],
+                 evidence=gate_evidence)
+        raise RuntimeError("roughcut blocked: blind acceptance")
+    automated = {"passed": True, "gate": "automated", "delivery": "awaiting_human",
+                 "reasons": [], "variants": variant_paths,
+                 "content_master": str(master_path),
+                 "blind_summary_similarity": round(recap_similarity, 4), **shared}
+    automated_path = output_dir / "automated_acceptance.json"
+    automated_path.write_text(json.dumps(automated, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    if human_acceptance is None:
+        _failure(output_dir, "verification", ["human_acceptance_pending"],
+                 debug=variants["bgm_mix"],
+                 evidence={**gate_evidence,
+                           "automated_acceptance": str(automated_path)})
+        raise RuntimeError("roughcut blocked: human acceptance pending")
+    return finalize_roughcut_delivery(output_dir, human_acceptance)
