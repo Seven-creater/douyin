@@ -38,22 +38,36 @@ PLAN_PROMPT = """你是短视频 Editorial Planner。目标是最大化 communic
 下列 candidate_id，不能修改其时间、拆分候选、重复候选或发明新素材。保持源片时间顺序，
 音画锁定。为三个固定假设各给一个方案；确实没有所需事实就 supported=false，不能硬解释。
 
+所有 supported=true 的方案都必须引用所有 required_evidence_ids 非空的候选。
+question_answer 只有在核心观点之前确有可听问句时才可 supported=true；
+core_close 必须以核心观点候选开场。不要为了凑段数加入纯氛围画面。
+
+每个枚举字段只能填写一个值，严禁把多个值用“|”连接，严禁原样抄写候选列表或说明文字。
+proposed_function 只能选：setup, question, core_statement, response, ending。
+cut_in_reason 只能选：question_starts, speaker_change, new_information,
+core_statement_starts, reaction_starts, visual_subject_change。
+cut_out_reason 只能选：question_complete, semantic_unit_complete,
+answer_complete, reaction_complete, redundant_content_starts, next_function_begins。
+reason_detail 必须结合该候选的真实事实解释入点和出点。
+unsupported_reason 必须具体说明候选中缺少的事实，不得写“缺少什么事实”。
+
 候选事实：
 {candidates}
 
-只输出 JSON：
+只输出以下形状的 JSON。示例中的枚举值只是单值格式示意，必须按真实候选改写：
 {{"variants":[
  {{"plan_id":"viewpoint","supported":true,"unsupported_reason":"",
-   "segments":[{{"candidate_id":"clip_001","proposed_function":"setup|core_statement|ending",
-   "cut_in_reason":"question_starts|speaker_change|new_information|core_statement_starts|reaction_starts|visual_subject_change",
-   "cut_out_reason":"question_complete|semantic_unit_complete|answer_complete|reaction_complete|redundant_content_starts|next_function_begins",
-   "reason_detail":"该候选为什么从这里进入和离开"}}]}},
- {{"plan_id":"question_answer","supported":false,"unsupported_reason":"缺少什么事实","segments":[]}},
- {{"plan_id":"core_close","supported":false,"unsupported_reason":"缺少什么事实","segments":[]}}
+   "segments":[{{"candidate_id":"clip_001","proposed_function":"setup",
+   "cut_in_reason":"new_information","cut_out_reason":"next_function_begins",
+   "reason_detail":"结合真实内容说明入点与出点"}}]}},
+ {{"plan_id":"question_answer","supported":false,
+   "unsupported_reason":"核心观点前没有可听的真实问句","segments":[]}},
+ {{"plan_id":"core_close","supported":false,
+   "unsupported_reason":"核心观点后没有能形成收束的真实反应","segments":[]}}
 ]}}
 
 结构定义：viewpoint=必要语境→核心观点→可选收束；question_answer=真实问题→核心回答
-→可选反应；core_close=前三秒直接出现核心观点→可选收束。不要为了凑段数加入纯氛围画面。"""
+→可选反应；core_close=前三秒直接出现核心观点→可选收束。"""
 
 
 EDITORIAL_REVIEW_PROMPT = """你是第一次看到这条短视频的观众。只观看实际 mp4，

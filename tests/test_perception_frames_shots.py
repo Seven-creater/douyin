@@ -1,7 +1,11 @@
 """extract_frames / detect_shots 单测（纯函数，不跑 ffmpeg）。"""
 from __future__ import annotations
 
-from src.perception.detect_shots import boundaries_to_shots, parse_showinfo_times
+from pathlib import Path
+from types import SimpleNamespace
+
+from src.perception.detect_shots import (
+    boundaries_to_shots, detect_scoped_shots, parse_showinfo_times)
 from src.perception.extract_frames import expected_frame_count
 
 
@@ -67,3 +71,30 @@ def test_boundaries_dedup_and_order():
     # 21.99~22.0 太短并入前镜头 → 最终边界以 shots 为准
     assert out["shot_count"] == 3
     assert out["boundaries_s"] == [0.0, 3.12, 7.4, 22.0]
+
+
+def test_scoped_shots_seek_only_scope_and_normalize_to_absolute(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stderr="pts_time:2.5\npts_time:9.0\n",
+        )
+
+    monkeypatch.setattr("src.perception.detect_shots.subprocess.run", fake_run)
+    out = detect_scoped_shots(
+        Path("movie.mkv"), ffmpeg_bin="ffmpeg", threshold=0.3,
+        min_shot_len_s=0.5, start_s=2965.0, end_s=3005.0)
+
+    command, kwargs = calls[0]
+    assert command[1:4] == ["-ss", "2965", "-i"]
+    assert command[command.index("-t") + 1] == "40"
+    assert "setpts=PTS-STARTPTS" in command[command.index("-filter:v") + 1]
+    assert kwargs["timeout"] == 600
+    assert out["scope_interval"] == [2965.0, 3005.0]
+    assert out["timebase_origin_s"] == 2965.0
+    assert out["relative_boundaries_s"] == [0.0, 2.5, 9.0, 40.0]
+    assert out["boundaries_s"] == [2965.0, 2967.5, 2974.0, 3005.0]
+    assert [out["shots"][1]["start_s"], out["shots"][1]["end_s"]] == [2967.5, 2974.0]

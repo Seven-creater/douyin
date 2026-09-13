@@ -267,13 +267,24 @@ def test_fake_runner_synthetic_media_full_v3_pipeline(tmp_path, monkeypatch):
     ingestion.parent.mkdir(parents=True)
     ingestion.write_text(json.dumps({
         "params": {"video_sha256": "a" * 64},
-        "output": {"shots": [{"shot_idx": 1, "start_s": 20, "end_s": 23}]},
+        "output": {"shots": [{"shot_idx": 1, "start_s": 0, "end_s": 40}]},
     }), encoding="utf-8")
     rows = [{"video": str(source), "video_stem": "luoxiaohei1__narrative",
              "start_s": 0.0, "end_s": 40.0, "event_id": "w15",
              "caption": "两人对话", "dialogue": []}]
     monkeypatch.setattr("src.library.build_index.load_index",
                         lambda _cfg: (rows, None))
+    monkeypatch.setattr("src.perception.detect_shots.detect_scoped_shots",
+                        lambda *_args, **_kwargs: {
+                            "shot_count": 1, "scope_interval": [0.0, 40.0],
+                            "timebase": "absolute", "timebase_origin_s": 0.0,
+                            "relative_boundaries_s": [0.0, 20.0, 23.0, 40.0],
+                            "boundaries_s": [0.0, 20.0, 23.0, 40.0],
+                            "threshold": 0.3, "min_shot_len_s": 0.4,
+                            "shots": [{"index": 1, "start_s": 20.0,
+                                       "end_s": 23.0, "duration_s": 3.0,
+                                       "relative_interval": [20.0, 23.0]}],
+                        })
     spec = {
         "spec_version": "roughcut_v3", "source": "luoxiaohei1", "base_window": 15,
         "source_scope": {"start_s": 0.0, "end_s": 40.0},
@@ -343,6 +354,10 @@ def test_fake_runner_synthetic_media_full_v3_pipeline(tmp_path, monkeypatch):
         run_roughcut(cfg, output_dir=output, spec=spec, runner=PipelineRunner())
     gate = json.loads((output / "editorial_gate.json").read_text(encoding="utf-8"))
     assert gate["selected_plan_id"] == "core_close"
+    scoped_shots = json.loads((output / "editorial_shots.json").read_text(
+        encoding="utf-8"))
+    assert [scoped_shots["shots"][0]["start_s"],
+            scoped_shots["shots"][0]["end_s"]] == [20.0, 23.0]
     assert (output / "editorial_previews" / "core_close" / "preview.mp4").is_file()
     assert (output / "content_master.mp4").is_file()
     assert (output / "variants" / "source_only" / "rendered.mp4").is_file()

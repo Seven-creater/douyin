@@ -68,6 +68,66 @@ def detect_shots(
     return result
 
 
+def detect_scoped_shots(
+    video_path: Path,
+    *,
+    ffmpeg_bin: str,
+    threshold: float,
+    min_shot_len_s: float,
+    start_s: float,
+    end_s: float,
+) -> dict:
+    """Detect real scene boundaries inside one approved absolute source scope.
+
+    ``setpts`` makes ``showinfo`` timestamps unambiguously relative to the scoped
+    input.  Returned shot and boundary coordinates are normalized back to the
+    source video's absolute timebase for downstream audit and rendering.
+    """
+    start_s, end_s = float(start_s), float(end_s)
+    if start_s < 0 or end_s <= start_s:
+        raise ValueError("invalid scoped shot interval")
+    duration_s = end_s - start_s
+    proc = subprocess.run(
+        [ffmpeg_bin, "-ss", f"{start_s:g}", "-i", str(video_path),
+         "-t", f"{duration_s:g}", "-an", "-filter:v",
+         f"scale=640:-2,setpts=PTS-STARTPTS,select='gt(scene,{threshold})',showinfo",
+         "-f", "null", "-"],
+        capture_output=True, text=True,
+        timeout=max(600, int(duration_s * 8)),
+    )
+    if proc.returncode != 0:
+        raise common.FFmpegError(
+            f"scoped ffmpeg 退出码 {proc.returncode}: {(proc.stderr or '')[-300:]}")
+    relative_cuts = parse_showinfo_times(proc.stderr or "")
+    relative = boundaries_to_shots(
+        relative_cuts, duration_s, min_shot_len_s=min_shot_len_s)
+    shots = []
+    for index, shot in enumerate(relative["shots"]):
+        absolute_start = start_s + float(shot["start_s"])
+        absolute_end = start_s + float(shot["end_s"])
+        shots.append({
+            **shot,
+            "index": index,
+            "start_s": round(absolute_start, 3),
+            "end_s": round(absolute_end, 3),
+            "mid_s": round((absolute_start + absolute_end) / 2, 3),
+            "duration_s": round(absolute_end - absolute_start, 3),
+            "relative_interval": [shot["start_s"], shot["end_s"]],
+        })
+    return {
+        "shot_count": len(shots),
+        "scope_interval": [start_s, end_s],
+        "timebase": "absolute",
+        "timebase_origin_s": start_s,
+        "relative_boundaries_s": relative["boundaries_s"],
+        "boundaries_s": [round(start_s + value, 3)
+                         for value in relative["boundaries_s"]],
+        "threshold": threshold,
+        "min_shot_len_s": min_shot_len_s,
+        "shots": shots,
+    }
+
+
 def run_for_video(cfg: AppConfig, aweme_id: str, *, force: bool = False, threshold: float | None = None):
     p_cfg = common.perception_cfg(cfg)
     s_cfg = p_cfg.get("shots") or {}

@@ -485,6 +485,7 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     from src.agentic_video.story_planner import fit_slot_intervals, story_plan_execution_inputs, validate_story_plan
     from src.agentic_video.verify_slots import blind_video_check, deterministic_story_check, localize_coarse_slots, verify_slots
     from src.library.build_index import load_index
+    from src.perception.detect_shots import detect_scoped_shots
 
     output_dir = Path(output_dir).resolve(); output_dir.mkdir(parents=True, exist_ok=True)
     if not force and (output_dir / "rendered.mp4").exists():
@@ -614,7 +615,22 @@ def run_roughcut(cfg: AppConfig, source: str | None = None, window_idx: int | No
     editorial_candidates = []
     if editorial_mode:
         settings = rough_spec["editorial"]
-        shots = list(((ingestion.get("output") or {}).get("shots") or []))
+        shot_cfg = cfg.library.get("shots") or {}
+        try:
+            scoped_shots = detect_scoped_shots(
+                Path(video),
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                threshold=float(shot_cfg.get("threshold", 0.3)),
+                min_shot_len_s=float(shot_cfg.get("min_shot_len_s", 0.4)),
+                start_s=float(scope["start_s"]), end_s=float(scope["end_s"]),
+            )
+        except Exception as exc:
+            _failure(output_dir, "infrastructure", [
+                f"editorial_shot_detection:{type(exc).__name__}:{exc}"])
+            raise
+        (output_dir / "editorial_shots.json").write_text(
+            json.dumps(scoped_shots, ensure_ascii=False, indent=2), encoding="utf-8")
+        shots = list(scoped_shots["shots"])
         try:
             editorial_candidates = build_editorial_candidates(
                 plan, scoped, shots, runner=runner, output_dir=output_dir,
