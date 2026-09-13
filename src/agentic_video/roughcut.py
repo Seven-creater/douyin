@@ -267,7 +267,17 @@ def build_roughcut_narrative(rows: list[dict], window_idx: int, reference_uri: s
 
 def _failure(output_dir: Path, failure_class: str, reasons: list[str], *,
              debug: Path | None = None, evidence: dict | None = None) -> None:
-    payload = {"passed": False, "failure_class": failure_class if failure_class in FAILURE_CLASSES else "infrastructure", "reasons": reasons, "delivery": "blocked", "debug_preview": str(debug) if debug else None}
+    formal_output = output_dir / "rendered.mp4"
+    removal_error = None
+    if formal_output.is_file():
+        try:
+            formal_output.unlink()
+        except OSError as exc:
+            removal_error = f"formal_output_removal:{type(exc).__name__}:{exc}"
+    blocked_reasons = list(reasons)
+    if removal_error:
+        blocked_reasons.append(removal_error)
+    payload = {"passed": False, "failure_class": failure_class if failure_class in FAILURE_CLASSES else "infrastructure", "reasons": blocked_reasons, "delivery": "blocked", "debug_preview": str(debug) if debug else None}
     if evidence:
         payload.update(deepcopy(evidence))
     (output_dir / "acceptance.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

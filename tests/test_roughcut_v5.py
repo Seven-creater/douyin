@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.agentic_video.roughcut import (_build_plan, _human_acceptance_reasons,
-                                        _hydrate_transcript_rows, _overlap,
+                                        _failure, _hydrate_transcript_rows, _overlap,
                                         _roughcut_blind_reasons,
                                         _summary_similarity,
                                         finalize_roughcut_delivery)
@@ -176,3 +176,12 @@ def test_finalize_delivery_only_after_human_acceptance(tmp_path):
     final = finalize_roughcut_delivery(tmp_path, human)
     assert final.read_bytes() == b"mix"
     assert json.loads((tmp_path / "acceptance.json").read_text(encoding="utf-8"))["passed"] is True
+
+
+def test_blocked_gate_removes_stale_formal_delivery(tmp_path):
+    formal = tmp_path / "rendered.mp4"
+    formal.write_bytes(b"previously-passed")
+    _failure(tmp_path, "content", ["human_acceptance_rejected"])
+    assert not formal.exists()
+    acceptance = json.loads((tmp_path / "acceptance.json").read_text(encoding="utf-8"))
+    assert acceptance["delivery"] == "blocked"
