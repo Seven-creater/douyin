@@ -304,6 +304,50 @@ def rank_story_path(candidate_groups: list[list[dict]],
     return path
 
 
+def fit_slot_intervals(story_plan: dict, *, mode: str = "template_faithful") -> None:
+    """V5 P5（外审六轮）：槽长自适应——content_preserving 模式下证据/对白
+    比等分预算长时扩槽（w15 的 7.5s 对白 vs 5.5s 槽不硬切）；template_faithful
+    （正式 run 默认）保持等分不动。槽 clamp 3-15s；总时长漂移 ≤+20% 且
+    ≤ STORY_MAX_TARGET_DURATION_S，超出压缩有富余的槽。渲染侧零改动——
+    renderer 消费 target_interval。"""
+    if mode != "content_preserving":
+        return
+    slots = [slot for slot in story_plan.get("slots") or []
+             if slot.get("status") in {"supported", "uncertain"}]
+    if not slots:
+        return
+    original_total = float(story_plan.get("target_duration_s") or 0)
+    equal = original_total / max(1, len(slots))
+    needed_all = []
+    for slot in slots:
+        source = slot.get("source") or {}
+        ev = source.get("evidence_interval")
+        ev_len = float(ev[1]) - float(ev[0]) if ev else 0.0
+        anchor_lines = source.get("dialogue") or []
+        anchor_len = max((float(l.get("end_s", 0)) - float(l.get("start_s", 0))
+                          for l in anchor_lines), default=0.0)
+        needed = max(equal, ev_len, anchor_len)
+        needed_all.append(min(15.0, max(3.0, needed)))
+    total = sum(needed_all)
+    ceiling = min(original_total * 1.2, STORY_MAX_TARGET_DURATION_S)
+    if total > ceiling:
+        # 压缩有富余（needed<等分）的槽，等比回收到 ceiling
+        surplus = [i for i, n in enumerate(needed_all) if n <= equal]
+        slack = total - ceiling
+        for i in surplus:
+            if slack <= 0:
+                break
+            give = min(needed_all[i] - 3.0, slack)
+            needed_all[i] -= give
+            slack -= give
+        total = sum(needed_all)
+    cursor = 0.0
+    for slot, needed in zip(slots, needed_all):
+        slot["target_interval"] = [round(cursor, 3), round(cursor + needed, 3)]
+        cursor += needed
+    story_plan["target_duration_s"] = round(cursor, 3)
+
+
 def _candidates_for_arc(segment: dict, source_rows: list[dict]) -> list[dict]:
     event_ids = set(segment.get("event_ids") or [])
     role = segment.get("role")

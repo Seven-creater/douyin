@@ -114,6 +114,16 @@ def validate_narrative_program(program: Any) -> list[str]:
     program_status = program.get("status")
     if program_status not in STATUSES:
         errors.append("status invalid")
+    # V5 P4（外审六轮硬修改：解析失败≠默认模板）：status=unsupported 是
+    # "没得到可用结构化叙事"的显式信号——此前它一路绿灯穿过 infer_narrative_form
+    # 的空弧分支套上 assertion 模板照常出片（V4_C3 实锤：reference.narrative
+    # 全空+uncertainties=[narrative_program_parse_failed]，四槽照样规划）。
+    if program_status == "unsupported":
+        errors.append("narrative program unsupported（解析失败：停规划或用"
+                      "显式 manual template_choice，禁止静默套默认模板）")
+    if not (program.get("arc") or []) and program_status != "supported" \
+            and not program.get("template_choice"):
+        errors.append("empty arc requires explicit template_choice")
     program_evidence = program.get("evidence")
     if not isinstance(program_evidence, list):
         errors.append("evidence must be a list")

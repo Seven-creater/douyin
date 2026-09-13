@@ -645,3 +645,28 @@ def test_slot_sequence_carries_structured_continuity():
     assert counter["form_function"] == "counter_evidence"
     assert counter["entity_requirements"]["protagonist"] == "required"
     assert counter["continuity_requirement"]["all_of"][0]["type"] == "protagonist_present"
+
+
+def test_fit_slot_intervals_content_preserving_only():
+    """V5 P5：content_preserving 扩槽（7.5s 对白 vs 5.5s 等分→扩），
+    template_faithful（正式 run 默认）保持等分不动——不污染模板复刻节奏。"""
+    from src.agentic_video.story_planner import fit_slot_intervals
+
+    plan = {"target_duration_s": 22.0, "slots": [
+        {"slot_idx": 0, "status": "supported",
+         "target_interval": [0.0, 5.5],                        # 等分基线
+         "source": {"evidence_interval": [2977.5, 2985.0],      # 7.5s 证据
+                    "dialogue": [{"start_s": 2977.5, "end_s": 2985.0}]}},
+        {"slot_idx": 1, "status": "supported",
+         "target_interval": [5.5, 11.0], "source": {}},
+        {"slot_idx": 2, "status": "supported",
+         "target_interval": [11.0, 16.5], "source": {}},
+        {"slot_idx": 3, "status": "supported",
+         "target_interval": [16.5, 22.0], "source": {}}]}
+    fit_slot_intervals(plan, mode="template_faithful")
+    assert plan["slots"][0]["target_interval"][1] == 5.5       # 不动
+
+    fit_slot_intervals(plan, mode="content_preserving")
+    first = plan["slots"][0]["target_interval"]
+    assert first[1] - first[0] >= 7.5 - 1e-6                    # 证据完整
+    assert plan["target_duration_s"] <= 75.0                    # 总长上限

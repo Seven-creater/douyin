@@ -98,6 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--force", action="store_true")
     render.add_argument("--no-mask-backend", action="store_true")
 
+    roughcut = sub.add_parser(
+        "roughcut", help="single-window rough cut control experiment (V5 P5)")
+    roughcut.add_argument("--source", required=True)
+    roughcut.add_argument("--window", type=int, required=True)
+    roughcut.add_argument("--theme", required=True)
+    roughcut.add_argument("--output", required=True)
+    roughcut.add_argument("--target-duration", type=float, default=22.0)
+    roughcut.add_argument("--force", action="store_true")
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -302,6 +311,15 @@ def _render(args, cfg) -> dict:
             "missing": sum(1 for row in retrieval if (row.get("picked") is None))}
 
 
+def _roughcut(args, cfg) -> dict:
+    from src.agentic_video.roughcut import run_roughcut
+
+    final = run_roughcut(cfg, args.source, args.window, theme=args.theme,
+                         output_dir=Path(args.output),
+                         target_duration_s=args.target_duration, force=args.force)
+    return {"output": str(final)}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -353,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {"discover": _discover, "benchmark": _benchmark,
                 "index": _index, "facets": _facets, "bootstrap": _bootstrap,
                 "decompose": _decompose,
-                "render": _render, "run": _run}
+                "render": _render, "roughcut": _roughcut, "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
             else handlers[args.command](args)

@@ -130,3 +130,25 @@ def test_narrative_material_reads_curated_context_as_unverified_hypothesis(tmp_p
     assert "父亲帮女儿练习用脚写字" in material
     assert "外部作者：良田" in material
     assert "外部话题：父亲,自信" in material
+
+
+def test_unsupported_and_empty_arc_programs_are_rejected():
+    """V5 P4（外审六轮）：解析失败（status=unsupported）与空弧程序不得再
+    静默穿过 validate 套默认模板——V4_C3 实锤全空程序照常规划出四槽。
+    template_choice={form,source:"manual"} 是显式逃生门。"""
+    from src.agentic_video.narrative import validate_narrative_program
+
+    broken = valid_program()
+    broken["status"] = "unsupported"
+    assert any("unsupported" in e for e in validate_narrative_program(broken))
+
+    empty = valid_program()
+    empty["arc"] = []
+    empty["status"] = "uncertain"
+    assert any("empty arc" in e for e in validate_narrative_program(empty))
+
+    manual = valid_program()
+    manual["arc"] = []
+    manual["status"] = "uncertain"
+    manual["template_choice"] = {"form": "assertion_visual_payoff", "source": "manual"}
+    assert not any("empty arc" in e for e in validate_narrative_program(manual))

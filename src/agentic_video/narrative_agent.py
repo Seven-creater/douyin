@@ -891,6 +891,16 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
         duration=duration, material=full_material,
         observations=json.dumps(observations, ensure_ascii=False)[:24000], previous="无")
     answer = runner.ask(prompt, max_new_tokens=4096)
+    # V5 P4（外审六轮硬修改①配套）：归纳原始响应落档——此前 parse 失败只剩
+    # "narrative_program_parse_failed" 标记，无从诊断是截断/格式/别的。
+    # 引用存 envelope（不内联，result.json 不膨胀）；数据区不进 git。
+    synthesis_raw = [{
+        "round": 0, "stage": "initial",
+        "sha256": hashlib.sha256(str(answer.text).encode("utf-8")).hexdigest()[:16],
+        "path": str(root / "synthesis_raw_0.txt"),
+    }]
+    root.mkdir(parents=True, exist_ok=True)            # V5 P4：text_only 快路径
+    (root / "synthesis_raw_0.txt").write_text(str(answer.text), encoding="utf-8")
     program = parse_narrative_program(
         answer.text, reference_id=vid, reference_uri=str(video), sha256=video_sha,
         duration_s=duration, fps=fps, model="bounded_active_perception",
@@ -965,6 +975,8 @@ def run_narrative_agent(cfg, vid: str, *, output: Path | None = None,
                                             observations, omni_sig),
         },
         "observations": observations, "program": program,
+        # V5 P4：归纳原始响应的落档引用（sha+path，不内联全文）
+        "synthesis_raw": synthesis_raw,
     }
     result_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2),
                            encoding="utf-8")
