@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,19 @@ from src.perception.flashvid_client import (  # noqa: E402
     FlashVIDEndpoint,
 )
 from src.perception.omni_runner import cut_clip  # noqa: E402
+
+JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def parse_json_object(text: str) -> dict:
+    candidate = text.strip()
+    fenced = JSON_FENCE.search(candidate)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    value = json.loads(candidate)
+    if not isinstance(value, dict):
+        raise ValueError("smoke response must be a JSON object")
+    return value
 
 
 def main() -> int:
@@ -45,7 +59,7 @@ def main() -> int:
             "Confirm you received both the ordered still images and the video. "
             "Return JSON only: {\"images_visible\":true,\"video_visible\":true}.",
             duration_s=6.0, image_paths=images, max_tokens=64)
-        parsed = json.loads(answer.text)
+        parsed = parse_json_object(answer.text)
         if parsed.get("images_visible") is not True or parsed.get("video_visible") is not True:
             raise RuntimeError(f"arm {arm} silently lost an input modality: {parsed}")
         if answer.request_audit["image_count"] != 4 or answer.request_audit["video_count"] != 1:
