@@ -87,6 +87,16 @@ def test_flashvid_arm_contract_and_explicit_even_frames() -> None:
         FlashVIDEndpoint("D", "x", "m", 4, .25, "flashvid")
 
 
+def test_browse_metrics_accept_null_prompt_token_details() -> None:
+    arms = {
+        arm: {"arm": arm, "window_count": 1, "candidates": [], "failures": [],
+              "request_audits": [{"usage": {"prompt_tokens_details": None}}]}
+        for arm in ("A", "B", "C", "D")
+    }
+    result = compare_browse_arms(arms, oracle={"facts": []})
+    assert all(row["visual_tokens"] == 0 for row in result["metrics"].values())
+
+
 def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path: Path) -> None:
     paths = []
     for index in range(4):

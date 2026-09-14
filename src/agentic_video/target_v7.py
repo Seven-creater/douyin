@@ -685,9 +685,20 @@ def _browse_prompt(reference_task: dict[str, Any]) -> str:
 def run_browse_matrix(cfg: AppConfig, experiment_spec: dict[str, Any],
                       output_dir: Path, *, clients: Mapping[str, Any],
                       source_video: Path, reference_task: dict[str, Any],
-                      target_album: dict[str, Any], oracle: dict[str, Any] | None = None) \
+                      target_album: dict[str, Any], oracle: dict[str, Any] | None = None,
+                      reuse_completed: bool = False) \
         -> dict[str, Any]:
     output_dir = Path(output_dir)
+    result_paths = {
+        arm: output_dir / "arms" / arm / "browse_results.json"
+        for arm in ("A", "B", "C", "D")
+    }
+    if reuse_completed and all(path.is_file() for path in result_paths.values()):
+        arms = {arm: _read_json(path) for arm, path in result_paths.items()}
+        comparison = compare_browse_arms(arms, oracle=oracle)
+        comparison["reused_completed_arms"] = True
+        _write_json(output_dir / "arm_comparison.json", comparison)
+        return {"arms": arms, "comparison": comparison}
     ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
     scope = experiment_spec["source_scope"]
     perception = experiment_spec.get("transport") or {}
@@ -798,7 +809,7 @@ def compare_browse_arms(arms: Mapping[str, dict[str, Any]], *,
                 right["observation_interval"], left["observation_interval"], 0.5)
                 for right in candidates[index + 1:])
         usage = [audit.get("usage") or {} for audit in row.get("request_audits") or []]
-        visual_tokens = sum(int(value.get("prompt_tokens_details", {}).get(
+        visual_tokens = sum(int((value.get("prompt_tokens_details") or {}).get(
             "video_tokens", value.get("visual_tokens", 0)) or 0) for value in usage)
         s0_facts = [fact for fact in facts if fact.get("subject_track_id")]
         s0_hits = sum(any(

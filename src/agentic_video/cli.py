@@ -676,7 +676,8 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
         oracle = json.loads(oracle_path.read_text(encoding="utf-8"))
         browse = run_browse_matrix(
             cfg, spec, output / "browse", clients=clients, source_video=source,
-            reference_task=reference_task, target_album=album, oracle=oracle)
+            reference_task=reference_task, target_album=album, oracle=oracle,
+            reuse_completed=not args.force)
         result = {"arms": {arm: len(row["candidates"])
                            for arm, row in browse["arms"].items()},
                   "diagnosis": browse["comparison"]["diagnostic_attribution"]}
