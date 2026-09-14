@@ -155,16 +155,17 @@ def test_overlap_coarse_regions_are_deduplicated_before_dense_budget():
         "id": "a", "interval": [5.0, 7.0], "source_form": "dynamic_action",
         "observation": {"action": "falls"}, "attributes": ["knockdown"],
         "salience": .8, "confidence": .8, "source_video": "movie.mp4",
-        "coarse_watch_id": "c0",
+        "coarse_watch_id": "c0", "container_interval": [0, 6],
     }, {
         "id": "b", "interval": [5.5, 7.5], "source_form": "dynamic_action",
         "observation": {"action": "falls"}, "attributes": ["knockdown"],
         "salience": .9, "confidence": .9, "source_video": "movie.mp4",
-        "coarse_watch_id": "c1",
+        "coarse_watch_id": "c1", "container_interval": [5.5, 11.5],
     }]
     merged = merge_coarse_regions(rows)
     assert len(merged) == 1
     assert merged[0]["interval"] == [5.0, 7.5]
+    assert merged[0]["container_interval"] == [0.0, 11.5]
     assert merged[0]["merged_from_watch_ids"] == ["c0", "c1"]
 
 

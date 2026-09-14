@@ -278,6 +278,12 @@ def merge_coarse_regions(regions: Iterable[dict]) -> list[dict]:
             continue
         match["interval"] = [round(min(float(match["interval"][0]), left), 3),
                              round(max(float(match["interval"][1]), right), 3)]
+        old_container = match.get("container_interval") or match["interval"]
+        new_container = row.get("container_interval") or row["interval"]
+        match["container_interval"] = [
+            round(min(float(old_container[0]), float(new_container[0])), 3),
+            round(max(float(old_container[1]), float(new_container[1])), 3),
+        ]
         match["salience"] = max(float(match.get("salience") or 0),
                                 float(row.get("salience") or 0))
         match["confidence"] = max(float(match.get("confidence") or 0),
