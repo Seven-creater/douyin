@@ -1,0 +1,117 @@
+{
+  "spec_version": "character_batch_v8",
+  "source": "luoxiaohei1",
+  "source_video": "/data02/usr/wangqihao/Demo/research/data/raw/luoxiaohei/罗小黑1 2019.4K.H265.60fps.10bit.Dolby.5.1.chs.mkv",
+  "transcript_path": "data/library/sources/luoxiaohei1/narrative_transcript.json",
+  "reference_video": "data/videos/7682719919410072847/video.mp4",
+  "bgm_path": "data/library/bgm/template_7682.m4a",
+  "characters": [
+    {
+      "character_id": "char:xiaohei",
+      "display_name": "小黑",
+      "aliases": ["小黑", "罗小黑", "Xiaohei"],
+      "external_claims": [
+        {
+          "claim": "小黑是本轮人工指定的候选角色；具体形态和本片 occurrence 身份必须回到原片核验。",
+          "source_tier": "human_task_input",
+          "source_url": null,
+          "work_version": "罗小黑战记电影 2019"
+        }
+      ]
+    },
+    {
+      "character_id": "char:wuxian",
+      "display_name": "无限",
+      "aliases": ["无限", "Wuxian"],
+      "external_claims": [
+        {
+          "claim": "无限是本轮人工指定的候选角色；外部名称不构成本片身份真值。",
+          "source_tier": "human_task_input",
+          "source_url": null,
+          "work_version": "罗小黑战记电影 2019"
+        }
+      ]
+    },
+    {
+      "character_id": "char:fengxi",
+      "display_name": "风息",
+      "aliases": ["风息", "Fengxi"],
+      "external_claims": [
+        {
+          "claim": "风息是本轮人工指定的候选角色；名字命中只生成调查线索。",
+          "source_tier": "human_task_input",
+          "source_url": null,
+          "work_version": "罗小黑战记电影 2019"
+        }
+      ]
+    }
+  ],
+  "seed_proposals": {
+    "char:xiaohei": {
+      "form_id": "char:xiaohei/form_white_small",
+      "source_times_s": [5412.65, 5412.75, 5412.85],
+      "invalid_source_times_s": [5391.5]
+    },
+    "char:wuxian": {
+      "source_times_s": [],
+      "invalid_source_times_s": []
+    },
+    "char:fengxi": {
+      "source_times_s": [],
+      "invalid_source_times_s": []
+    }
+  },
+  "reference_analysis": {
+    "fps": 4.0,
+    "scene_threshold": 0.3,
+    "min_shot_len_s": 0.12,
+    "backend": "native_bypass"
+  },
+  "reference_backend": {
+    "model": "Qwen3.5-4B",
+    "base_url": "http://127.0.0.1:8104/v1",
+    "backend": "native_bypass"
+  },
+  "coverage": {
+    "block_s": 45.0,
+    "head_s": 90.0,
+    "tail_s": 360.0,
+    "min_movie_s": 1800.0,
+    "fps": 2.0,
+    "retention_ratio": 0.1,
+    "max_regions_per_block": 3,
+    "workers": 8,
+    "endpoint": {
+      "model": "Qwen3.5-4B",
+      "base_url": "http://127.0.0.1:8101/v1",
+      "backend": "flashvid"
+    }
+  },
+  "targeted_escalation": {
+    "transport_window_s": 6.0,
+    "transport_overlap_s": 0.5,
+    "arms": [
+      {"id": "A", "fps": 2.0, "retention_ratio": 0.1, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1"},
+      {"id": "B", "fps": 4.0, "retention_ratio": 0.1, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1"},
+      {"id": "C", "fps": 4.0, "retention_ratio": 0.25, "backend": "flashvid", "base_url": "http://127.0.0.1:8102/v1"},
+      {"id": "D", "fps": 4.0, "retention_ratio": 1.0, "backend": "native_bypass", "base_url": "http://127.0.0.1:8104/v1"}
+    ]
+  },
+  "flashvid_runtime": "/data02/usr/wangqihao/Demo/test/flashvid",
+  "perception": {
+    "gpu_pairs": ["0,1", "2,3", "4,5", "6,7"],
+    "boundary_coarse_fps": 12.0,
+    "native_frame_max": 60
+  },
+  "creative": {
+    "max_videos_per_character": 1,
+    "max_batch_videos": 3,
+    "preferred_families": [
+      "adversity_agency_outcome",
+      "intervention_and_result",
+      "capability_montage",
+      "threat_escalation_and_impact"
+    ],
+    "allow_custom_evidence_arc": true
+  }
+}

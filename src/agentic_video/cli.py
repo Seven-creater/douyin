@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -208,6 +209,29 @@ def build_parser() -> argparse.ArgumentParser:
         "evidence-v7-accept", help="release a V7 output after human review")
     evidence_v7_accept.add_argument("--output", required=True)
     evidence_v7_accept.add_argument("--human-acceptance", required=True)
+
+    character_batch = sub.add_parser(
+        "character-batch",
+        help="run one phase of the V8 occurrence-first shared character experiment")
+    character_batch.add_argument(
+        "--phase", required=True,
+        choices=("bootstrap", "coverage", "identity", "events", "plan", "render"))
+    character_batch.add_argument(
+        "--spec", default="config/experiments/lxh1_v8_character_batch.json")
+    character_batch.add_argument("--video", default=None)
+    character_batch.add_argument("--output", required=True)
+    character_batch.add_argument("--seed-manifest", default=None,
+                                 help="human-confirmed seed/form manifest for identity phase")
+    character_batch.add_argument(
+        "--gpu-pairs", default=None,
+        help="Omni worker pairs, e.g. '0,1;2,3;4,5;6,7'")
+    character_batch.add_argument("--worker-timeout", type=float, default=3600.0)
+    character_batch.add_argument("--force", action="store_true")
+
+    character_batch_accept = sub.add_parser(
+        "character-batch-accept", help="release individually approved V8 character cuts")
+    character_batch_accept.add_argument("--output", required=True)
+    character_batch_accept.add_argument("--human-acceptance", required=True)
 
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
@@ -903,6 +927,215 @@ def _evidence_v7_accept(args, _cfg) -> dict:
     return {"output": str(final), "delivery": "passed"}
 
 
+def _v8_path(value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else repo_root() / path
+
+
+def _v8_omni_pairs(spec: dict, args) -> str:
+    configured = (spec.get("perception") or {}).get("gpu_pairs") or []
+    pairs = args.gpu_pairs or ";".join(str(pair) for pair in configured)
+    if not pairs:
+        raise ValueError(f"V8 phase {args.phase} requires --gpu-pairs")
+    return pairs
+
+
+def _character_batch_impl(args, cfg) -> dict:
+    from src.agentic_video.character_batch import (
+        bind_occurrence_identities,
+        build_character_creation_queue, build_character_profiles,
+        build_external_character_prior, build_mention_index,
+        build_seed_review_sheet, build_uniform_coverage_map,
+        derive_character_evidence_views, read_v8_spec, run_character_batch,
+        verify_shared_event_facts,
+    )
+    from src.agentic_video.recipe_v2 import sha256_file
+
+    spec_path = _v8_path(args.spec)
+    spec, spec_sha = read_v8_spec(spec_path)
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    source = _v8_path(args.video or spec["source_video"])
+    bgm = _v8_path(spec["bgm_path"])
+    manifest_path = output / "run_manifest.json"
+    previous = (json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest_path.is_file() else {})
+    source_size = source.stat().st_size
+    source_hash = (previous.get("source_sha256")
+                   if previous.get("source_video") == str(source)
+                   and previous.get("source_size_bytes") == source_size
+                   else sha256_file(source))
+    manifest = {
+        "schema_version": "character_batch_run_manifest_v1",
+        "spec": str(spec_path), "spec_sha256": spec_sha,
+        "source_video": str(source), "source_size_bytes": source_size,
+        "source_sha256": source_hash,
+        "fixed_characters": [row["character_id"] for row in spec["characters"]],
+        "automatic_character_selection_claimed": False,
+        "no_yolo_tracker_reid": True,
+        "phases": dict(previous.get("phases") or {}),
+    }
+    if args.phase == "bootstrap":
+        prior = build_external_character_prior(spec, output / "external_prior")
+        transcript_path = _v8_path(spec["transcript_path"])
+        raw_transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
+        transcript_rows = (raw_transcript.get("segments") or
+                           raw_transcript.get("utterances") or []) \
+            if isinstance(raw_transcript, dict) else raw_transcript
+        mentions = build_mention_index(
+            transcript_rows, spec["characters"], output / "mention_index.jsonl")
+        seed_review = build_seed_review_sheet(
+            cfg, spec, output / "character_profiles" / "seed_review",
+            source_video=source)
+        reference_reuse = spec.get("reference_task_reuse")
+        if reference_reuse and _v8_path(reference_reuse).is_file():
+            reference_source = _v8_path(reference_reuse)
+            shutil.copy2(reference_source, output / "reference_task.json")
+            reference_status = "reused_verified_artifact"
+        else:
+            from src.agentic_video.target_v7 import prepare_reference_task
+            from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
+            row = spec["reference_backend"]
+            client = FlashVIDClient(FlashVIDEndpoint(
+                arm="D", base_url=str(row["base_url"]),
+                model=str(row.get("model") or "Qwen3.5-4B"), fps=4.0,
+                retention_ratio=1.0, backend="native_bypass"))
+            prepare_reference_task(cfg, spec, output, vanilla_client=client)
+            reference_status = "generated_native_bypass"
+        result = {
+            "prior_claim_count": prior["claim_count"], "mention_count": len(mentions),
+            "seed_proposal_count": len(seed_review["proposals"]),
+            "reference_status": reference_status,
+        }
+    elif args.phase == "coverage":
+        from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
+        row = spec["coverage"]["endpoint"]
+        client = FlashVIDClient(FlashVIDEndpoint(
+            arm="A", base_url=str(row["base_url"]),
+            model=str(row.get("model") or "Qwen3.5-4B"),
+            fps=float(spec["coverage"]["fps"]),
+            retention_ratio=float(spec["coverage"]["retention_ratio"]),
+            backend="flashvid"))
+        coverage = build_uniform_coverage_map(
+            cfg, spec, output / "coverage", client=client, source_video=source,
+            source_sha256=source_hash, reuse_completed=not args.force)
+        result = {
+            "block_count": coverage["block_count"],
+            "covered_count": coverage["covered_count"],
+            "failed_count": coverage["failed_count"],
+            "occurrence_count": coverage["occurrence_count"],
+        }
+    elif args.phase in {"identity", "events", "render"}:
+        from src.perception.omni_pool import OmniProcessPool
+        from src.agentic_video.character_batch import _read_jsonl
+
+        with OmniProcessPool(
+                _v8_omni_pairs(spec, args), cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            if args.phase == "identity":
+                if not args.seed_manifest:
+                    raise ValueError("V8 identity requires --seed-manifest")
+                seed_manifest = json.loads(
+                    Path(args.seed_manifest).read_text(encoding="utf-8"))
+                profiles = build_character_profiles(
+                    cfg, spec, seed_manifest, output / "character_profiles",
+                    source_video=source, runner=runner)
+                occurrences = _read_jsonl(output / "occurrence_bank.jsonl")
+                bindings = bind_occurrence_identities(
+                    cfg, occurrences, profiles, output / "identity",
+                    source_video=source, runner=runner)
+                result = {
+                    "usable_forms": profiles["usable_form_count"],
+                    **bindings["metrics"],
+                }
+            elif args.phase == "events":
+                occurrences = _read_jsonl(output / "occurrence_bank.jsonl")
+                event_candidates = _read_jsonl(output / "event_candidates.jsonl")
+                bindings = _read_jsonl(output / "identity_bindings.jsonl")
+                verified_occurrence_ids = {
+                    str(row["occurrence_id"]) for row in bindings
+                    if row.get("status") == "verified"
+                }
+                event_candidates = [
+                    row for row in event_candidates
+                    if row.get("actor_occurrence_id") in verified_occurrence_ids
+                    or row.get("patient_occurrence_id") in verified_occurrence_ids
+                ]
+                verified = verify_shared_event_facts(
+                    cfg, event_candidates, occurrences, output / "events",
+                    source_video=source, runner=runner,
+                    native_frame_max=int((spec.get("perception") or {}).get(
+                        "native_frame_max", 60)))
+                views = derive_character_evidence_views(
+                    verified["event_facts"], bindings,
+                    output / "character_evidence_views")
+                result = {
+                    "verified_events": verified["verified_count"],
+                    "blocked_events": verified["blocked_count"],
+                    "view_counts": views["counts"],
+                }
+            else:
+                queue = json.loads((output / "creation_queue.json").read_text(
+                    encoding="utf-8"))
+                reference_task = json.loads((output / "reference_task.json").read_text(
+                    encoding="utf-8"))
+                view_manifest = json.loads((output / "character_evidence_views" /
+                                            "views_manifest.json").read_text(encoding="utf-8"))
+                batch = run_character_batch(
+                    cfg, queue, reference_task, view_manifest["views"], output,
+                    source_video=source, bgm_path=bgm, runner=runner, force=args.force)
+                result = {
+                    "selected_task_count": batch["selected_task_count"],
+                    "preview_ready_count": batch["preview_ready_count"],
+                    "delivery": batch["delivery"],
+                }
+    else:
+        view_manifest = json.loads((output / "character_evidence_views" /
+                                    "views_manifest.json").read_text(encoding="utf-8"))
+        queue = build_character_creation_queue(
+            view_manifest["views"], output / "creation_queue.json")
+        result = {
+            "candidate_task_count": len(queue["candidates"]),
+            "selected_task_count": len(queue["selected_tasks"]),
+            "ready_character_count": queue["ready_character_count"],
+        }
+    manifest["phases"][args.phase] = result
+    manifest["last_phase"] = args.phase
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    return {"output": str(output), "phase": args.phase, **result}
+
+
+def _character_batch(args, cfg) -> dict:
+    from src.agentic_video.character_batch import V8Blocked
+
+    try:
+        return _character_batch_impl(args, cfg)
+    except V8Blocked as exc:
+        output = Path(args.output).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        failure = {
+            "schema_version": "character_batch_phase_failure_v1",
+            "passed": False, "delivery": "blocked",
+            "failure_class": "verification", "failure_stage": exc.stage,
+            "reason_code": exc.reason_code, "detail": exc.detail or str(exc),
+        }
+        (output / f"{args.phase}_failure.json").write_text(
+            json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"output": str(output), "phase": args.phase, **failure}
+
+
+def _character_batch_accept(args, _cfg) -> dict:
+    from src.agentic_video.character_batch import accept_character_batch
+
+    result = accept_character_batch(
+        Path(args.output).resolve(), Path(args.human_acceptance).resolve())
+    return {"output": str(Path(args.output).resolve()),
+            "delivery": result["delivery"],
+            "final_passed_count": result["final_passed_count"]}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -965,6 +1198,8 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence-v61-diagnostic": _evidence_v61_diagnostic,
                 "evidence-v7-target": _evidence_v7_target,
                 "evidence-v7-accept": _evidence_v7_accept,
+                "character-batch": _character_batch,
+                "character-batch-accept": _character_batch_accept,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
