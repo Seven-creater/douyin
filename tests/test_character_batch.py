@@ -393,6 +393,44 @@ def test_occurrence_rewatch_replaces_coarse_group_with_local_subjects(
     assert all("character_id" not in json.dumps(row) for row in occurrence_rows)
 
 
+def test_occurrence_rewatch_treats_empty_as_observed_and_reuses_it(
+        tmp_path: Path, monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 20.0)
+
+    class FirstRunner:
+        calls = 0
+
+        def watch_many(self, requests):
+            self.calls += 1
+            return [SimpleNamespace(text=json.dumps({
+                "occurrences": [], "event_candidates": [], "passed": False,
+            }), sampling={"sampling_verified": True}, gpu_pair="0,1")
+                    for _ in requests]
+
+    first_runner = FirstRunner()
+    leads = [{"source_interval": [5, 7], "lead_kind": "coverage",
+              "lead_id": "quiet_region"}]
+    first = v8.build_occurrence_bank_from_leads(
+        cfg, _spec(), leads, tmp_path / "observations", source_video=source,
+        runner=first_runner, source_sha256="source-hash")
+    assert first["complete"] is True
+    assert first["observed_empty_count"] == 1
+    assert first["failed_observation_count"] == 0
+
+    class NoCallRunner:
+        def watch_many(self, _requests):
+            raise AssertionError("a completed empty observation must be reused")
+
+    second = v8.build_occurrence_bank_from_leads(
+        cfg, _spec(), leads, tmp_path / "observations", source_video=source,
+        runner=NoCallRunner(), source_sha256="source-hash")
+    assert second["complete"] is True
+    assert second["reused_observation_count"] == 1
+
+
 def test_investigation_windows_merge_near_duplicate_leads() -> None:
     rows = v8.investigation_windows([
         {"source_interval": [10, 12], "lead_kind": "asr", "lead_id": "a"},

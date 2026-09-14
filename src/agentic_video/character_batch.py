@@ -954,25 +954,27 @@ def _normalize_neutral_observation(payload: Mapping[str, Any], *,
 def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
                                      leads: Iterable[Mapping[str, Any]],
                                      output_dir: Path, *, source_video: Path,
-                                     runner: Any) -> dict[str, Any]:
-    """Use name-free Omni rewatches to turn coarse leads into occurrence truth."""
+                                     runner: Any,
+                                     source_sha256: str | None = None,
+                                     reuse_completed: bool = True,
+                                     batch_size: int = 32) -> dict[str, Any]:
+    """Use resumable, name-free Omni rewatches to create occurrence truth."""
     output_dir = Path(output_dir)
     duration_s = common.video_duration_s(
         cfg.perception.get("ffprobe_bin", "ffprobe"), source_video)
     windows = investigation_windows(leads, duration_s=duration_s, window_s=6.0)
-    requests = [{
-        "video_path": source_video,
-        "prompt": NEUTRAL_OCCURRENCE_PROMPT,
-        "kwargs": {
-            "start_s": row["source_interval"][0],
-            "end_s": row["source_interval"][1],
-            "clip_dir": output_dir / row["observation_id"] / "source_clip",
-            "fps": 12.0,
-            "duration_s": row["source_interval"][1] - row["source_interval"][0],
-            "max_new_tokens": 1536,
-        },
-    } for row in windows]
-    answers = runner.watch_many(requests) if requests else []
+    if batch_size < 1:
+        raise ValueError("occurrence observation batch_size must be positive")
+    contract = {
+        "schema_version": "neutral_occurrence_contract_v1",
+        "source_video": str(source_video),
+        "source_sha256": source_sha256 or sha256_file(source_video),
+        "prompt_sha256": hashlib.sha256(
+            NEUTRAL_OCCURRENCE_PROMPT.encode("utf-8")).hexdigest(),
+        "fps": 12.0,
+        "window_s": 6.0,
+    }
+    contract_sha256 = _stable_sha(contract)
     forbidden_terms = {
         str(value).strip().lower()
         for character in spec.get("characters") or []
@@ -980,51 +982,116 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
                       + list(character.get("aliases") or []))
         if str(value or "").strip()
     }
-    occurrences: list[dict[str, Any]] = []
-    events: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    for window, answer in zip(windows, answers):
-        observation_id = window["observation_id"]
-        observation_dir = output_dir / observation_id
-        raw_path = observation_dir / "raw_response.txt"
-        raw_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_path.write_text(str(answer.text), encoding="utf-8")
-        _write_json(observation_dir / "response_envelope.json", {
-            "sampling": getattr(answer, "sampling", None),
-            "gpu_pair": getattr(answer, "gpu_pair", None),
-            "raw_response": str(answer.text),
-        })
-        try:
-            payload = _parse_object(str(answer.text))
-            serialized = json.dumps(payload, ensure_ascii=False).lower()
-            if any(term in serialized for term in forbidden_terms):
-                raise V8Blocked("occurrence", "neutral_observation_named_character")
-            if payload.get("passed") is not True:
-                raise V8Blocked("occurrence", "neutral_observation_not_supported")
-            new_occurrences, new_events = _normalize_neutral_observation(
-                payload, observation_id=observation_id,
-                start_s=window["source_interval"][0],
-                end_s=window["source_interval"][1], source_video=source_video,
-                lead_refs=window["lead_refs"])
-            occurrences.extend(new_occurrences)
-            events.extend(new_events)
-        except Exception as exc:
-            failures.append({
-                "observation_id": observation_id,
-                "source_interval": window["source_interval"],
-                "failure_class": "verification",
-                "failure_stage": "occurrence",
-                "reason": f"{type(exc).__name__}: {exc}",
-                "raw_response_path": str(raw_path),
+    completed: dict[str, dict[str, Any]] = {}
+    pending: list[dict[str, Any]] = []
+    for window in windows:
+        result_path = output_dir / window["observation_id"] / "result.json"
+        if reuse_completed and result_path.is_file():
+            cached = _read_json(result_path)
+            if (cached.get("contract_sha256") == contract_sha256
+                    and cached.get("source_interval") == window["source_interval"]
+                    and cached.get("status") in {"observed", "observed_empty"}):
+                completed[window["observation_id"]] = cached
+                continue
+        pending.append(window)
+
+    for offset in range(0, len(pending), batch_size):
+        batch = pending[offset:offset + batch_size]
+        requests = [{
+            "video_path": source_video,
+            "prompt": NEUTRAL_OCCURRENCE_PROMPT,
+            "kwargs": {
+                "start_s": row["source_interval"][0],
+                "end_s": row["source_interval"][1],
+                "clip_dir": output_dir / row["observation_id"] / "source_clip",
+                "fps": 12.0,
+                "duration_s": row["source_interval"][1] - row["source_interval"][0],
+                "max_new_tokens": 1536,
+            },
+        } for row in batch]
+        answers = runner.watch_many(requests)
+        if len(answers) != len(batch):
+            raise V8Blocked("occurrence", "neutral_observation_response_count_mismatch")
+        for window, answer in zip(batch, answers):
+            observation_id = window["observation_id"]
+            observation_dir = output_dir / observation_id
+            raw_path = observation_dir / "raw_response.txt"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(str(answer.text), encoding="utf-8")
+            _write_json(observation_dir / "response_envelope.json", {
+                "sampling": getattr(answer, "sampling", None),
+                "gpu_pair": getattr(answer, "gpu_pair", None),
+                "raw_response": str(answer.text),
             })
+            try:
+                payload = _parse_object(str(answer.text))
+                serialized = json.dumps(payload, ensure_ascii=False).lower()
+                if any(term in serialized for term in forbidden_terms):
+                    raise V8Blocked("occurrence", "neutral_observation_named_character")
+                passed = payload.get("passed") is True
+                if not passed and (payload.get("occurrences") or
+                                   payload.get("event_candidates")):
+                    raise V8Blocked(
+                        "occurrence", "unsupported_observation_contains_claims")
+                if passed:
+                    new_occurrences, new_events = _normalize_neutral_observation(
+                        payload, observation_id=observation_id,
+                        start_s=window["source_interval"][0],
+                        end_s=window["source_interval"][1], source_video=source_video,
+                        lead_refs=window["lead_refs"])
+                    status = "observed"
+                else:
+                    new_occurrences, new_events = [], []
+                    status = "observed_empty"
+                result = {
+                    "schema_version": "neutral_occurrence_result_v1",
+                    "contract_sha256": contract_sha256,
+                    "observation_id": observation_id,
+                    "source_interval": window["source_interval"],
+                    "lead_refs": window["lead_refs"],
+                    "status": status,
+                    "occurrences": new_occurrences,
+                    "event_candidates": new_events,
+                    "raw_response_path": str(raw_path),
+                }
+            except Exception as exc:
+                result = {
+                    "schema_version": "neutral_occurrence_result_v1",
+                    "contract_sha256": contract_sha256,
+                    "observation_id": observation_id,
+                    "source_interval": window["source_interval"],
+                    "lead_refs": window["lead_refs"],
+                    "status": "failed",
+                    "failure_class": "verification",
+                    "failure_stage": "occurrence",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "raw_response_path": str(raw_path),
+                }
+            completed[observation_id] = result
+            _write_json(observation_dir / "result.json", result)
+
+    ordered = [completed[row["observation_id"]] for row in windows]
+    occurrences = [item for result in ordered
+                   for item in result.get("occurrences") or []]
+    events = [item for result in ordered
+              for item in result.get("event_candidates") or []]
+    failures = [result for result in ordered if result.get("status") == "failed"]
     build_occurrence_bank([], occurrences, output_dir.parent / "occurrence_bank.jsonl")
+    events.sort(key=lambda row: (
+        float((row.get("source_interval") or [float("inf")])[0]),
+        str(row.get("event_candidate_id") or "")))
     _write_jsonl(output_dir.parent / "event_candidates.jsonl", events)
     result = {
         "schema_version": "occurrence_observation_manifest_v1",
+        "contract": contract, "contract_sha256": contract_sha256,
         "lead_count": sum(len(row["lead_refs"]) for row in windows),
         "observation_count": len(windows),
         "passed_observation_count": len(windows) - len(failures),
+        "observed_empty_count": sum(
+            row.get("status") == "observed_empty" for row in ordered),
         "failed_observation_count": len(failures),
+        "complete": not failures,
+        "reused_observation_count": len(windows) - len(pending),
         "occurrence_count": len(occurrences),
         "event_candidate_count": len(events),
         "coarse_coverage_promoted_directly": False,

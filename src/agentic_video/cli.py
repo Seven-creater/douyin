@@ -1050,17 +1050,10 @@ def _character_batch_impl(args, cfg) -> dict:
                 ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
                 response_timeout_s=args.worker_timeout) as runner:
             if args.phase == "identity":
-                if not args.seed_manifest:
-                    raise ValueError("V8 identity requires --seed-manifest")
                 coverage_manifest = json.loads((output / "coverage" /
                     "coverage_manifest.json").read_text(encoding="utf-8"))
                 if not coverage_manifest.get("complete"):
                     raise V8Blocked("coverage", "uniform_coverage_incomplete")
-                seed_manifest = json.loads(
-                    Path(args.seed_manifest).read_text(encoding="utf-8"))
-                profiles = build_character_profiles(
-                    cfg, spec, seed_manifest, output / "character_profiles",
-                    source_video=source, runner=runner)
                 coverage_candidates_path = output / "coverage" / "event_candidates.jsonl"
                 if not coverage_candidates_path.is_file():
                     coverage_candidates_path = output / "event_candidates.jsonl"
@@ -1069,6 +1062,17 @@ def _character_batch_impl(args, cfg) -> dict:
                 leads = build_investigation_leads(mentions, coverage_candidates)
                 occurrence_manifest = build_occurrence_bank_from_leads(
                     cfg, spec, leads, output / "occurrence_observation",
+                    source_video=source, runner=runner,
+                    source_sha256=source_hash, reuse_completed=not args.force)
+                if not occurrence_manifest.get("complete"):
+                    raise V8Blocked(
+                        "occurrence", "neutral_occurrence_observation_incomplete")
+                if not args.seed_manifest:
+                    raise V8Blocked("identity", "human_seed_manifest_required")
+                seed_manifest = json.loads(
+                    Path(args.seed_manifest).read_text(encoding="utf-8"))
+                profiles = build_character_profiles(
+                    cfg, spec, seed_manifest, output / "character_profiles",
                     source_video=source, runner=runner)
                 occurrences = _read_jsonl(output / "occurrence_bank.jsonl")
                 bindings = bind_occurrence_identities(
