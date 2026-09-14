@@ -182,6 +182,34 @@ def test_coverage_parser_wraps_bare_array_but_keeps_interval_contract() -> None:
         }]}, block_id="b", start_s=0, end_s=45)
 
 
+def test_short_final_coverage_block_uses_flashvid_even_frame_contract(
+        tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_ffmpeg(_binary, args, **_kwargs):
+        captured["filter"] = args[args.index("-vf") + 1]
+        Path(args[-1]).write_bytes(b"video")
+
+    class Probe:
+        returncode = 0
+        stderr = ""
+        stdout = json.dumps({"frames": [
+            {"best_effort_timestamp_time": str(index * 24.52 / 48)}
+            for index in range(48)
+        ]})
+
+    monkeypatch.setattr(v8.common, "run_ffmpeg", fake_ffmpeg)
+    monkeypatch.setattr(v8.subprocess, "run", lambda *_args, **_kwargs: Probe())
+    _clip, audit = v8._build_coverage_transport(
+        "ffmpeg", "ffprobe", tmp_path / "source.mp4", tmp_path / "transport",
+        start_s=5715.0, end_s=5739.52, requested_fps=2.0, source_fps=60.0)
+    assert audit["requested_frame_count"] == 48
+    assert audit["actual_frame_count"] == 48
+    assert audit["sampling_verified"] is True
+    assert audit["effective_fps"] == pytest.approx(48 / 24.52, abs=1e-6)
+    assert f"fps={48 / 24.52:.12f}" in captured["filter"]
+
+
 def test_coverage_event_cannot_reference_missing_occurrence() -> None:
     with pytest.raises(v8.V8Blocked, match="event_patient_missing_occurrence"):
         v8._normalize_coverage_response({"regions": [{

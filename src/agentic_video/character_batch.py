@@ -477,10 +477,14 @@ def _build_coverage_transport(ffmpeg_bin: str, ffprobe_bin: str,
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     clip = destination / "clip.mp4"
+    duration_s = float(end_s - start_s)
+    requested_frames = max(4, int(duration_s * requested_fps))
+    requested_frames -= requested_frames % 2
+    transport_fps = requested_frames / duration_s
     common.run_ffmpeg(ffmpeg_bin, [
         "-y", "-loglevel", "error", "-ss", f"{start_s}", "-to", f"{end_s}",
         "-i", str(source_video), "-map", "0:v:0",
-        "-vf", f"fps={requested_fps:.9f},scale='min(1920,iw)':-2,setpts=PTS-STARTPTS",
+        "-vf", f"fps={transport_fps:.12f},scale='min(1920,iw)':-2,setpts=PTS-STARTPTS",
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-movflags", "+faststart", str(clip),
     ], timeout_s=300)
@@ -498,8 +502,6 @@ def _build_coverage_transport(ffmpeg_bin: str, ffprobe_bin: str,
         for row in payload.get("frames") or []
         if row.get("best_effort_timestamp_time") is not None
     ]
-    duration_s = float(end_s - start_s)
-    requested_frames = int(round(duration_s * requested_fps))
     absolute = [round(float(start_s) + value, 6) for value in relative]
     verified = (
         len(relative) == requested_frames and
@@ -509,6 +511,7 @@ def _build_coverage_transport(ffmpeg_bin: str, ffprobe_bin: str,
     audit = {
         "audit_basis": "deterministic_presampled_transport",
         "requested_fps": float(requested_fps),
+        "transport_fps": round(transport_fps, 9),
         "effective_fps": round(len(relative) / duration_s, 6),
         "source_fps": source_fps,
         "requested_frame_count": requested_frames,
