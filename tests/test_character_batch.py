@@ -152,6 +152,24 @@ def test_uniform_coverage_blocks_exclude_head_tail_without_gaps() -> None:
     assert all(left[1] == right[0] for left, right in zip(blocks, blocks[1:]))
 
 
+def test_uniform_coverage_drops_regions_not_worth_rewatch() -> None:
+    payload = {"regions": [
+        {"interval": [0.0, 2.0], "activity": "standing",
+         "worth_rewatch": False,
+         "occurrences": [{"local_id": "A", "visual_state": "standing"}],
+         "event_candidates": [{"actor_local_id": "A", "action": "standing"}]},
+        {"interval": [5.0, 8.0], "activity": "one subject strikes another",
+         "worth_rewatch": True,
+         "occurrences": [{"local_id": "A", "visual_state": "arm moves"}],
+         "event_candidates": [{"actor_local_id": "A", "action": "strikes"}]},
+    ]}
+    occurrences, events = v8._normalize_coverage_response(
+        payload, block_id="b0000", start_s=90.0, end_s=135.0)
+    assert len(occurrences) == 1
+    assert len(events) == 1
+    assert occurrences[0]["source_interval"] == [95.0, 98.0]
+
+
 def test_occurrence_bank_deduplicates_without_identity_and_leads_are_not_truth(
         tmp_path: Path) -> None:
     occurrence = {"occurrence_id": "occ_A", "source_interval": [1, 2],

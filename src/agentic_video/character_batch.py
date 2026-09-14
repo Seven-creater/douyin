@@ -286,6 +286,9 @@ def coverage_blocks(duration_s: float, *, block_s: float = 45.0,
 NEUTRAL_COVERAGE_PROMPT = """Watch this source-movie block as a neutral observer.
 Do not identify any character, use names, infer canonical identity, discuss story templates,
 or assign editorial functions. Give local subjects temporary labels A/B/C within each region.
+Inspect the entire block before selecting regions. Report only visible state changes,
+interactions, entrances/exits, or other concrete activity that genuinely merits a closer
+original-video rewatch; never report routine static presence merely to fill the list.
 Return strict JSON:
 {"regions":[{"interval":[0.0,2.0],"activity":"visible coarse activity",
 "worth_rewatch":true,"occurrences":[{"local_id":"A","local_description":"visible
@@ -293,7 +296,8 @@ appearance only","visual_state":"visible state/activity","roi":null}],
 "event_candidates":[{"actor_local_id":"A","action":"visible action",
 "patient_local_id":null,"visible_result":"visible change or empty"}]}]}
 Times are seconds relative to this block. Return at most three regions, each 2-6 seconds.
-If nothing merits rewatch return {"regions":[]}. Not observed never means absent."""
+Every returned region must have worth_rewatch=true. If nothing merits rewatch return
+{"regions":[]}. Not observed never means absent."""
 
 
 _FORBIDDEN_NEUTRAL_KEYS = {
@@ -321,6 +325,8 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
         raise V8Blocked("coverage", "neutral_observation_contaminated")
     for region_index, region in enumerate((payload.get("regions") or [])[:3]):
         if not isinstance(region, dict):
+            continue
+        if region.get("worth_rewatch") is not True:
             continue
         interval = region.get("interval") or []
         if not isinstance(interval, list) or len(interval) != 2:
