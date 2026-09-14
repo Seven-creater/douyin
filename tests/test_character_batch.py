@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.agentic_video import character_batch as v8
+from src.agentic_video import cli
 from src.agentic_video.cli import build_parser
 from src.config import load_config
 
@@ -63,6 +64,18 @@ def test_v8_cli_and_fixed_spec_contract(tmp_path: Path) -> None:
     spec, digest = v8.read_v8_spec(path)
     assert spec["source"] == "luoxiaohei1"
     assert len(digest) == 64
+
+
+def test_v8_cli_classifies_unhandled_bootstrap_failure(tmp_path: Path,
+                                                       monkeypatch) -> None:
+    monkeypatch.setattr(cli, "_character_batch_impl",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("x")))
+    args = SimpleNamespace(output=str(tmp_path), phase="bootstrap")
+    with pytest.raises(KeyError):
+        cli._character_batch(args, None)
+    failure = json.loads((tmp_path / "bootstrap_failure.json").read_text(encoding="utf-8"))
+    assert failure["failure_class"] == "infrastructure"
+    assert failure["failure_stage"] == "bootstrap"
 
 
 def test_v8_module_has_no_detector_tracker_or_reid_import() -> None:

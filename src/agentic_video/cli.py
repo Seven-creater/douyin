@@ -975,6 +975,9 @@ def _character_batch_impl(args, cfg) -> dict:
         "no_yolo_tracker_reid": True,
         "phases": dict(previous.get("phases") or {}),
     }
+    # Persist the expensive source hash before phase work so a late failure can resume.
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
     if args.phase == "bootstrap":
         prior = build_external_character_prior(spec, output / "external_prior")
         transcript_path = _v8_path(spec["transcript_path"])
@@ -1003,7 +1006,7 @@ def _character_batch_impl(args, cfg) -> dict:
             prepare_reference_task(cfg, spec, output, vanilla_client=client)
             reference_status = "generated_native_bypass"
         result = {
-            "prior_claim_count": prior["claim_count"], "mention_count": len(mentions),
+            "prior_claim_count": len(prior["claims"]), "mention_count": len(mentions),
             "seed_proposal_count": len(seed_review["proposals"]),
             "reference_status": reference_status,
         }
@@ -1124,6 +1127,19 @@ def _character_batch(args, cfg) -> dict:
         (output / f"{args.phase}_failure.json").write_text(
             json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
         return {"output": str(output), "phase": args.phase, **failure}
+    except Exception as exc:
+        output = Path(args.output).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        failure = {
+            "schema_version": "character_batch_phase_failure_v1",
+            "passed": False, "delivery": "blocked",
+            "failure_class": "infrastructure", "failure_stage": args.phase,
+            "reason_code": "unhandled_runtime_failure",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+        (output / f"{args.phase}_failure.json").write_text(
+            json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise
 
 
 def _character_batch_accept(args, _cfg) -> dict:
