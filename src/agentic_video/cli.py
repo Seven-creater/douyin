@@ -189,6 +189,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="parallel Omni workers, e.g. '0,1;2,3;4,5;6,7'")
     evidence_v61.add_argument("--worker-timeout", type=float, default=3600.0)
 
+    evidence_v7 = sub.add_parser(
+        "evidence-v7-target",
+        help="run one phase of the V7 target-centered no-detector experiment")
+    evidence_v7.add_argument(
+        "--phase", required=True, choices=("prepare", "browse", "verify"))
+    evidence_v7.add_argument(
+        "--spec", default="config/experiments/lxh1_v7_target.json")
+    evidence_v7.add_argument("--video", default=None)
+    evidence_v7.add_argument("--output", required=True)
+    evidence_v7.add_argument(
+        "--gpu-pairs", default=None,
+        help="Omni pairs for prepare/verify, e.g. '0,1;2,3;4,5;6,7'")
+    evidence_v7.add_argument("--worker-timeout", type=float, default=3600.0)
+    evidence_v7.add_argument("--force", action="store_true")
+
+    evidence_v7_accept = sub.add_parser(
+        "evidence-v7-accept", help="release a V7 output after human review")
+    evidence_v7_accept.add_argument("--output", required=True)
+    evidence_v7_accept.add_argument("--human-acceptance", required=True)
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -547,6 +567,239 @@ def _evidence_v61_diagnostic(args, cfg) -> dict:
     }
 
 
+def _v7_clients(spec: dict) -> dict:
+    from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
+
+    model = str(spec.get("flashvid_model") or "Qwen3.5-4B")
+    return {
+        arm: FlashVIDClient(FlashVIDEndpoint(
+            arm=arm, base_url=str(row["base_url"]), model=model,
+            fps=float(row["fps"]), retention_ratio=float(row["retention_ratio"]),
+            backend=str(row["backend"])))
+        for arm, row in (spec.get("browse_arms") or {}).items()
+    }
+
+
+def _v7_paths(spec: dict, args) -> tuple[Path, Path, Path, Path]:
+    root = repo_root()
+    source = Path(args.video or spec["source_video"])
+    if not source.is_absolute():
+        source = root / source
+    reference = Path(spec["reference_video"])
+    if not reference.is_absolute():
+        reference = root / reference
+    bgm = Path(spec["bgm_path"])
+    if not bgm.is_absolute():
+        bgm = root / bgm
+    oracle = Path(spec["oracle"])
+    if not oracle.is_absolute():
+        oracle = root / oracle
+    return source, reference, bgm, oracle
+
+
+def _v7_omni_pairs(spec: dict, args) -> str:
+    configured = (spec.get("perception") or {}).get("gpu_pairs") or []
+    pairs = args.gpu_pairs or ";".join(str(pair) for pair in configured)
+    if not pairs:
+        raise ValueError("V7 prepare/verify requires --gpu-pairs")
+    return pairs
+
+
+def _evidence_v7_target_impl(args, cfg) -> dict:
+    from src.agentic_video.recipe_v2 import sha256_file
+    from src.agentic_video.target_v7 import (
+        build_reference_driven_edit_plan, build_target_album,
+        collect_flashvid_runtime, export_frame, finalize_target_microcut, oracle_evidence_bank,
+        evaluate_target_album, prepare_reference_task, read_v7_spec, run_browse_matrix,
+        verify_target_evidence,
+    )
+
+    spec_path = Path(args.spec)
+    spec, spec_sha = read_v7_spec(spec_path)
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    source, reference, bgm, oracle_path = _v7_paths(spec, args)
+    manifest_path = output / "run_manifest.json"
+    previous_manifest = {}
+    if manifest_path.is_file():
+        try:
+            previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous_manifest = {}
+    manifest = {
+        "schema_version": "v7_run_manifest_v1", "phase": args.phase,
+        "spec": str(spec_path.resolve()), "spec_sha256": spec_sha,
+        "source_video": str(source), "reference_video": str(reference),
+        "custom_flashvid_port": True, "base_model": "Qwen3.5-4B",
+        "flashvid_official_support_claimed": False,
+        "flashvid_runtime": collect_flashvid_runtime(Path(spec["flashvid_runtime"])),
+        "phases": dict(previous_manifest.get("phases") or {}),
+    }
+    if source.is_file():
+        source_size = source.stat().st_size
+        manifest["source_size_bytes"] = source_size
+        cached_source_hash = (previous_manifest.get("source_sha256")
+                              if previous_manifest.get("source_video") == str(source) and
+                              previous_manifest.get("source_size_bytes") == source_size
+                              else None)
+        manifest["source_sha256"] = cached_source_hash or sha256_file(source)
+    if reference.is_file():
+        manifest["reference_sha256"] = sha256_file(reference)
+    clients = _v7_clients(spec)
+
+    if args.phase == "prepare":
+        from src.perception.omni_pool import OmniProcessPool
+
+        seed_path = output / "target_album" / "target_seed.jpg"
+        export_frame(cfg.perception.get("ffmpeg_bin", "ffmpeg"), source,
+                     float(spec["trusted_seed"]["source_time_s"]), seed_path)
+        with OmniProcessPool(
+                _v7_omni_pairs(spec, args), cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            reference_task = prepare_reference_task(
+                cfg, spec, output, vanilla_client=clients["D"])
+            album = build_target_album(
+                cfg, spec, output / "target_album", trusted_seed=seed_path,
+                source_video=source, vanilla_client=clients["D"], runner=runner)
+        manifest.update({"reference_task_sha256": sha256_file(
+            output / "reference_task.json"), "target_album_sha256": sha256_file(
+                output / "target_album" / "target_album.json")})
+        result = {"reference_sections": len(reference_task["edit_sections"]),
+                  "album_positive": len(album["positive"]),
+                  "album_hard_negative": len(album["hard_negative"])}
+    elif args.phase == "browse":
+        reference_task = json.loads((output / "reference_task.json").read_text(
+            encoding="utf-8"))
+        album = json.loads((output / "target_album" / "target_album.json").read_text(
+            encoding="utf-8"))
+        oracle = json.loads(oracle_path.read_text(encoding="utf-8"))
+        browse = run_browse_matrix(
+            cfg, spec, output / "browse", clients=clients, source_video=source,
+            reference_task=reference_task, target_album=album, oracle=oracle)
+        result = {"arms": {arm: len(row["candidates"])
+                           for arm, row in browse["arms"].items()},
+                  "diagnosis": browse["comparison"]["diagnostic_attribution"]}
+    else:
+        from src.perception.omni_pool import OmniProcessPool
+
+        reference_task = json.loads((output / "reference_task.json").read_text(
+            encoding="utf-8"))
+        album = json.loads((output / "target_album" / "target_album.json").read_text(
+            encoding="utf-8"))
+        arms = {arm: json.loads((output / "browse" / "arms" / arm /
+                                 "browse_results.json").read_text(encoding="utf-8"))
+                for arm in ("A", "B", "C", "D")}
+        oracle = json.loads(oracle_path.read_text(encoding="utf-8"))
+        with OmniProcessPool(
+                _v7_omni_pairs(spec, args), cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            automatic_bank = verify_target_evidence(
+                cfg, spec, output / "agent", runner=runner,
+                source_video=source, browse_arms=arms, target_album=album)
+            plan = build_reference_driven_edit_plan(reference_task, automatic_bank)
+            (output / "edit_plan.json").write_text(
+                json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not plan.get("passed"):
+                raise RuntimeError(f"automatic V7 plan blocked: {plan.get('missing_goals')}")
+            automatic_result = finalize_target_microcut(
+                cfg, plan, output, source_video=source, bgm_path=bgm,
+                runner=runner, force=args.force)
+            oracle_bank = oracle_evidence_bank(oracle, source)
+            oracle_dir = output / "arms" / "oracle"
+            oracle_dir.mkdir(parents=True, exist_ok=True)
+            (oracle_dir / "evidence_bank.json").write_text(
+                json.dumps(oracle_bank, ensure_ascii=False, indent=2), encoding="utf-8")
+            oracle_plan = build_reference_driven_edit_plan(reference_task, oracle_bank)
+            (oracle_dir / "edit_plan.json").write_text(
+                json.dumps(oracle_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            oracle_result = finalize_target_microcut(
+                cfg, oracle_plan, oracle_dir, source_video=source, bgm_path=bgm,
+                runner=runner, force=args.force)
+        comparison = json.loads((output / "browse" / "arm_comparison.json").read_text(
+            encoding="utf-8"))
+        identity_audit = evaluate_target_album(album, oracle)
+        (output / "target_album" / "heldout_identity_audit.json").write_text(
+            json.dumps(identity_audit, ensure_ascii=False, indent=2), encoding="utf-8")
+        best_hits = max(int(row.get("candidate_temporal_hits") or 0)
+                        for row in comparison["metrics"].values())
+        browse_failures = sum(len(row.get("failures") or []) for row in arms.values())
+        automatic_passed = bool(automatic_result["acceptance"]["automated_passed"])
+        oracle_passed = bool(oracle_result["acceptance"]["automated_passed"])
+        top = {
+            "schema_version": "v7_acceptance_v1",
+            "automated_passed": (automatic_passed and oracle_passed and best_hits >= 4 and
+                                 identity_audit["hard_negative_false_merges"] == 0 and
+                                 identity_audit["unlabeled_count"] == 0 and
+                                 browse_failures == 0),
+            "human_passed": None, "passed": False, "delivery": "blocked",
+            "hard_negative_false_merges": identity_audit["hard_negative_false_merges"],
+            "identity_gt_unlabeled_count": identity_audit["unlabeled_count"],
+            "browse_gt_hits_best_arm": best_hits,
+            "browse_request_failures": browse_failures,
+            "automatic_plan_blind_passed": automatic_passed,
+            "oracle_plan_blind_passed": oracle_passed,
+        }
+        if not top["automated_passed"]:
+            top.update({"failure_class": "verification", "failure_stage": "acceptance",
+                        "reason_code": "v7_automatic_acceptance_failed"})
+        (output / "acceptance.json").write_text(
+            json.dumps(top, ensure_ascii=False, indent=2), encoding="utf-8")
+        (output / "rendered.mp4").unlink(missing_ok=True)
+        result = {"automatic_plan_blind_passed": automatic_passed,
+                  "oracle_plan_blind_passed": oracle_passed,
+                  "browse_gt_hits_best_arm": best_hits,
+                  "delivery": "blocked_pending_human" if top["automated_passed"]
+                  else "blocked"}
+    manifest["phases"][args.phase] = result
+    manifest.update(result)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    return {"output": str(output), "phase": args.phase, **result}
+
+
+def _evidence_v7_target(args, cfg) -> dict:
+    from src.agentic_video.target_v7 import V7Blocked
+
+    output = Path(args.output).resolve()
+    try:
+        return _evidence_v7_target_impl(args, cfg)
+    except V7Blocked as exc:
+        output.mkdir(parents=True, exist_ok=True)
+        failure_class = ("infrastructure" if exc.failure_stage == "model" else
+                         "content" if exc.failure_stage == "browsing" else
+                         "verification")
+        acceptance = {
+            "schema_version": "v7_acceptance_v1", "automated_passed": False,
+            "human_passed": None, "passed": False, "delivery": "blocked",
+            "failure_class": failure_class, "failure_stage": exc.failure_stage,
+            "reason_code": exc.reason_code, "detail": str(exc),
+        }
+        (output / "acceptance.json").write_text(
+            json.dumps(acceptance, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"output": str(output), "phase": args.phase, **acceptance}
+    except Exception as exc:
+        output.mkdir(parents=True, exist_ok=True)
+        acceptance = {
+            "schema_version": "v7_acceptance_v1", "automated_passed": False,
+            "human_passed": None, "passed": False, "delivery": "blocked",
+            "failure_class": "infrastructure", "failure_stage": args.phase,
+            "reason_code": "unhandled_runtime_failure",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+        (output / "acceptance.json").write_text(
+            json.dumps(acceptance, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise
+
+
+def _evidence_v7_accept(args, _cfg) -> dict:
+    from src.agentic_video.target_v7 import accept_v7_output
+
+    final = accept_v7_output(Path(args.output), Path(args.human_acceptance))
+    return {"output": str(final), "delivery": "passed"}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -607,6 +860,8 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence-v6": _evidence_v6,
                 "evidence-v6-accept": _evidence_v6_accept,
                 "evidence-v61-diagnostic": _evidence_v61_diagnostic,
+                "evidence-v7-target": _evidence_v7_target,
+                "evidence-v7-accept": _evidence_v7_accept,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \

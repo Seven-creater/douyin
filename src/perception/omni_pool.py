@@ -81,6 +81,11 @@ def _worker_main(gpu_pair: str, omni_cfg: dict, ffmpeg_bin: str,
             kwargs = dict(item.get("kwargs") or {})
             if mode == "ask":
                 answer = runner.ask(item["prompt"], **kwargs)
+            elif mode == "inspect_media":
+                kwargs["image_paths"] = [Path(path) for path in kwargs["image_paths"]]
+                if kwargs.get("video_path") is not None:
+                    kwargs["video_path"] = Path(kwargs["video_path"])
+                answer = runner.inspect_media(prompt=item["prompt"], **kwargs)
             else:
                 if kwargs.get("clip_dir") is not None:
                     kwargs["clip_dir"] = Path(kwargs["clip_dir"])
@@ -90,7 +95,7 @@ def _worker_main(gpu_pair: str, omni_cfg: dict, ffmpeg_bin: str,
                 payload["clip_path"] = str(payload["clip_path"])
             results.put({"task_id": task_id, "ok": True, "answer": payload,
                          "sampling": (getattr(runner, "_last_sampling", None)
-                                      if mode == "watch" else None),
+                                      if mode in {"watch", "inspect_media"} else None),
                          "gpu_pair": gpu_pair})
         except BaseException as exc:  # worker must report OOM/parse errors to parent
             results.put({"task_id": task_id, "ok": False, "gpu_pair": gpu_pair,
@@ -206,6 +211,37 @@ class OmniProcessPool:
 
     def ask(self, prompt: str, **kwargs) -> PooledOmniAnswer:
         return self.ask_many([{"prompt": prompt, "kwargs": kwargs}])[0]
+
+    def inspect_media_many(self, requests: Iterable[dict[str, Any]]) \
+            -> list[PooledOmniAnswer]:
+        """Run image-only or images-plus-video requests on persistent workers."""
+        self.start()
+        queued = []
+        for request in requests:
+            task_id = f"task_{self._sequence:06d}"
+            self._sequence += 1
+            image_paths = [str(Path(path)) for path in request.get("image_paths") or []]
+            video_path = request.get("video_path")
+            if not image_paths and video_path is None:
+                raise ValueError("inspect_media request requires images or video")
+            if request.get("prompt") is None:
+                raise ValueError("inspect_media request requires prompt")
+            kwargs = dict(request.get("kwargs") or {})
+            kwargs["image_paths"] = image_paths
+            kwargs["video_path"] = str(video_path) if video_path is not None else None
+            row = {"task_id": task_id, "mode": "inspect_media",
+                   "prompt": request["prompt"], "kwargs": kwargs,
+                   "video_path": ""}
+            self._tasks.put(row)
+            queued.append((task_id, row))
+        return self._collect(queued)
+
+    def inspect_media(self, image_paths: list[Path], prompt: str, **kwargs) \
+            -> PooledOmniAnswer:
+        return self.inspect_media_many([{
+            "image_paths": image_paths, "prompt": prompt,
+            "video_path": kwargs.pop("video_path", None), "kwargs": kwargs,
+        }])[0]
 
     def close(self) -> None:
         if not self._started:

@@ -221,6 +221,75 @@ class OmniRunner:
         # 官方示例原样：device + dtype 双 cast（processor 输出 float32，模型 bf16，缺 dtype 会炸 conv）
         return inputs.to(self._model.device).to(self._model.dtype)
 
+    def _build_media_inputs(self, image_paths: list[Path], prompt: str, *,
+                            video_path: Path | None = None,
+                            fps: float | None = None,
+                            source_origin_s: float = 0.0):
+        """Build an audited image-only or images-plus-video Omni request.
+
+        V7 identity checks need full frames, deterministic ROI crops and album
+        anchors in the same request.  This path intentionally requires
+        qwen-omni-utils: the native processor path does not expose the sampled
+        video tensor/metadata needed by the audit contract.
+        """
+        if not self.cfg.get("use_qwen_omni_utils"):
+            raise ValueError("audited multi-image input requires use_qwen_omni_utils=true")
+        if not image_paths and video_path is None:
+            raise ValueError("at least one image or one video is required")
+        requested_fps = float(fps if fps is not None else self.cfg.get("fps", 2.0))
+        content = [{"type": "image", "image": str(Path(path))}
+                   for path in image_paths]
+        if video_path is not None:
+            content.append({"type": "video", "video": str(Path(video_path)),
+                            "fps": requested_fps})
+        content.append({"type": "text", "text": prompt})
+        conversation = [{"role": "user", "content": content}]
+
+        from qwen_omni_utils import process_audio_info, process_vision_info
+
+        use_audio = video_path is not None
+        audios = (process_audio_info(conversation, use_audio_in_video=True)
+                  if use_audio else None)
+        images, video_records = process_vision_info(
+            conversation, return_video_metadata=True)
+        videos = []
+        processor_fps = requested_fps
+        if video_path is not None:
+            audits = []
+            for record in video_records or []:
+                if not isinstance(record, tuple) or len(record) != 2:
+                    raise ValueError("qwen video metadata was not returned")
+                video, metadata = record
+                videos.append(video)
+                audits.append(self._sampling_audit(
+                    video, metadata, requested_fps=requested_fps,
+                    source_origin_s=source_origin_s))
+            if len(videos) != 1 or len(audits) != 1:
+                raise ValueError("OmniRunner expects exactly one audited video")
+            if not audits[0].get("sampling_verified"):
+                raise ValueError("sampling_audit_failed")
+            self._last_sampling = audits[0]
+            processor_fps = float(audits[0]["effective_fps"] or requested_fps)
+        else:
+            self._last_sampling = None
+
+        text = self._processor.apply_chat_template(
+            conversation, add_generation_prompt=True, tokenize=False)
+        kwargs = {
+            "text": text,
+            "audio": audios,
+            "images": images,
+            "videos": videos or None,
+            "return_tensors": "pt",
+            "padding": True,
+            "use_audio_in_video": use_audio,
+            "do_sample_frames": False,
+        }
+        if video_path is not None:
+            kwargs["fps"] = processor_fps
+        inputs = self._processor(**kwargs)
+        return inputs.to(self._model.device).to(self._model.dtype), use_audio
+
     # ---------- 观看 ----------
     def watch(self, video_path: Path, prompt: str, *,
               start_s: float | None = None, end_s: float | None = None,
@@ -254,6 +323,23 @@ class OmniRunner:
         return self._generate(inputs, max_new_tokens=max_new_tokens,
                               use_audio_in_video=True, frames_estimate=frames_est,
                               clip_path=clip_path, input_build_s=input_build_s)
+
+    def inspect_media(self, image_paths: list[Path], prompt: str, *,
+                      video_path: Path | None = None,
+                      fps: float | None = None,
+                      source_origin_s: float = 0.0,
+                      max_new_tokens: int | None = None) -> OmniAnswer:
+        """Inspect images, optionally together with one already-cut video."""
+        self.load()
+        t_pre0 = time.time()
+        inputs, use_audio = self._build_media_inputs(
+            [Path(path) for path in image_paths], prompt,
+            video_path=Path(video_path) if video_path is not None else None,
+            fps=fps, source_origin_s=source_origin_s)
+        input_build_s = time.time() - t_pre0
+        return self._generate(
+            inputs, max_new_tokens=max_new_tokens,
+            use_audio_in_video=use_audio, input_build_s=input_build_s)
 
     # ---------- 纯文本推理（Phase 3 模板抽取用） ----------
     def ask(self, prompt: str, *, max_new_tokens: int | None = None) -> OmniAnswer:

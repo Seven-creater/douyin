@@ -135,6 +135,56 @@ class EvidenceUnitV2:
         return payload
 
 
+@dataclass(frozen=True)
+class EvidenceUnitV3:
+    """Target-centered, independently verified evidence used by V7."""
+
+    id: str
+    observation_interval: tuple[float, float]
+    core_interval: tuple[float, float]
+    renderable_interval: tuple[float, float]
+    observation: dict[str, Any]
+    source_form: str
+    target_relation: str
+    identity_verification: dict[str, Any]
+    action_verification: dict[str, Any]
+    relation_verification: dict[str, Any] | None = None
+    claim_bounds: dict[str, Any] = field(default_factory=dict)
+    native_frame_provenance: dict[str, Any] = field(default_factory=dict)
+    source_video: str | None = None
+
+    def __post_init__(self) -> None:
+        observation = tuple(map(float, self.observation_interval))
+        core = tuple(map(float, self.core_interval))
+        renderable = tuple(map(float, self.renderable_interval))
+        if not (observation[0] <= core[0] < core[1] <= observation[1]):
+            raise ValueError("core_interval must be contained in observation_interval")
+        if not (renderable[0] <= core[0] < core[1] <= renderable[1]):
+            raise ValueError("renderable_interval must contain core_interval")
+        if self.source_form not in SOURCE_FORMS:
+            raise ValueError(f"unsupported evidence source_form: {self.source_form}")
+        if self.target_relation not in {"self", "related_interaction", "related_outcome"}:
+            raise ValueError(f"unsupported target_relation: {self.target_relation}")
+        if self.identity_verification.get("result") != "same":
+            raise ValueError("V7 evidence requires a passed identity check")
+        if self.action_verification.get("passed") is not True:
+            raise ValueError("V7 evidence requires a passed action check")
+        if (self.target_relation == "related_outcome" and
+                (self.relation_verification or {}).get("passed") is not True):
+            raise ValueError("related_outcome requires a passed relation check")
+
+    @property
+    def duration_s(self) -> float:
+        return float(self.renderable_interval[1]) - float(self.renderable_interval[0])
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = asdict(self)
+        for key in ("observation_interval", "core_interval", "renderable_interval"):
+            payload[key] = [round(float(value), 6) for value in payload[key]]
+        payload["duration_s"] = round(self.duration_s, 6)
+        return payload
+
+
 def evidence_v2_from_dict(row: dict[str, Any]) -> EvidenceUnitV2:
     """Read V6.1 observations and losslessly adapt historical V6 rows."""
     if row.get("core_interval") is not None:

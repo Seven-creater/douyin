@@ -5,6 +5,38 @@
   "control_scope_valid": true,
   "annotation_method": "Codex manual inspection of a 2fps overview followed by 12fps contact sheets; times are absolute source seconds",
   "prompt_isolation": "This file is never passed to Coarse Watch, Dense Rewatch, or automatic Pattern Matcher",
+  "identity_gt": [
+    {
+      "id": "same_human_form_seed_shot",
+      "interval": [5391.3, 5392.8],
+      "label": "same",
+      "description": "可信 seed 所在的紫黑发少年近景及同镜头连续帧"
+    },
+    {
+      "id": "same_human_form_later_shot",
+      "interval": [5398.3, 5399.3],
+      "label": "same",
+      "description": "另一镜头中俯卧并撑地的同一紫黑发少年"
+    },
+    {
+      "id": "same_human_form_distant_shot",
+      "interval": [5393.3, 5395.2],
+      "label": "same",
+      "description": "远景中仍保持紫黑发人形外观的 S0"
+    },
+    {
+      "id": "hard_negative_white_haired_child",
+      "interval": [5385.0, 5391.0],
+      "label": "different",
+      "description": "白发绿眼儿童，画面显著但不是 S0"
+    },
+    {
+      "id": "hard_negative_blue_haired_adult",
+      "interval": [5396.8, 5398.1],
+      "label": "different",
+      "description": "蓝发成年人，易被场景邻近关系误并为 S0"
+    }
+  ],
   "facts": [
     {
       "id": "oracle_hook_debris_impact",
