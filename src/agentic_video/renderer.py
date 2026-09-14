@@ -797,7 +797,7 @@ def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
     segments: list[Path] = []
     commands: list[list[str]] = []
     for index, segment in enumerate(plan.get("segments") or []):
-        kind = str(segment.get("unit_type") or "micro_clip")
+        kind = str(segment.get("render_mode") or segment.get("unit_type") or "micro_clip")
         duration = float(segment.get("duration_s") or 0.0)
         if duration <= 0:
             raise ValueError(f"evidence segment {index} has no positive duration")
@@ -809,7 +809,9 @@ def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
                 if source_video is None:
                     raise FileNotFoundError(f"keyframe missing for segment {index}")
                 frame = work / f"frame_{index:04d}.png"
-                timestamp = float((segment.get("source_interval") or [0.0])[0])
+                timestamp = float(segment.get("frame_time_s") or
+                                  (segment.get("core_interval") or
+                                   segment.get("source_interval") or [0.0])[0])
                 extract = ["-y", "-loglevel", "error", "-ss", f"{timestamp:g}",
                            "-i", str(source_video), "-frames:v", "1", str(frame)]
                 common.run_ffmpeg(ffmpeg, extract, timeout_s=120)
@@ -824,7 +826,8 @@ def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
             if source_video is None and not segment.get("source_video"):
                 raise ValueError(f"micro clip {index} has no source_video")
             source = Path(str(segment.get("source_video") or source_video))
-            start, end = map(float, segment.get("source_interval") or [0.0, 0.0])
+            start, end = map(float, segment.get("render_interval") or
+                             segment.get("source_interval") or [0.0, 0.0])
             if end - start < 0.15 - 1e-6:
                 raise ValueError(f"micro clip {index} is shorter than 0.15s")
             try:

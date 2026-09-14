@@ -1,0 +1,100 @@
+{
+  "schema_version": "evidence_oracle_v1",
+  "source": "luoxiaohei1",
+  "scope_interval": [5385.0, 5460.0],
+  "control_scope_valid": true,
+  "annotation_method": "Codex manual inspection of a 2fps overview followed by 12fps contact sheets; times are absolute source seconds",
+  "prompt_isolation": "This file is never passed to Coarse Watch, Dense Rewatch, or automatic Pattern Matcher",
+  "facts": [
+    {
+      "id": "oracle_hook_debris_impact",
+      "core_interval": [5395.17, 5395.58],
+      "container_interval": [5394.67, 5396.08],
+      "observation": {
+        "subject_call_id": null,
+        "subject_description": "高层建筑旁的碎片和冲击尘雾",
+        "action": "debris_impacts_and_dust_bursts",
+        "state_before": "建筑外侧碎片开始坠落",
+        "state_after": "撞击处被尘雾和碎石覆盖"
+      },
+      "subject_track_id": null,
+      "source_form": "visual_instant",
+      "attributes": ["debris", "impact", "dust_burst"],
+      "visual_strength": 0.95,
+      "confidence": 0.96,
+      "expected_slots": ["hook"]
+    },
+    {
+      "id": "oracle_struggle_subject_down",
+      "core_interval": [5398.33, 5399.25],
+      "container_interval": [5397.83, 5399.75],
+      "observation": {
+        "subject_call_id": "person_A",
+        "subject_description": "黑色长发、深色皮肤、绿色肩部衣物的兽形人物",
+        "action": "lies_face_down_and_braces_on_one_hand",
+        "state_before": "俯卧在破碎地面",
+        "state_after": "以手撑地准备起身"
+      },
+      "subject_track_id": "local_subject_01",
+      "source_form": "dynamic_action",
+      "attributes": ["knockdown", "under_pressure", "recovery_attempt"],
+      "visual_strength": 0.9,
+      "confidence": 0.95,
+      "expected_slots": ["struggle"]
+    },
+    {
+      "id": "oracle_reversal_claw_transformation",
+      "core_interval": [5400.75, 5402.0],
+      "container_interval": [5400.25, 5402.5],
+      "observation": {
+        "subject_call_id": "person_A",
+        "subject_description": "同一黑色长发兽形人物的撑地手掌",
+        "action": "hand_transforms_into_a_large_clawed_fist",
+        "state_before": "裸露手掌撑地",
+        "state_after": "手掌变为带黑毛和利爪的巨大拳爪"
+      },
+      "subject_track_id": "local_subject_01",
+      "source_form": "dynamic_action",
+      "attributes": ["transformation", "power_up", "claws"],
+      "visual_strength": 0.96,
+      "confidence": 0.97,
+      "expected_slots": ["reversal"]
+    },
+    {
+      "id": "oracle_reversal_subject_launches",
+      "core_interval": [5406.42, 5407.42],
+      "container_interval": [5405.92, 5407.92],
+      "observation": {
+        "subject_call_id": "person_A",
+        "subject_description": "同一黑色长发兽形人物",
+        "action": "rises_and_launches_forward",
+        "state_before": "低身蓄力",
+        "state_after": "离地向前高速突进"
+      },
+      "subject_track_id": "local_subject_01",
+      "source_form": "dynamic_action",
+      "attributes": ["recovery", "launch", "counterattack"],
+      "visual_strength": 0.93,
+      "confidence": 0.94,
+      "expected_slots": ["reversal"]
+    },
+    {
+      "id": "oracle_payoff_subject_knocked_back",
+      "core_interval": [5412.25, 5414.0],
+      "container_interval": [5411.75, 5414.5],
+      "observation": {
+        "subject_call_id": "person_A",
+        "subject_description": "同一黑色长发兽形人物",
+        "action": "is_struck_mid_attack_and_crashes_to_the_ground",
+        "state_before": "正向对手突进",
+        "state_after": "被击退并落到地面"
+      },
+      "subject_track_id": "local_subject_01",
+      "source_form": "dynamic_action",
+      "attributes": ["counterattack_result", "impact", "knockback", "landing"],
+      "visual_strength": 0.97,
+      "confidence": 0.96,
+      "expected_slots": ["payoff"]
+    }
+  ]
+}

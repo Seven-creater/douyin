@@ -1,0 +1,86 @@
+{
+  "spec_version": "evidence_diagnostic_v1",
+  "source": "luoxiaohei1",
+  "reference": "data/videos/7682719919410072847/video.mp4",
+  "bgm_path": "data/library/bgm/template_7682.m4a",
+  "controls": {
+    "w15": {
+      "start_s": 2965.0,
+      "end_s": 3005.0,
+      "hypothesis": "visual proof-montage evidence may be insufficient"
+    },
+    "action": {
+      "start_s": 5385.0,
+      "end_s": 5460.0,
+      "hypothesis": "action-rich scope supports fine-grained visual evidence"
+    }
+  },
+  "pattern": {
+    "pattern_version": "proof_montage_slots_v2",
+    "pattern_type": "proof_montage",
+    "subject_switch_allowed": false,
+    "slots": [
+      {
+        "id": "hook",
+        "function": "用可见异常、困境或强动作迅速建立兴趣",
+        "required": true,
+        "allowed_source_forms": ["visual_instant", "dynamic_action", "reaction", "establishing_visual"],
+        "render_modes": ["micro_clip", "keyframe_hold"],
+        "slot_fit_threshold": 0.7,
+        "allow_slot_fusion": false
+      },
+      {
+        "id": "struggle",
+        "function": "展示主体受压、受挫、挣扎或处于弱势",
+        "required": true,
+        "allowed_source_forms": ["visual_instant", "dynamic_action", "reaction"],
+        "render_modes": ["micro_clip", "keyframe_hold"],
+        "slot_fit_threshold": 0.7,
+        "same_subject_group": "main_arc",
+        "allow_slot_fusion": true
+      },
+      {
+        "id": "reversal",
+        "function": "展示同一主体反击、突破或由弱转强",
+        "required": true,
+        "allowed_source_forms": ["visual_instant", "dynamic_action", "reaction"],
+        "render_modes": ["micro_clip", "keyframe_hold"],
+        "slot_fit_threshold": 0.7,
+        "same_subject_group": "main_arc",
+        "allow_slot_fusion": true
+      },
+      {
+        "id": "payoff",
+        "function": "展示同一主体的攻击结果、胜利或能力结果",
+        "required": true,
+        "allowed_source_forms": ["visual_instant", "dynamic_action", "reaction"],
+        "render_modes": ["micro_clip", "keyframe_hold"],
+        "slot_fit_threshold": 0.7,
+        "same_subject_group": "main_arc",
+        "allow_slot_fusion": true
+      }
+    ]
+  },
+  "perception": {
+    "coarse_fps": 2.0,
+    "dense_fps": 12.0,
+    "max_watch_s": 6.0,
+    "watch_overlap_s": 0.5,
+    "dense_padding_s": 0.5,
+    "max_dense_regions": 8,
+    "source_scene_threshold": 0.3,
+    "min_shot_duration_s": 0.15,
+    "gpu_pairs": ["0,1", "2,3", "4,5", "6,7"]
+  },
+  "duration": {
+    "min_s": 4.0,
+    "max_s": 20.0,
+    "max_segment_s": 4.0,
+    "pre_roll_s": 0.3,
+    "post_roll_s": 0.2
+  },
+  "metrics": {
+    "top_k": 5,
+    "temporal_iou_threshold": 0.3
+  }
+}

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,36 +107,99 @@ class OmniRunner:
         return self._load_elapsed
 
     # ---------- 输入构造 ----------
-    def _build_inputs(self, video_path: Path, prompt: str):
+    @staticmethod
+    def _sampling_audit(video, metadata: dict, *, requested_fps: float,
+                        source_origin_s: float) -> dict:
+        """Convert qwen-omni-utils reader metadata into an auditable frame list."""
+        indices = metadata.get("frames_indices")
+        if indices is None:
+            indices = []
+        if hasattr(indices, "tolist"):
+            indices = indices.tolist()
+        indices = [int(value) for value in indices]
+        try:
+            frame_count = int(video.shape[0])
+            raw_fps = float(metadata.get("fps"))
+            total_frames = int(metadata.get("total_num_frames"))
+        except (AttributeError, TypeError, ValueError):
+            frame_count, raw_fps, total_frames = 0, 0.0, 0
+        relative = [round(value / raw_fps, 6) for value in indices] if raw_fps > 0 else []
+        absolute = [round(float(source_origin_s) + value, 6) for value in relative]
+        duration_s = total_frames / raw_fps if raw_fps > 0 else 0.0
+        effective_fps = frame_count / duration_s if duration_s > 0 else 0.0
+        verified = (
+            frame_count > 0 and frame_count == len(indices) == len(relative) and
+            raw_fps > 0 and total_frames >= frame_count and
+            all(0 <= value < total_frames for value in indices) and
+            all(math.isfinite(value) and 0 <= value <= duration_s + 1e-6
+                for value in relative)
+        )
+        return {
+            "requested_fps": float(requested_fps),
+            "effective_fps": round(effective_fps, 6),
+            "raw_fps": round(raw_fps, 6),
+            "total_input_frames": total_frames,
+            "actual_frame_count": frame_count,
+            "actual_frame_indices": indices,
+            "actual_frame_timestamps_relative_s": relative,
+            "actual_frame_timestamps_absolute_s": absolute,
+            "source_time_origin_s": float(source_origin_s),
+            "video_backend": metadata.get("video_backend"),
+            "sampling_verified": verified,
+        }
+
+    def _build_inputs(self, video_path: Path, prompt: str, *, fps: float | None = None,
+                      source_origin_s: float = 0.0):
+        requested_fps = float(fps if fps is not None else self.cfg.get("fps", 2.0))
         conversation = [{
             "role": "user",
             "content": [
-                {"type": "video", "video": str(video_path)},   # 文本放多模态之后
+                {"type": "video", "video": str(video_path),
+                 "fps": requested_fps},   # 文本放多模态之后
                 {"type": "text", "text": prompt},
             ],
         }]
-        fps = float(self.cfg.get("fps", 2.0))
         if self.cfg.get("use_qwen_omni_utils"):
-            # 官方 README 路径（逐字对齐；三处 use_audio_in_video=True 必须一致）
-            # V5 P1（外审六轮指控⑧）：此前 fps 读而未传——配置写 2 不代表
-            # 模型真按 2fps 收帧。尝试传参；旧版 qwen_omni_utils 不收 fps
-            # kwarg 时回退并显式记录实际采样由 processor 默认决定。
-            from qwen_omni_utils import process_mm_info
-
+            # Read video once with metadata.  ``fps`` belongs to the video
+            # element, not process_mm_info's function signature.  Passing the
+            # already sampled tensor with do_sample_frames=False prevents a
+            # second, invisible sampling pass in the Transformers processor.
             try:
-                audios, images, videos = process_mm_info(
-                    conversation, use_audio_in_video=True, fps=fps)
-                self._last_sampling = {"requested_fps": fps, "fps_passed": True}
-            except TypeError:
+                from qwen_omni_utils import process_audio_info, process_vision_info
+
+                audios = process_audio_info(conversation, use_audio_in_video=True)
+                images, video_records = process_vision_info(
+                    conversation, return_video_metadata=True)
+                videos = []
+                audits = []
+                for record in video_records or []:
+                    if not isinstance(record, tuple) or len(record) != 2:
+                        raise ValueError("qwen video metadata was not returned")
+                    video, metadata = record
+                    videos.append(video)
+                    audits.append(self._sampling_audit(
+                        video, metadata, requested_fps=requested_fps,
+                        source_origin_s=source_origin_s))
+                if len(videos) != 1 or len(audits) != 1:
+                    raise ValueError("OmniRunner expects exactly one audited video")
+                self._last_sampling = audits[0]
+                processor_fps = float(audits[0]["effective_fps"] or requested_fps)
+            except (ImportError, RuntimeError, TypeError, ValueError) as exc:
+                from qwen_omni_utils import process_mm_info
+
                 audios, images, videos = process_mm_info(
                     conversation, use_audio_in_video=True)
-                self._last_sampling = {"requested_fps": fps, "fps_passed": False,
-                                       "note": "qwen_omni_utils 不收 fps kwarg——"
-                                               "实际采样率=processor 默认"}
+                processor_fps = requested_fps
+                self._last_sampling = {
+                    "requested_fps": requested_fps,
+                    "sampling_verified": False,
+                    "sampling_error": f"{type(exc).__name__}: {exc}",
+                }
             text = self._processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = self._processor(
                 text=text, audio=audios, images=images, videos=videos,
                 return_tensors="pt", padding=True, use_audio_in_video=True,
+                do_sample_frames=False, fps=processor_fps,
             )
         else:
             inputs = self._processor.apply_chat_template(
@@ -145,10 +209,15 @@ class OmniRunner:
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt",
-                fps=fps,
+                fps=requested_fps,
                 padding=True,
                 use_audio_in_video=True,
             )
+            self._last_sampling = {
+                "requested_fps": requested_fps,
+                "sampling_verified": False,
+                "sampling_error": "native_processor_path_has_no_frame_metadata",
+            }
         # 官方示例原样：device + dtype 双 cast（processor 输出 float32，模型 bf16，缺 dtype 会炸 conv）
         return inputs.to(self._model.device).to(self._model.dtype)
 
@@ -156,7 +225,8 @@ class OmniRunner:
     def watch(self, video_path: Path, prompt: str, *,
               start_s: float | None = None, end_s: float | None = None,
               clip_dir: Path | None = None, max_new_tokens: int | None = None,
-              duration_s: float | None = None) -> OmniAnswer:
+              duration_s: float | None = None,
+              fps: float | None = None) -> OmniAnswer:
         self.load()
         clip_path = None
         t_pre0 = time.time()
@@ -165,27 +235,21 @@ class OmniRunner:
             actual = clip_path
         else:
             actual = video_path
-        inputs = self._build_inputs(actual, prompt)
+        requested_fps = float(fps if fps is not None else self.cfg.get("fps", 2.0))
+        inputs = self._build_inputs(
+            actual, prompt, fps=requested_fps,
+            source_origin_s=float(start_s or 0.0))
         input_build_s = time.time() - t_pre0
 
         frames_est = None
         if duration_s is not None:
-            frames_est = round(duration_s * float(self.cfg.get("fps", 2.0)))
-        # V5 P1 观测正确性：requested_fps/是否真的传下去/实际输入视频帧数
-        # （second_per_grid_ts 命名各异，取 inputs 里第一个含 grid/second 时间
-        # 轴的键长度）——"Omni 是不是抽得太稀"从此有据可查。
-        actual_frames = None
-        for key, value in (inputs or {}).items():
-            if "second_per_grid" in str(key):
-                try:
-                    actual_frames = int(value.shape[-1])
-                except (AttributeError, ValueError):
-                    pass
-                break
+            frames_est = round(duration_s * requested_fps)
         self._last_sampling = {**(getattr(self, "_last_sampling", {}) or {}),
                                "frames_estimate": frames_est,
-                               "actual_sampled_frames": actual_frames,
-                               "estimated": True}
+                               "actual_sampled_frames": (
+                                   getattr(self, "_last_sampling", {}) or {}
+                               ).get("actual_frame_count"),
+                               "estimated": False}
 
         return self._generate(inputs, max_new_tokens=max_new_tokens,
                               use_audio_in_video=True, frames_estimate=frames_est,

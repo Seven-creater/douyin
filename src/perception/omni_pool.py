@@ -68,15 +68,20 @@ def _worker_main(gpu_pair: str, omni_cfg: dict, ffmpeg_bin: str,
             return
         task_id = str(item["task_id"])
         try:
+            mode = str(item.get("mode") or "watch")
             kwargs = dict(item.get("kwargs") or {})
-            if kwargs.get("clip_dir") is not None:
-                kwargs["clip_dir"] = Path(kwargs["clip_dir"])
-            answer = runner.watch(Path(item["video_path"]), item["prompt"], **kwargs)
+            if mode == "ask":
+                answer = runner.ask(item["prompt"], **kwargs)
+            else:
+                if kwargs.get("clip_dir") is not None:
+                    kwargs["clip_dir"] = Path(kwargs["clip_dir"])
+                answer = runner.watch(Path(item["video_path"]), item["prompt"], **kwargs)
             payload = asdict(answer)
             if payload.get("clip_path") is not None:
                 payload["clip_path"] = str(payload["clip_path"])
             results.put({"task_id": task_id, "ok": True, "answer": payload,
-                         "sampling": getattr(runner, "_last_sampling", None),
+                         "sampling": (getattr(runner, "_last_sampling", None)
+                                      if mode == "watch" else None),
                          "gpu_pair": gpu_pair})
         except BaseException as exc:  # worker must report OOM/parse errors to parent
             results.put({"task_id": task_id, "ok": False, "gpu_pair": gpu_pair,
@@ -123,9 +128,14 @@ class OmniProcessPool:
             if kwargs.get("clip_dir") is not None:
                 kwargs["clip_dir"] = str(kwargs["clip_dir"])
             row["video_path"] = str(row["video_path"])
+            row["mode"] = "watch"
             row["kwargs"] = kwargs
             self._tasks.put(row)
             queued.append((task_id, row))
+        return self._collect(queued)
+
+    def _collect(self, queued: list[tuple[str, dict[str, Any]]]) \
+            -> list[PooledOmniAnswer]:
         if not queued:
             return []
         pending = {task_id for task_id, _ in queued}
@@ -165,6 +175,26 @@ class OmniProcessPool:
     def watch(self, video_path: Path, prompt: str, **kwargs) -> PooledOmniAnswer:
         return self.watch_many([{"video_path": video_path, "prompt": prompt,
                                  "kwargs": kwargs}])[0]
+
+    def ask_many(self, requests: Iterable[dict[str, Any]]) -> list[PooledOmniAnswer]:
+        """Run text-only requests on the same persistent model workers."""
+        self.start()
+        queued = []
+        for request in requests:
+            task_id = f"task_{self._sequence:06d}"
+            self._sequence += 1
+            if request.get("prompt") is None:
+                raise ValueError("ask request requires prompt")
+            row = {
+                "task_id": task_id, "mode": "ask", "prompt": request["prompt"],
+                "kwargs": dict(request.get("kwargs") or {}), "video_path": "",
+            }
+            self._tasks.put(row)
+            queued.append((task_id, row))
+        return self._collect(queued)
+
+    def ask(self, prompt: str, **kwargs) -> PooledOmniAnswer:
+        return self.ask_many([{"prompt": prompt, "kwargs": kwargs}])[0]
 
     def close(self) -> None:
         if not self._started:

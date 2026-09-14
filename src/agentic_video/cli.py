@@ -175,6 +175,20 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_v6_accept.add_argument("--output", required=True)
     evidence_v6_accept.add_argument("--human-acceptance", required=True)
 
+    evidence_v61 = sub.add_parser(
+        "evidence-v61-diagnostic",
+        help="run V6.1 coarse/dense/oracle Evidence diagnostics")
+    evidence_v61.add_argument(
+        "--spec", default="config/experiments/lxh1_v61_diagnostic.json")
+    evidence_v61.add_argument(
+        "--oracle", default="config/oracles/lxh1_5385_5460.json")
+    evidence_v61.add_argument("--video", default=None)
+    evidence_v61.add_argument("--output", required=True)
+    evidence_v61.add_argument(
+        "--gpu-pairs", default=None,
+        help="parallel Omni workers, e.g. '0,1;2,3;4,5;6,7'")
+    evidence_v61.add_argument("--worker-timeout", type=float, default=3600.0)
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -503,6 +517,36 @@ def _evidence_v6_accept(args, _cfg) -> dict:
     return {"output": str(final), "delivery": "passed"}
 
 
+def _evidence_v61_diagnostic(args, cfg) -> dict:
+    from src.agentic_video.evidence_diagnostic import (
+        read_diagnostic_spec, run_evidence_diagnostic,
+    )
+    from src.perception.omni_pool import OmniProcessPool
+
+    spec, _ = read_diagnostic_spec(Path(args.spec))
+    configured = (spec.get("perception") or {}).get("gpu_pairs") or []
+    pairs = args.gpu_pairs or ";".join(str(pair) for pair in configured)
+    if not pairs:
+        raise ValueError(
+            "evidence-v61-diagnostic requires --gpu-pairs or perception.gpu_pairs")
+    with OmniProcessPool(
+            pairs, cfg.perception.get("omni") or {},
+            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+            response_timeout_s=args.worker_timeout) as runner:
+        result = run_evidence_diagnostic(
+            cfg, spec, Path(args.output), runner=runner,
+            oracle_path=Path(args.oracle),
+            source_video=Path(args.video) if args.video else None)
+    acceptance = result["acceptance"]
+    return {
+        "output": str(result["output_dir"]),
+        "diagnostic_completed": acceptance.get("diagnostic_completed", False),
+        "failure_class": acceptance.get("failure_class"),
+        "failure_stage": acceptance.get("failure_stage"),
+        "delivery": acceptance.get("delivery", "blocked"),
+    }
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -562,6 +606,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence-render": _evidence_render,
                 "evidence-v6": _evidence_v6,
                 "evidence-v6-accept": _evidence_v6_accept,
+                "evidence-v61-diagnostic": _evidence_v61_diagnostic,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
