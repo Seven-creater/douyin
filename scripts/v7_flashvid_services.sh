@@ -11,6 +11,8 @@ MEDIA_ROOT="${V7_MEDIA_ROOT:-/data02/usr/wangqihao/Demo}"
 MODEL_PATH="${V7_MODEL_PATH:-${FLASHVID_DIR}/models/Qwen3.5-4B}"
 V7_VLLM_BIN="${V7_VLLM_BIN:-${FLASHVID_DIR}/.venv/bin/vllm}"
 V7_FLASHVID_BIN="${V7_FLASHVID_BIN:-${FLASHVID_DIR}/.venv/bin/flashvid-serve}"
+V7_VLLM_PYTHON="${V7_VLLM_PYTHON:-}"
+V7_FLASHVID_SITE_PACKAGES="${V7_FLASHVID_SITE_PACKAGES:-}"
 mkdir -p "$V7_STATE_DIR"
 
 service_port() {
@@ -19,6 +21,10 @@ service_port() {
 
 service_ratio() {
   case "$1" in r010) echo 0.10 ;; r025) echo 0.25 ;; r100) echo 1.00 ;; *) return 2 ;; esac
+}
+
+service_pruning_rate() {
+  case "$1" in r010) echo 0.90 ;; r025) echo 0.75 ;; r100) echo 0.00 ;; *) return 2 ;; esac
 }
 
 service_gpu() {
@@ -37,16 +43,22 @@ owned() {
 }
 
 start_one() {
-  local id="$1" port ratio gpu pidfile logfile
+  local id="$1" port ratio pruning_rate gpu pidfile logfile
   port="$(service_port "$id")"; ratio="$(service_ratio "$id")"; gpu="$(service_gpu "$id")"
+  pruning_rate="$(service_pruning_rate "$id")"
   pidfile="$V7_STATE_DIR/$id.pid"; logfile="$V7_STATE_DIR/$id.log"
   if [[ -f "$pidfile" ]] && owned "$id" "$(cat "$pidfile")"; then
     echo "$id already running pid=$(cat "$pidfile")"
     return
   fi
   if [[ "$id" == r100 ]]; then
+    if [[ -n "$V7_VLLM_PYTHON" ]]; then
+      vllm_command=("$V7_VLLM_PYTHON" -m vllm.entrypoints.cli.main)
+    else
+      vllm_command=("$V7_VLLM_BIN")
+    fi
     nohup setsid env -u VLLM_PLUGINS DOUYIN_V7_SERVICE_ID="$id" \
-      CUDA_VISIBLE_DEVICES="$gpu" "$V7_VLLM_BIN" serve "$MODEL_PATH" \
+      CUDA_VISIBLE_DEVICES="$gpu" "${vllm_command[@]}" serve "$MODEL_PATH" \
       --served-model-name Qwen3.5-4B --default-chat-template-kwargs '{"enable_thinking":false}' \
       --host 127.0.0.1 --port "$port" --tensor-parallel-size 1 --dtype bfloat16 \
       --max-model-len 32768 --max-num-seqs 8 --max-num-batched-tokens 32768 \
@@ -54,14 +66,28 @@ start_one() {
       --limit-mm-per-prompt '{"image":4,"video":1}' \
       --allowed-local-media-path "$MEDIA_ROOT" >"$logfile" 2>&1 < /dev/null &
   else
-    nohup setsid env DOUYIN_V7_SERVICE_ID="$id" CUDA_VISIBLE_DEVICES="$gpu" \
-      VLLM_PLUGINS=flashvid_qwen3_5 "$V7_FLASHVID_BIN" "$MODEL_PATH" \
-      --vision-retention-ratio "$ratio" --served-model-name Qwen3.5-4B \
-      --default-chat-template-kwargs '{"enable_thinking":false}' --host 127.0.0.1 \
-      --port "$port" --tensor-parallel-size 1 --dtype bfloat16 --max-model-len 32768 \
-      --max-num-seqs 8 --max-num-batched-tokens 32768 --gpu-memory-utilization 0.90 \
-      --enable-prompt-tokens-details --limit-mm-per-prompt '{"image":4,"video":1}' \
-      --allowed-local-media-path "$MEDIA_ROOT" >"$logfile" 2>&1 < /dev/null &
+    if [[ -n "$V7_VLLM_PYTHON" && -n "$V7_FLASHVID_SITE_PACKAGES" ]]; then
+      nohup setsid env DOUYIN_V7_SERVICE_ID="$id" CUDA_VISIBLE_DEVICES="$gpu" \
+        VLLM_PLUGINS=flashvid_qwen3_5 FLASHVID_VISION_RETENTION_RATIO="$ratio" \
+        PYTHONPATH="$V7_FLASHVID_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}" \
+        "$V7_VLLM_PYTHON" -m vllm.entrypoints.cli.main serve "$MODEL_PATH" \
+        --hf-overrides '{"architectures":["FlashVIDQwen3_5ForConditionalGeneration"]}' \
+        --video-pruning-rate "$pruning_rate" --served-model-name Qwen3.5-4B \
+        --default-chat-template-kwargs '{"enable_thinking":false}' --host 127.0.0.1 \
+        --port "$port" --tensor-parallel-size 1 --dtype bfloat16 --max-model-len 32768 \
+        --max-num-seqs 8 --max-num-batched-tokens 32768 --gpu-memory-utilization 0.90 \
+        --enable-prompt-tokens-details --limit-mm-per-prompt '{"image":4,"video":1}' \
+        --allowed-local-media-path "$MEDIA_ROOT" >"$logfile" 2>&1 < /dev/null &
+    else
+      nohup setsid env DOUYIN_V7_SERVICE_ID="$id" CUDA_VISIBLE_DEVICES="$gpu" \
+        VLLM_PLUGINS=flashvid_qwen3_5 "$V7_FLASHVID_BIN" "$MODEL_PATH" \
+        --vision-retention-ratio "$ratio" --served-model-name Qwen3.5-4B \
+        --default-chat-template-kwargs '{"enable_thinking":false}' --host 127.0.0.1 \
+        --port "$port" --tensor-parallel-size 1 --dtype bfloat16 --max-model-len 32768 \
+        --max-num-seqs 8 --max-num-batched-tokens 32768 --gpu-memory-utilization 0.90 \
+        --enable-prompt-tokens-details --limit-mm-per-prompt '{"image":4,"video":1}' \
+        --allowed-local-media-path "$MEDIA_ROOT" >"$logfile" 2>&1 < /dev/null &
+    fi
   fi
   echo "$!" > "$pidfile"
   echo "started $id pid=$! gpu=$gpu port=$port ratio=$ratio"
