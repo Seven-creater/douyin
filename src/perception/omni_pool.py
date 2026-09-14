@@ -51,7 +51,7 @@ class OmniPoolError(RuntimeError):
 
 
 def _worker_main(gpu_pair: str, omni_cfg: dict, ffmpeg_bin: str,
-                 tasks, results) -> None:
+                 tasks, results, load_lock) -> None:
     from src.perception.omni_runner import OmniRunner, set_visible_gpus
 
     set_visible_gpus(gpu_pair)
@@ -62,12 +62,21 @@ def _worker_main(gpu_pair: str, omni_cfg: dict, ffmpeg_bin: str,
     except ImportError:
         pass
     runner = OmniRunner(omni_cfg, ffmpeg_bin=ffmpeg_bin)
+    loaded = False
     while True:
         item = tasks.get()
         if item is None:
             return
         task_id = str(item["task_id"])
         try:
+            # Four simultaneous 30B safetensor loads can saturate the shared
+            # model filesystem and have been observed to terminate every
+            # worker mid-load.  Serialize only the cold load; inference stays
+            # fully parallel after all four replicas are resident.
+            if not loaded:
+                with load_lock:
+                    runner.load()
+                loaded = True
             mode = str(item.get("mode") or "watch")
             kwargs = dict(item.get("kwargs") or {})
             if mode == "ask":
@@ -100,9 +109,11 @@ class OmniProcessPool:
         self._ctx = mp.get_context("spawn")
         self._tasks = self._ctx.Queue()
         self._results = self._ctx.Queue()
+        self._load_lock = self._ctx.Lock()
         self._processes = [self._ctx.Process(
             target=_worker_main,
-            args=(pair, self.omni_cfg, self.ffmpeg_bin, self._tasks, self._results),
+            args=(pair, self.omni_cfg, self.ffmpeg_bin, self._tasks,
+                  self._results, self._load_lock),
             name=f"omni-{pair.replace(',', '-')}") for pair in self.gpu_pairs]
         self._started = False
         self._sequence = 0
