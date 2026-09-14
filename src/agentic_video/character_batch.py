@@ -292,7 +292,8 @@ interactions, entrances/exits, or other concrete activity that genuinely merits 
 original-video rewatch; never report routine static presence merely to fill the list.
 Return strict JSON with one top-level object (never a bare array):
 {"regions":[{"interval":[0.0,2.0],"activity":"visible coarse activity",
-"worth_rewatch":true,"occurrences":[{"local_id":"A","local_description":"visible
+"worth_rewatch":true,"temporal_refinement_needed":false,
+"occurrences":[{"local_id":"A","local_description":"visible
 appearance only","visual_state":"visible state/activity","roi":null}],
 "event_candidates":[{"actor_local_id":"A","action":"visible action",
 "patient_local_id":null,"visible_result":"visible change or empty"}]}]}
@@ -306,6 +307,61 @@ entry in that same region's occurrences list; never group multiple visible subje
 one occurrence.
 Every returned region must have worth_rewatch=true. If nothing merits rewatch return
 {"regions":[]}. Not observed never means absent."""
+
+COVERAGE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "v8_neutral_coverage",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "regions": {
+                    "type": "array", "maxItems": 3,
+                    "items": {
+                        "type": "object", "additionalProperties": False,
+                        "properties": {
+                            "interval": {"type": "array", "minItems": 2,
+                                         "maxItems": 2,
+                                         "items": {"type": "number"}},
+                            "activity": {"type": "string"},
+                            "worth_rewatch": {"type": "boolean"},
+                            "temporal_refinement_needed": {"type": "boolean"},
+                            "occurrences": {"type": "array", "maxItems": 6,
+                                "items": {"type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "local_id": {"type": "string"},
+                                        "local_description": {"type": "string"},
+                                        "visual_state": {"type": "string"},
+                                        "roi": {"type": ["array", "null"],
+                                                "items": {"type": "number"},
+                                                "minItems": 4, "maxItems": 4},
+                                    },
+                                    "required": ["local_id", "local_description",
+                                                 "visual_state", "roi"]}},
+                            "event_candidates": {"type": "array", "maxItems": 4,
+                                "items": {"type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "actor_local_id": {"type": "string"},
+                                        "action": {"type": "string"},
+                                        "patient_local_id": {"type": ["string", "null"]},
+                                        "visible_result": {"type": "string"},
+                                    },
+                                    "required": ["actor_local_id", "action",
+                                                 "patient_local_id", "visible_result"]}},
+                        },
+                        "required": ["interval", "activity", "worth_rewatch",
+                                     "temporal_refinement_needed", "occurrences",
+                                     "event_candidates"],
+                    },
+                },
+            },
+            "required": ["regions"], "additionalProperties": False,
+        },
+    },
+}
 
 
 _FORBIDDEN_NEUTRAL_KEYS = {
@@ -580,7 +636,8 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             try:
                 answer = client.watch(
                     request_clip, NEUTRAL_COVERAGE_PROMPT + retry_suffix,
-                    duration_s=end - start, image_paths=None, max_tokens=2048)
+                    duration_s=end - start, image_paths=None, max_tokens=2048,
+                    response_format=COVERAGE_RESPONSE_FORMAT)
             finally:
                 if request_clip != clip:
                     request_clip.unlink(missing_ok=True)

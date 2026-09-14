@@ -119,7 +119,11 @@ def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path:
     client = FlashVIDClient(FlashVIDEndpoint(
         "B", "http://localhost/v1", "model", 4, .1, "flashvid"))
     client.transport = Transport()
-    answer = client.watch(video, "prompt", duration_s=6, image_paths=paths)
+    response_format = {"type": "json_schema", "json_schema": {
+        "name": "test", "schema": {"type": "object"}}}
+    answer = client.watch(
+        video, "prompt", duration_s=6, image_paths=paths,
+        response_format=response_format)
     content = captured["messages"][0]["content"]
     assert [row["type"] for row in content] == [
         "text", "video_url", "text", "image_url", "image_url", "image_url",
@@ -128,8 +132,10 @@ def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path:
     assert "IDENTITY ALBUM" in content[2]["text"]
     assert captured["mm_processor_kwargs"] == {"do_sample_frames": False}
     assert captured["media_io_kwargs"]["video"] == {"num_frames": 24, "fps": -1}
+    assert captured["response_format"] == response_format
     assert answer.request_audit["image_count"] == 4
     assert answer.request_audit["candidate_time_owner"] == "source_video_only"
+    assert answer.request_audit["response_format_sha256"]
 
 
 def test_openai_transport_preserves_file_uri_for_vllm() -> None:

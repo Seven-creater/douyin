@@ -115,7 +115,8 @@ class FlashVIDClient:
 
     def watch(self, video_path: Path, prompt: str, *, duration_s: float,
               image_paths: list[Path] | None = None,
-              max_tokens: int = 768) -> FlashVIDAnswer:
+              max_tokens: int = 768,
+              response_format: dict[str, Any] | None = None) -> FlashVIDAnswer:
         images = [Path(path).resolve() for path in (image_paths or [])]
         if len(images) > 4:
             raise ValueError("V7 services accept at most four images")
@@ -149,6 +150,8 @@ class FlashVIDClient:
             "mm_processor_kwargs": {"do_sample_frames": False},
             "media_io_kwargs": {"video": {"num_frames": frames, "fps": -1}},
         }
+        if response_format is not None:
+            payload["response_format"] = copy.deepcopy(response_format)
         raw, latency_s, request_sha = self.transport.chat(payload)
         choices = raw.get("choices") or []
         if not choices:
@@ -178,6 +181,10 @@ class FlashVIDClient:
             "response_sha256": _sha256_bytes(response_bytes),
             "usage": raw.get("usage") or {},
             "latency_s": round(latency_s, 6),
+            "response_format_sha256": (
+                _sha256_bytes(json.dumps(
+                    response_format, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")) if response_format is not None else None),
         }
         return FlashVIDAnswer(
             text=str(text or ""), usage=dict(raw.get("usage") or {}),
