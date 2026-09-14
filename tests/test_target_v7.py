@@ -16,8 +16,8 @@ from src.agentic_video.target_v7 import (
     diagnose_browse, evaluate_target_album, extract_native_frames, finalize_target_microcut,
     oracle_evidence_bank,
     prepare_reference_task, run_browse_escalation, run_browse_matrix,
-    select_consistent_album_examples, transport_windows, validate_album_consistency,
-    verify_target_evidence,
+    select_consistent_album_examples, transport_windows, unique_candidates,
+    validate_album_consistency, verify_target_evidence,
 )
 from src.config import load_config
 from src.perception.flashvid_client import (
@@ -378,6 +378,18 @@ def test_escalation_leaves_exhausted_arm_and_fills_all_goals() -> None:
     assert [row["id"] for row in evidence] == ["a", "b", "c"]
     assert [(row["previous_arm"], row["next_arm"]) for row in logs] == [
         ("A", "B"), ("B", "C")]
+
+
+def test_higher_budget_same_interval_can_add_new_goal_or_relation() -> None:
+    seen = []
+    low = {"observation_interval": [1.0, 2.0],
+           "goal_hypotheses": ["agency"], "relation": "target_direct"}
+    new_goal = {"observation_interval": [1.0, 2.0],
+                "goal_hypotheses": ["agency", "outcome"],
+                "relation": "possible_outcome"}
+    assert unique_candidates([low], seen) == [low]
+    assert unique_candidates([dict(low)], seen) == []
+    assert unique_candidates([new_goal], seen) == [new_goal]
 
 
 def test_escalation_only_blocks_after_vanilla_exhausted() -> None:

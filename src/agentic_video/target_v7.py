@@ -880,14 +880,28 @@ def diagnose_browse(metrics: Mapping[str, dict[str, Any]]) -> list[str]:
     return findings
 
 
-def unique_candidates(rows: Iterable[dict[str, Any]], seen: list[list[float]]) \
+def unique_candidates(rows: Iterable[dict[str, Any]], seen: list[dict[str, Any]]) \
         -> list[dict[str, Any]]:
+    """Deduplicate equivalent claims, not merely equivalent timestamps.
+
+    A higher-budget arm can observe a new goal or outcome relation at a time
+    already proposed by a cheaper arm. Treating only the interval as the key
+    permanently hid those escalation discoveries.
+    """
     result = []
     for row in rows:
         interval = row["observation_interval"]
-        if any(_interval_hit(interval, prior, 0.5) for prior in seen):
+        goals = set(row.get("goal_hypotheses") or [])
+        relation = str(row.get("relation") or "uncertain")
+        if any(
+            _interval_hit(interval, prior["interval"], 0.5)
+            and goals.issubset(set(prior["goals"]))
+            and relation == prior["relation"]
+            for prior in seen
+        ):
             continue
-        seen.append(list(interval))
+        seen.append({"interval": list(interval), "goals": sorted(goals),
+                     "relation": relation})
         result.append(row)
     return result
 
