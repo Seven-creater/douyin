@@ -328,6 +328,22 @@ def export_roi(ffmpeg_bin: str, full_frame: Path, roi: Iterable[float],
     return destination
 
 
+def _optional_roi(ffmpeg_bin: str, full_frame: Path, roi: Any,
+                  destination: Path) -> Path | None:
+    """Use a model ROI only when valid; the full frame remains identity truth."""
+    if roi is None:
+        return None
+    try:
+        return export_roi(ffmpeg_bin, full_frame, roi, destination)
+    except (TypeError, ValueError, common.FFmpegError) as exc:
+        _write_json(destination.parent / "roi_audit.json", {
+            "used": False, "raw_roi": roi,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "fallback": "full_frame",
+        })
+        return None
+
+
 def _identity_result(text: str) -> str:
     result = str(_parse_json(text).get("result") or "").strip().lower()
     if result not in {"same", "different", "uncertain"}:
@@ -1024,9 +1040,10 @@ def _identity_candidate(runner, cfg: AppConfig, source_video: Path,
     full = export_frame(ffmpeg, source_video, (start + end) / 2,
                         output_dir / "candidate_full.jpg")
     images = [full]
-    if candidate.get("roi"):
-        images.append(export_roi(ffmpeg, full, candidate["roi"],
-                                 output_dir / "candidate_roi.jpg"))
+    crop = _optional_roi(ffmpeg, full, candidate.get("roi"),
+                         output_dir / "candidate_roi.jpg")
+    if crop is not None:
+        images.append(crop)
     images.append(Path(album["positive"][0]["full_frame"]))
     if album.get("hard_negative"):
         images.append(Path(album["hard_negative"][0]["full_frame"]))
@@ -1175,10 +1192,11 @@ def _verify_target_evidence_batched(cfg: AppConfig, output_dir: Path, *, runner,
                 full = export_frame(ffmpeg, source_video, (start + end) / 2,
                                     candidate_dir / "identity" / "candidate_full.jpg")
                 images = [full]
-                if candidate.get("roi"):
-                    images.append(export_roi(
-                        ffmpeg, full, candidate["roi"],
-                        candidate_dir / "identity" / "candidate_roi.jpg"))
+                crop = _optional_roi(
+                    ffmpeg, full, candidate.get("roi"),
+                    candidate_dir / "identity" / "candidate_roi.jpg")
+                if crop is not None:
+                    images.append(crop)
                 images.append(Path(target_album["positive"][0]["full_frame"]))
                 images.append(Path(target_album["hard_negative"][0]["full_frame"]))
                 identity_requests.append({"image_paths": images, "prompt": identity_prompt,
