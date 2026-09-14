@@ -4,6 +4,7 @@
   "source_video": "/data02/usr/wangqihao/Demo/research/data/raw/luoxiaohei/罗小黑1 2019.4K.H265.60fps.10bit.Dolby.5.1.chs.mkv",
   "transcript_path": "data/library/sources/luoxiaohei1/narrative_transcript.json",
   "reference_video": "data/videos/7682719919410072847/video.mp4",
+  "reference_task_reuse": "data/agentic_runs/lxh_v7_target_20260914_readable_highlights_v1/reference_task.json",
   "bgm_path": "data/library/bgm/template_7682.m4a",
   "characters": [
     {
@@ -48,16 +49,38 @@
   ],
   "seed_proposals": {
     "char:xiaohei": {
-      "form_id": "char:xiaohei/form_white_small",
-      "source_times_s": [5412.65, 5412.75, 5412.85],
+      "forms": [
+        {
+          "form_id": "char:xiaohei/form_white_small",
+          "source_times_s": [5412.65, 5412.75, 5412.85]
+        },
+        {
+          "form_id": "char:xiaohei/form_black_cat",
+          "source_times_s": [210.0, 850.0, 925.0]
+        }
+      ],
       "invalid_source_times_s": [5391.5]
     },
     "char:wuxian": {
-      "source_times_s": [],
+      "forms": [
+        {
+          "form_id": "char:wuxian/form_human",
+          "source_times_s": [1460.0, 1490.0, 1900.0, 2055.0]
+        }
+      ],
       "invalid_source_times_s": []
     },
     "char:fengxi": {
-      "source_times_s": [],
+      "forms": [
+        {
+          "form_id": "char:fengxi/form_human",
+          "source_times_s": [1430.0, 3060.0, 3700.0, 4200.0]
+        },
+        {
+          "form_id": "char:fengxi/form_transformed",
+          "source_times_s": [5388.0, 5395.0, 5405.0]
+        }
+      ],
       "invalid_source_times_s": []
     }
   },

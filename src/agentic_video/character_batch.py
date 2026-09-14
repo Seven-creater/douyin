@@ -580,20 +580,28 @@ def build_seed_review_sheet(cfg: AppConfig, spec: Mapping[str, Any], output_dir:
     for character in spec.get("characters") or []:
         character_id = str(character["character_id"])
         row = configured.get(character_id) or {}
-        for index, timestamp in enumerate(row.get("source_times_s") or []):
-            frame = export_frame(
-                ffmpeg, source_video, float(timestamp),
-                output_dir / character_id.replace(":", "_") / f"candidate_{index:02d}.jpg")
-            proposals.append({
-                "candidate_id": f"{character_id}:seed_candidate:{index:02d}",
-                "character_id": character_id,
-                "source_time_s": float(timestamp),
-                "full_frame": str(frame),
-                "sha256": sha256_file(frame),
-                "status": "awaiting_human_review",
-                "suggested_form_id": row.get("form_id"),
-            })
-        for timestamp in row.get("invalid_source_times_s") or []:
+        forms = row.get("forms") or [row]
+        for form_index, form in enumerate(forms):
+            form_id = form.get("form_id") or row.get("form_id")
+            for index, timestamp in enumerate(form.get("source_times_s") or []):
+                frame = export_frame(
+                    ffmpeg, source_video, float(timestamp),
+                    output_dir / character_id.replace(":", "_") /
+                    f"form_{form_index:02d}_candidate_{index:02d}.jpg")
+                proposals.append({
+                    "candidate_id": (
+                        f"{character_id}:form_{form_index:02d}:seed_candidate:{index:02d}"),
+                    "character_id": character_id,
+                    "source_time_s": float(timestamp),
+                    "full_frame": str(frame),
+                    "sha256": sha256_file(frame),
+                    "status": "awaiting_human_review",
+                    "suggested_form_id": form_id,
+                })
+        invalid_times = list(row.get("invalid_source_times_s") or [])
+        invalid_times.extend(value for form in forms
+                             for value in form.get("invalid_source_times_s") or [])
+        for timestamp in dict.fromkeys(invalid_times):
             proposals.append({
                 "candidate_id": f"{character_id}:invalid_regression:{float(timestamp):.3f}",
                 "character_id": character_id,
@@ -741,11 +749,12 @@ def build_character_profiles(cfg: AppConfig, spec: Mapping[str, Any],
     """Validate human-confirmed forms through an all-directed-pairs contract."""
     output_dir = Path(output_dir)
     ffmpeg = str(cfg.perception.get("ffmpeg_bin", "ffmpeg"))
-    invalid = {
-        (str(character_id), round(float(value), 3))
-        for character_id, row in (spec.get("seed_proposals") or {}).items()
-        for value in row.get("invalid_source_times_s") or []
-    }
+    invalid: set[tuple[str, float]] = set()
+    for character_id, row in (spec.get("seed_proposals") or {}).items():
+        values = list(row.get("invalid_source_times_s") or [])
+        values.extend(value for form in row.get("forms") or []
+                      for value in form.get("invalid_source_times_s") or [])
+        invalid.update((str(character_id), round(float(value), 3)) for value in values)
     profiles: list[dict[str, Any]] = []
     manifest_chars = seed_manifest.get("characters") or []
     for character in manifest_chars:
