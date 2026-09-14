@@ -31,6 +31,7 @@ ALLOWED_BROWSE_RELATIONS = {
     "not_observed",
 }
 REQUIRED_GOALS = ("adversity", "agency", "outcome")
+READABLE_POLICY_VERSION = "readable_highlights_v1"
 GOAL_DEFINITIONS = {
     "adversity": "visible limitation, pressure, injury, danger, or setback around S0",
     "agency": "S0 visibly initiates an action, recovery, decision, or counter-move",
@@ -1323,7 +1324,10 @@ def _verify_target_evidence_batched(cfg: AppConfig, output_dir: Path, *, runner,
                                 "native_frames_manifest.json", boundary)
                     core = boundary["selected"]["core_interval"]
                     start, end = candidate["observation_interval"]
-                    renderable = [max(start, core[0] - .15), min(end, core[1] + .15)]
+                    # Native frames locate the proof; they do not define how long a
+                    # viewer should see the action.  The complete action-check clip is
+                    # the verified context available to the downstream editor.
+                    renderable = [start, end]
                     relation = relation_by_id.get(candidate["id"])
                     target_relation = "related_outcome" if relation else "self"
                     evidence = EvidenceUnitV3(
@@ -1349,6 +1353,8 @@ def _verify_target_evidence_batched(cfg: AppConfig, output_dir: Path, *, runner,
                     continue
                 evidence["eligible_goals"] = list(candidate.get("goal_hypotheses") or [])
                 evidence["browse_candidate_id"] = candidate["id"]
+                evidence["renderable_interval_basis"] = (
+                    "action_verified_observation_interval")
                 _write_json(candidate_dir / "evidence.json", evidence)
                 verified.append(evidence)
                 missing.difference_update(evidence["eligible_goals"])
@@ -1406,7 +1412,7 @@ def verify_target_evidence(cfg: AppConfig, experiment_spec: dict[str, Any],
             runner, cfg, source_video, candidate["observation_interval"],
             candidate_dir / "boundary")
         core = boundary["selected"]["core_interval"]
-        renderable = [max(start, core[0] - 0.15), min(end, core[1] + 0.15)]
+        renderable = [start, end]
         source_form = str(action.get("source_form") or "dynamic_action")
         evidence = EvidenceUnitV3(
             id=f"ev_{candidate['id']}", observation_interval=(start, end),
@@ -1424,6 +1430,7 @@ def verify_target_evidence(cfg: AppConfig, experiment_spec: dict[str, Any],
             native_frame_provenance=boundary, source_video=str(source_video)).to_dict()
         evidence["eligible_goals"] = list(candidate.get("goal_hypotheses") or [])
         evidence["browse_candidate_id"] = candidate["id"]
+        evidence["renderable_interval_basis"] = "action_verified_observation_interval"
         _write_json(candidate_dir / "evidence.json", evidence)
         return evidence
 
@@ -1504,14 +1511,35 @@ def build_reference_driven_edit_plan(reference_task: dict[str, Any],
                 continue
             used.add(candidate["id"])
             interval = list(map(float, candidate["renderable_interval"]))
+            core = list(map(float, candidate["core_interval"]))
+            observation = list(map(float, candidate.get("observation_interval") or interval))
+            if not (observation[0] <= interval[0] <= core[0] < core[1] <=
+                    interval[1] <= observation[1]):
+                return {
+                    "schema_version": "reference_driven_edit_plan_v2",
+                    "editorial_policy_version": READABLE_POLICY_VERSION,
+                    "passed": False, "failure_class": "verification",
+                    "failure_stage": "planning",
+                    "reason_code": "final_interval_outside_verified_observation",
+                    "segments": segments, "duration_s": round(sum(
+                        float(item["duration_s"]) for item in segments), 6),
+                }
             duration = interval[1] - interval[0]
             segment = {
                 "id": f"segment_{len(segments):02d}", "section_id": section["id"],
                 "evidence_id": candidate["id"], "assigned_goal": goal,
                 "render_mode": "micro_clip", "render_once": True,
-                "render_interval": interval, "core_interval": candidate["core_interval"],
+                "render_interval": interval, "final_source_interval": interval,
+                "observation_interval": observation, "core_interval": core,
                 "source_video": candidate.get("source_video"),
                 "duration_s": round(duration, 6),
+                "context_padding": {
+                    "pre_roll_s": round(core[0] - interval[0], 6),
+                    "post_roll_s": round(interval[1] - core[1], 6),
+                    "reason": "preserve_readable_action_context",
+                },
+                "selection_reason": (
+                    "keyframes_locate_core_while_verified_context_preserves_action"),
             }
             if duration > p90 + 1e-6:
                 segment["semantic_completeness_reason"] = "verified_renderable_interval"
@@ -1528,7 +1556,8 @@ def build_reference_driven_edit_plan(reference_task: dict[str, Any],
     duration = sum(float(row["duration_s"]) for row in segments)
     reference_duration = float(reference_task["measured_style"]["reference_duration_s"])
     plan = {
-        "schema_version": "reference_driven_edit_plan_v1", "passed": True,
+        "schema_version": "reference_driven_edit_plan_v2",
+        "editorial_policy_version": READABLE_POLICY_VERSION, "passed": True,
         "target_id": "S0", "segments": segments, "duration_s": round(duration, 6),
         "style": {"preferred_duration_s": reference_duration,
                   "soft_range_s": [round(reference_duration * 0.7, 6),
@@ -1537,8 +1566,92 @@ def build_reference_driven_edit_plan(reference_task: dict[str, Any],
         "requires_human_style_review": duration > reference_duration * 1.2,
         "short_complete_content_allowed": duration < reference_duration * 0.7,
         "filler_added": False,
+        "minimum_cut_count_required": False,
+        "core_interval_used_as_display_interval": False,
+    }
+    plan["downstream_cache_contract"] = {
+        "editorial_policy_version": READABLE_POLICY_VERSION,
+        "ordered_final_source_intervals": [
+            row["final_source_interval"] for row in segments],
+        "ordered_evidence_ids": [row["evidence_id"] for row in segments],
     }
     return plan
+
+
+READABLE_SEGMENT_PROMPT = """Watch this exact proposed source segment at normal speed.
+Do not use a supplied story answer and do not guess names. Judge only what the clip itself
+lets a viewer perceive. Return strict JSON:
+{"action_change":"what visibly changes from start to end",
+ "too_short_to_understand":false,
+ "redundant_or_non_progressing":false,
+ "subject_relation_clear":true,
+ "supported_result":"the strongest result actually visible",
+ "unsupported_claims":[],
+ "problem_intervals":[]}
+If the action has not become readable before the cut, set too_short_to_understand=true.
+Preparation, approach, impact, reaction, and settling are functional when needed to
+understand the action; do not call them redundant merely because they are not the peak.
+Times in problem_intervals are relative to this clip."""
+
+
+def review_planned_segments(cfg: AppConfig, plan: dict[str, Any], output_dir: Path,
+                            *, runner) -> dict[str, Any]:
+    """Check the exact display intervals, independently of native-frame proof."""
+    output_dir = Path(output_dir)
+    requests, prepared = [], []
+    ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
+    for segment in plan.get("segments") or []:
+        interval = list(map(float, segment.get("final_source_interval") or
+                            segment.get("render_interval") or []))
+        if len(interval) != 2 or interval[1] <= interval[0]:
+            raise V7Blocked("planning", "invalid_final_source_interval")
+        source = Path(str(segment.get("source_video") or ""))
+        if not source.is_file():
+            raise V7Blocked("planning", "planned_segment_source_missing", str(source))
+        clip = cut_clip(ffmpeg, source, output_dir / "clips" / segment["id"],
+                        start_s=interval[0], end_s=interval[1])
+        duration = interval[1] - interval[0]
+        requests.append({
+            "video_path": clip, "prompt": READABLE_SEGMENT_PROMPT,
+            "kwargs": {"fps": 12.0, "duration_s": duration,
+                       "max_new_tokens": 512},
+        })
+        prepared.append((segment, clip, interval))
+    answers = (runner.watch_many(requests) if hasattr(runner, "watch_many") else
+               [runner.watch(row["video_path"], row["prompt"], **row["kwargs"])
+                for row in requests])
+    reviews = []
+    for (segment, clip, interval), answer in zip(prepared, answers):
+        try:
+            parsed = _parse_json(answer.text)
+        except V7Blocked as exc:
+            parsed = {"parse_error": exc.reason_code}
+        passed = (
+            bool(str(parsed.get("action_change") or "").strip())
+            and parsed.get("too_short_to_understand") is False
+            and parsed.get("redundant_or_non_progressing") is False
+            and parsed.get("subject_relation_clear") is True
+        )
+        reviews.append({
+            "segment_id": segment["id"], "evidence_id": segment["evidence_id"],
+            "final_source_interval": interval, "duration_s": interval[1] - interval[0],
+            "clip": str(clip), "clip_sha256": sha256_file(clip),
+            "passed": bool(passed), "review": parsed,
+            "raw_response": str(getattr(answer, "text", "")),
+        })
+    result = {
+        "schema_version": "readable_segment_review_v1",
+        "editorial_policy_version": READABLE_POLICY_VERSION,
+        "plan_sha256": hashlib.sha256(json.dumps(
+            plan, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode("utf-8")).hexdigest(),
+        "passed": bool(reviews) and all(row["passed"] for row in reviews),
+        "reviews": reviews,
+    }
+    _write_json(output_dir / "segment_readability_review.json", result)
+    if not result["passed"]:
+        raise V7Blocked("planning", "readable_segment_review_failed")
+    return result
 
 
 def _message_similarity(left: str, right: str) -> float:
@@ -1557,6 +1670,9 @@ def finalize_target_microcut(cfg: AppConfig, plan: dict[str, Any], output_dir: P
     from src.agentic_video.evidence_pipeline import blind_review_variants
 
     output_dir = Path(output_dir)
+    (output_dir / "rendered.mp4").unlink(missing_ok=True)
+    segment_review = review_planned_segments(
+        cfg, plan, output_dir / "segment_review", runner=runner)
     render = render_micro_montage(
         cfg, plan, output_dir / "render", source_video=source_video,
         bgm_path=bgm_path, force=force)
@@ -1567,6 +1683,10 @@ def finalize_target_microcut(cfg: AppConfig, plan: dict[str, Any], output_dir: P
             review.get("parsed") is True and review.get("hook_clear") is True and
             review.get("montage_coherent") is True and
             review.get("functionless_span_present") is False and
+            review.get("too_short_intervals") == [] and
+            review.get("redundant_intervals") == [] and
+            review.get("subject_relation_clear") is True and
+            bool(str(review.get("supported_result") or "").strip()) and
             bool(str(review.get("core_message") or "").strip()))
         if review.get("audible_dialogue_present") is True:
             required = required and review.get("speech_clear") is True
@@ -1597,7 +1717,8 @@ def finalize_target_microcut(cfg: AppConfig, plan: dict[str, Any], output_dir: P
     else:
         (output_dir / "rendered.mp4").unlink(missing_ok=True)
     _write_json(output_dir / "acceptance.json", acceptance)
-    return {"render": render, "blind_review": reviews, "acceptance": acceptance}
+    return {"segment_review": segment_review, "render": render,
+            "blind_review": reviews, "acceptance": acceptance}
 
 
 def accept_v7_output(output_dir: Path, human_acceptance: Path | dict[str, Any]) -> Path:

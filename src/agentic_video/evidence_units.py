@@ -161,6 +161,9 @@ class EvidenceUnitV3:
             raise ValueError("core_interval must be contained in observation_interval")
         if not (renderable[0] <= core[0] < core[1] <= renderable[1]):
             raise ValueError("renderable_interval must contain core_interval")
+        if (renderable[0] < observation[0] - 1e-6 or
+                renderable[1] > observation[1] + 1e-6):
+            raise ValueError("renderable_interval must stay inside verified observation_interval")
         if self.source_form not in SOURCE_FORMS:
             raise ValueError(f"unsupported evidence source_form: {self.source_form}")
         if self.target_relation not in {"self", "related_interaction", "related_outcome"}:

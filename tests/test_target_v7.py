@@ -15,7 +15,8 @@ from src.agentic_video.target_v7 import (
     build_reference_driven_edit_plan, build_target_album, compare_browse_arms,
     diagnose_browse, evaluate_target_album, extract_native_frames, finalize_target_microcut,
     oracle_evidence_bank,
-    prepare_reference_task, run_browse_escalation, run_browse_matrix,
+    prepare_reference_task, review_planned_segments, run_browse_escalation,
+    run_browse_matrix,
     select_consistent_album_examples, transport_windows, unique_candidates,
     validate_album_consistency, verify_target_evidence,
 )
@@ -468,6 +469,72 @@ def test_planner_derives_duration_from_reference_and_adds_no_filler() -> None:
     assert all("semantic_completeness_reason" in row for row in plan["segments"])
 
 
+def test_planner_displays_readable_context_not_only_short_core() -> None:
+    reference = {
+        "edit_sections": [
+            {"id": "s1", "goal_ids": ["adversity"]},
+            {"id": "s2", "goal_ids": ["agency"]},
+            {"id": "s3", "goal_ids": ["outcome"]},
+        ],
+        "measured_style": {"reference_duration_s": 21.933,
+                           "shot_duration_p90_s": 1.0},
+    }
+    long_action = _verified("adversity", 1)
+    long_action.update({
+        "observation_interval": [1.0, 3.2],
+        "renderable_interval": [1.0, 3.2],
+        "core_interval": [1.9, 2.2],
+    })
+    bank = {"evidence": [long_action, _verified("agency", 4),
+                         _verified("outcome", 5)]}
+    plan = build_reference_driven_edit_plan(reference, bank)
+    first = plan["segments"][0]
+    assert plan["passed"] is True
+    assert first["core_interval"] == [1.9, 2.2]
+    assert first["final_source_interval"] == [1.0, 3.2]
+    assert first["duration_s"] == pytest.approx(2.2)
+    assert first["context_padding"]["pre_roll_s"] == pytest.approx(.9)
+    assert "semantic_completeness_reason" in first
+
+
+def test_v3_rejects_unverified_display_expansion() -> None:
+    with pytest.raises(ValueError, match="verified observation"):
+        EvidenceUnitV3(
+            id="ev", observation_interval=(1, 2), core_interval=(1.4, 1.6),
+            renderable_interval=(.5, 2.5), observation={},
+            source_form="dynamic_action", target_relation="self",
+            identity_verification={"result": "same"},
+            action_verification={"passed": True})
+
+
+def test_normal_speed_segment_review_blocks_unreadably_short_plan(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr("src.agentic_video.target_v7.cut_clip",
+                        lambda *_args, **_kwargs: source)
+
+    class Runner:
+        def watch(self, *_args, **_kwargs):
+            return SimpleNamespace(text=json.dumps({
+                "action_change": "contact exists but cannot be read at speed",
+                "too_short_to_understand": True,
+                "redundant_or_non_progressing": False,
+                "subject_relation_clear": True,
+                "supported_result": "unclear",
+                "unsupported_claims": [], "problem_intervals": [[0, .2]],
+            }))
+
+    plan = {"segments": [{
+        "id": "segment_00", "evidence_id": "ev", "source_video": str(source),
+        "final_source_interval": [1, 1.2], "render_interval": [1, 1.2],
+    }]}
+    with pytest.raises(V7Blocked, match="readable_segment_review_failed"):
+        review_planned_segments(
+            SimpleNamespace(perception={"ffmpeg_bin": "ffmpeg"}), plan,
+            tmp_path / "review", runner=Runner())
+
+
 def test_related_outcome_requires_relation_verification() -> None:
     base = dict(
         id="ev", observation_interval=(1, 2), core_interval=(1.2, 1.5),
@@ -611,7 +678,20 @@ def test_fake_flashvid_fake_omni_synthetic_video_full_v7_chain(tmp_path: Path) -
                     "visible_evidence_roles": ["困境", "反击", "结果"],
                     "audible_dialogue_present": False, "speech_clear": True,
                     "music_present": True,
+                    "too_short_intervals": [], "redundant_intervals": [],
+                    "subject_relation_clear": True,
+                    "supported_result": "主体行动后出现可见变化",
+                    "unsupported_claims": [],
                 }, ensure_ascii=False)
+            elif "normal speed" in prompt:
+                text = json.dumps({
+                    "action_change": "a visible action completes",
+                    "too_short_to_understand": False,
+                    "redundant_or_non_progressing": False,
+                    "subject_relation_clear": True,
+                    "supported_result": "visible change",
+                    "unsupported_claims": [], "problem_intervals": [],
+                })
             else:
                 text = json.dumps({
                     "passed": True, "actor": "S0", "patient": "other",

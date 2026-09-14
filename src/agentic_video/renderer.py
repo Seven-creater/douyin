@@ -781,7 +781,18 @@ def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     master = output_dir / "content_master.mp4"
-    if master.exists() and not force:
+    plan_sha256 = hashlib.sha256(json.dumps(
+        plan, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+    manifest_path = output_dir / "evidence_render_manifest.json"
+    cached_manifest = {}
+    if manifest_path.is_file():
+        try:
+            cached_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached_manifest = {}
+    if (master.exists() and not force and
+            cached_manifest.get("plan_sha256") == plan_sha256):
         variants = {}
         for name in ("source_only", "bgm_mix"):
             path = output_dir / "variants" / name / "rendered.mp4"
@@ -828,8 +839,6 @@ def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
             source = Path(str(segment.get("source_video") or source_video))
             start, end = map(float, segment.get("render_interval") or
                              segment.get("source_interval") or [0.0, 0.0])
-            if end - start < 0.15 - 1e-6:
-                raise ValueError(f"micro clip {index} is shorter than 0.15s")
             try:
                 has_audio = _has_audio_stream(ffprobe, source)
             except Exception:
@@ -865,11 +874,13 @@ def render_micro_montage(cfg: AppConfig, plan: dict, output_dir: Path, *,
             mix_volume=mix_volume, duration_s=float(plan.get("duration_s") or 0.0))
     manifest = {
         "schema_version": "evidence_render_v1", "content_master": str(master),
+        "plan_sha256": plan_sha256,
+        "editorial_policy_version": plan.get("editorial_policy_version"),
         "duration_s": float(plan.get("duration_s") or 0.0),
         "segments": plan.get("segments") or [], "commands": commands,
         "variants": {name: str(path) for name, path in variants.items()},
     }
-    (output_dir / "evidence_render_manifest.json").write_text(
+    manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"content_master": master, "variants": variants,
             "duration_s": float(plan.get("duration_s") or 0.0)}

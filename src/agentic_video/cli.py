@@ -757,9 +757,22 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
             (oracle_dir / "edit_plan.json").write_text(
                 json.dumps(oracle_plan, ensure_ascii=False, indent=2), encoding="utf-8")
             if oracle_plan.get("passed"):
-                oracle_result = finalize_target_microcut(
-                    cfg, oracle_plan, oracle_dir, source_video=source, bgm_path=bgm,
-                    runner=runner, force=args.force)
+                try:
+                    oracle_result = finalize_target_microcut(
+                        cfg, oracle_plan, oracle_dir, source_video=source, bgm_path=bgm,
+                        runner=runner, force=args.force)
+                except V7Blocked as exc:
+                    oracle_failure = {
+                        "failure_class": "verification",
+                        "failure_stage": exc.failure_stage,
+                        "reason_code": exc.reason_code,
+                        "detail": str(exc),
+                    }
+                    (oracle_dir / "acceptance.json").write_text(json.dumps({
+                        "schema_version": "v7_acceptance_v1",
+                        "automated_passed": False, "human_passed": None,
+                        "passed": False, "delivery": "blocked", **oracle_failure,
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
             else:
                 oracle_failure = {
                     "failure_class": oracle_plan.get("failure_class", "verification"),

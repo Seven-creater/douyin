@@ -32,9 +32,13 @@ Evidence Unit 或剪辑计划。只根据实际画面和可听声音，输出严
 {"core_message":"一句话说明这条视频让你看到了什么",
  "hook_clear":true,"montage_coherent":true,"functionless_span_present":false,
  "visible_evidence_roles":["困境","反击","结果"],
- "audible_dialogue_present":true,"speech_clear":true,"music_present":true}
+ "audible_dialogue_present":true,"speech_clear":true,"music_present":true,
+ "too_short_intervals":[],"redundant_intervals":[],
+ "subject_relation_clear":true,"supported_result":"画面实际支持的最强结果",
+ "unsupported_claims":[]}
 规则：看不懂或不确定时写 false；不要猜官方角色名；visible_evidence_roles 只写画面实际
-承担的不同功能，不要因为有切点就默认有功能。"""
+承担的不同功能，不要因为有切点就默认有功能。逐帧能确认动作存在，不代表正常播放时
+观众能看清；太短或冗余时必须返回具体成片时间段。"""
 
 
 def _sha256_file(path: Path) -> str:
@@ -145,6 +149,19 @@ def _parse_blind_answer(answer: Any) -> dict[str, Any]:
             if isinstance(payload.get("audible_dialogue_present"), bool) else None),
         "speech_clear": payload.get("speech_clear") if isinstance(payload.get("speech_clear"), bool) else None,
         "music_present": payload.get("music_present") if isinstance(payload.get("music_present"), bool) else None,
+        "too_short_intervals": (payload.get("too_short_intervals")
+                                if isinstance(payload.get("too_short_intervals"), list)
+                                else None),
+        "redundant_intervals": (payload.get("redundant_intervals")
+                                if isinstance(payload.get("redundant_intervals"), list)
+                                else None),
+        "subject_relation_clear": (
+            payload.get("subject_relation_clear")
+            if isinstance(payload.get("subject_relation_clear"), bool) else None),
+        "supported_result": str(payload.get("supported_result") or "").strip(),
+        "unsupported_claims": (payload.get("unsupported_claims")
+                               if isinstance(payload.get("unsupported_claims"), list)
+                               else None),
         "gpu_pair": getattr(answer, "gpu_pair", None),
         "raw_response": raw,
     }
