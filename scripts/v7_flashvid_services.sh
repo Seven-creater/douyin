@@ -9,6 +9,8 @@ FLASHVID_DIR="${FLASHVID_DIR:-/data02/usr/wangqihao/Demo/test/flashvid}"
 V7_STATE_DIR="${V7_STATE_DIR:-/data02/usr/wangqihao/Demo/research/data/agentic_runs/.v7_services}"
 MEDIA_ROOT="${V7_MEDIA_ROOT:-/data02/usr/wangqihao/Demo}"
 MODEL_PATH="${V7_MODEL_PATH:-${FLASHVID_DIR}/models/Qwen3.5-4B}"
+V7_VLLM_BIN="${V7_VLLM_BIN:-${FLASHVID_DIR}/.venv/bin/vllm}"
+V7_FLASHVID_BIN="${V7_FLASHVID_BIN:-${FLASHVID_DIR}/.venv/bin/flashvid-serve}"
 mkdir -p "$V7_STATE_DIR"
 
 service_port() {
@@ -44,7 +46,7 @@ start_one() {
   fi
   if [[ "$id" == r100 ]]; then
     nohup setsid env -u VLLM_PLUGINS DOUYIN_V7_SERVICE_ID="$id" \
-      CUDA_VISIBLE_DEVICES="$gpu" "$FLASHVID_DIR/.venv/bin/vllm" serve "$MODEL_PATH" \
+      CUDA_VISIBLE_DEVICES="$gpu" "$V7_VLLM_BIN" serve "$MODEL_PATH" \
       --served-model-name Qwen3.5-4B --default-chat-template-kwargs '{"enable_thinking":false}' \
       --host 127.0.0.1 --port "$port" --tensor-parallel-size 1 --dtype bfloat16 \
       --max-model-len 32768 --max-num-seqs 8 --max-num-batched-tokens 32768 \
@@ -53,7 +55,7 @@ start_one() {
       --allowed-local-media-path "$MEDIA_ROOT" >"$logfile" 2>&1 < /dev/null &
   else
     nohup setsid env DOUYIN_V7_SERVICE_ID="$id" CUDA_VISIBLE_DEVICES="$gpu" \
-      VLLM_PLUGINS=flashvid_qwen3_5 "$FLASHVID_DIR/.venv/bin/flashvid-serve" "$MODEL_PATH" \
+      VLLM_PLUGINS=flashvid_qwen3_5 "$V7_FLASHVID_BIN" "$MODEL_PATH" \
       --vision-retention-ratio "$ratio" --served-model-name Qwen3.5-4B \
       --default-chat-template-kwargs '{"enable_thinking":false}' --host 127.0.0.1 \
       --port "$port" --tensor-parallel-size 1 --dtype bfloat16 --max-model-len 32768 \
