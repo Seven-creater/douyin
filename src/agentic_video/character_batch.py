@@ -389,7 +389,6 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
         "retention_ratio": float(coverage["retention_ratio"]),
         "block_s": float(coverage["block_s"]),
     }
-    clips: dict[str, Path] = {}
     completed: dict[str, dict] = {}
     jobs = []
     ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
@@ -402,7 +401,9 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             prior = _read_json(result_path)
             if prior.get("cache_key") == cache_key and prior.get("status") == "covered":
                 return prior
-        clip = clips[block_id]
+        clip = cut_clip(
+            ffmpeg, Path(source_video), block_dir / "transport",
+            start_s=start, end_s=end)
         answer = client.watch(
             clip, NEUTRAL_COVERAGE_PROMPT, duration_s=end - start,
             image_paths=None, max_tokens=768)
@@ -452,8 +453,6 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             if prior.get("cache_key") == cache_key and prior.get("status") == "covered":
                 completed[block_id] = prior
                 continue
-        clips[block_id] = cut_clip(
-            ffmpeg, Path(source_video), block_dir / "transport", start_s=start, end_s=end)
         jobs.append((block_id, start, end))
     workers = min(int(coverage.get("workers", 8)), max(1, len(jobs)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
