@@ -93,6 +93,17 @@ def _fit_coarse_region(interval: tuple[float, float],
     return left, right
 
 
+def _fact_fields(row: dict[str, Any]) -> tuple[dict[str, Any], str, list[str]]:
+    """Normalize a common Omni drift that nests sibling fact fields."""
+    observation = dict(row.get("observation") or {})
+    form = str(row.get("source_form") or
+               observation.pop("source_form", "dynamic_action"))
+    attributes = row.get("attributes")
+    if attributes is None:
+        attributes = observation.pop("attributes", [])
+    return observation, form, [str(value) for value in attributes or []]
+
+
 def validate_sampling(sampling: dict[str, Any] | None, *,
                       fps_min: float, fps_max: float) -> list[str]:
     if not isinstance(sampling, dict) or sampling.get("sampling_verified") is not True:
@@ -157,20 +168,21 @@ def parse_coarse_response(raw: str, *, watch_id: str,
         normalized = _normalize_interval(
             row.get("interval"), timebase=timebase,
             container=container, scope=scope)
-        form = str(row.get("source_form") or "dynamic_action")
+        observation, form, attributes = _fact_fields(row)
         if normalized is None or form not in SOURCE_FORMS:
             rejected.append({"index": index, "reason": "region_or_source_form_invalid"})
             continue
         normalized = _fit_coarse_region(normalized, container)
-        observation = dict(row.get("observation") or {})
         accepted.append({
             "id": f"{watch_id}:region_{index:03d}",
             "interval": [round(normalized[0], 3), round(normalized[1], 3)],
             "container_interval": list(container), "observation": observation,
             "source_form": form,
-            "attributes": [str(value) for value in row.get("attributes") or []],
-            "salience": _bounded_score(row.get("salience")),
-            "confidence": _bounded_score(row.get("confidence")),
+            "attributes": attributes,
+            "salience": _bounded_score(
+                row.get("salience", (row.get("observation") or {}).get("salience"))),
+            "confidence": _bounded_score(
+                row.get("confidence", (row.get("observation") or {}).get("confidence"))),
             "source_video": source_video, "coarse_watch_id": watch_id,
         })
     return accepted, rejected
@@ -192,7 +204,7 @@ def parse_dense_response(raw: str, *, watch_id: str, coarse_watch_id: str,
         normalized = _normalize_interval(
             row.get("core_interval", row.get("interval")), timebase=timebase,
             container=container, scope=scope)
-        form = str(row.get("source_form") or "dynamic_action")
+        observation, form, attributes = _fact_fields(row)
         if normalized is None or form not in SOURCE_FORMS:
             rejected.append({"index": index, "reason": "core_or_source_form_invalid"})
             continue
@@ -200,10 +212,13 @@ def parse_dense_response(raw: str, *, watch_id: str, coarse_watch_id: str,
             accepted.append(EvidenceUnitV2(
                 id=f"{watch_id}:ev_{index:03d}", core_interval=normalized,
                 container_interval=container,
-                observation=dict(row.get("observation") or {}), source_form=form,
-                attributes=tuple(str(value) for value in row.get("attributes") or []),
-                visual_strength=_bounded_score(row.get("visual_strength")),
-                confidence=_bounded_score(row.get("confidence")),
+                observation=observation, source_form=form,
+                attributes=tuple(attributes),
+                visual_strength=_bounded_score(row.get(
+                    "visual_strength", (row.get("observation") or {}).get(
+                        "visual_strength"))),
+                confidence=_bounded_score(row.get(
+                    "confidence", (row.get("observation") or {}).get("confidence"))),
                 source_video=source_video,
                 sampling_provenance={"coarse_watch_id": coarse_watch_id,
                                      "dense_rewatch_id": watch_id},

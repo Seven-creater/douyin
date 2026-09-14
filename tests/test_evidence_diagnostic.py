@@ -102,6 +102,23 @@ def test_coarse_regions_are_transport_hints_not_editorial_roles():
     assert "semantic_role" not in rows[0]
 
 
+def test_nested_omni_fact_fields_are_normalized_without_changing_observation():
+    raw = json.dumps({"timebase": "relative", "candidate_regions": [{
+        "interval": [1, 3], "observation": {
+            "subject_call_id": "person_A", "action": "speaks",
+            "source_form": "dialogue_span", "attributes": ["speech"],
+            "salience": .8, "confidence": .9,
+        }}]})
+    rows, rejected = parse_coarse_response(
+        raw, watch_id="c0", container=(100, 106), scope=(100, 110),
+        source_video="movie.mp4")
+    assert not rejected
+    assert rows[0]["source_form"] == "dialogue_span"
+    assert rows[0]["attributes"] == ["speech"]
+    assert rows[0]["salience"] == .8
+    assert "source_form" not in rows[0]["observation"]
+
+
 def test_dense_core_longer_than_two_seconds_is_not_rejected():
     raw = json.dumps({"timebase": "relative", "evidence": [{
         "core_interval": [1, 3.6], "source_form": "dynamic_action",
