@@ -673,6 +673,17 @@ def _normalize_candidates(payload: dict[str, Any], *, arm: str, window_id: str,
             raise V7Blocked("browsing", "browse_candidate_out_of_window")
         goals = [str(goal) for goal in row.get("goal_hypotheses") or []
                  if str(goal) in REQUIRED_GOALS]
+        raw_roi = row.get("roi")
+        roi = None
+        if isinstance(raw_roi, list) and len(raw_roi) == 4:
+            try:
+                values = list(map(float, raw_roi))
+                x0, y0, x1, y1 = values
+                if (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1 and
+                        (x1 - x0) * (y1 - y0) < 0.95):
+                    roi = values
+            except (TypeError, ValueError):
+                pass
         candidates.append({
             "id": f"{arm}_{window_id}_{index:02d}", "arm": arm,
             "window_id": window_id, "relation": relation,
@@ -680,7 +691,8 @@ def _normalize_candidates(payload: dict[str, Any], *, arm: str, window_id: str,
             "observation_interval": [round(absolute[0], 6), round(absolute[1], 6)],
             "observation": dict(row.get("observation") or {}),
             "goal_hypotheses": goals,
-            "roi": row.get("roi"),
+            "roi": roi,
+            "roi_rejected": raw_roi is not None and roi is None,
         })
     return candidates
 

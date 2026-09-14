@@ -734,6 +734,20 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
                 (output / "edit_plan.json").write_text(
                     json.dumps(blocked_plan, ensure_ascii=False, indent=2),
                     encoding="utf-8")
+            except Exception as exc:  # automatic failure must not suppress Oracle
+                automatic_failure = {
+                    "failure_class": "infrastructure",
+                    "failure_stage": "verification",
+                    "reason_code": "automatic_verification_runtime_failure",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+                blocked_plan = {
+                    "schema_version": "reference_driven_edit_plan_v1",
+                    "passed": False, **automatic_failure, "segments": [],
+                }
+                (output / "edit_plan.json").write_text(
+                    json.dumps(blocked_plan, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
             oracle_bank = oracle_evidence_bank(oracle, source)
             oracle_dir = output / "arms" / "oracle"
             oracle_dir.mkdir(parents=True, exist_ok=True)

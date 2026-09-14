@@ -164,6 +164,19 @@ def test_not_observed_is_not_rewritten_as_absent() -> None:
     assert "absent" not in json.dumps(rows)
 
 
+def test_browse_candidate_rejects_invalid_or_full_frame_roi_without_crashing() -> None:
+    payload = {"candidates": [
+        {"relative_interval": [0, 1], "relation": "target_direct",
+         "goal_hypotheses": ["agency"], "roi": [-1, 0, 2, 1]},
+        {"relative_interval": [1, 2], "relation": "target_direct",
+         "goal_hypotheses": ["agency"], "roi": [0, 0, 1, 1]},
+    ]}
+    rows = _normalize_candidates(
+        payload, arm="A", window_id="w000", start_s=10, end_s=16)
+    assert [row["roi"] for row in rows] == [None, None]
+    assert all(row["roi_rejected"] for row in rows)
+
+
 def test_album_contract_checks_all_directed_edges_without_confidence() -> None:
     positives = [{"id": value} for value in ("seed", "p1", "p2")]
     negatives = [{"id": "n1"}]
