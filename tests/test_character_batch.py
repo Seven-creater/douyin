@@ -196,14 +196,17 @@ def test_coverage_rejects_character_name_in_neutral_response(tmp_path: Path,
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"clip")
     monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 10.0)
-    monkeypatch.setattr(v8, "cut_clip", lambda *_args, **_kwargs: clip)
+    monkeypatch.setattr(v8.common, "run_ffprobe_json", lambda *_: {"streams": []})
+    monkeypatch.setattr(v8, "_build_coverage_transport", lambda *_args, **_kwargs: (
+        clip, {"actual_frame_count": 20, "sampling_verified": True}))
 
     class Client:
         def watch(self, *_args, **_kwargs):
             return SimpleNamespace(
                 text=json.dumps({"regions": [{"interval": [1, 3],
                     "activity": "小黑 moves", "occurrences": [],
-                    "event_candidates": []}]}), raw={}, request_audit={})
+                    "event_candidates": []}]}), raw={},
+                request_audit={"requested_frames": 20})
 
     spec = _spec()
     spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
@@ -223,7 +226,9 @@ def test_coverage_stages_transport_inside_service_allowlist(tmp_path: Path,
     clip.write_bytes(b"transport-media")
     media_root = tmp_path / "service-media"
     monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 10.0)
-    monkeypatch.setattr(v8, "cut_clip", lambda *_args, **_kwargs: clip)
+    monkeypatch.setattr(v8.common, "run_ffprobe_json", lambda *_: {"streams": []})
+    monkeypatch.setattr(v8, "_build_coverage_transport", lambda *_args, **_kwargs: (
+        clip, {"actual_frame_count": 20, "sampling_verified": True}))
 
     class Client:
         request_path = None
@@ -234,7 +239,7 @@ def test_coverage_stages_transport_inside_service_allowlist(tmp_path: Path,
             assert self.request_path.read_bytes() == clip.read_bytes()
             return SimpleNamespace(
                 text=json.dumps({"regions": []}), raw={},
-                request_audit={"transport_clip": str(video)})
+                request_audit={"transport_clip": str(video), "requested_frames": 20})
 
     client = Client()
     spec = _spec()
@@ -251,6 +256,7 @@ def test_coverage_stages_transport_inside_service_allowlist(tmp_path: Path,
     assert client.request_path is not None
     assert not client.request_path.exists()
     assert clip.is_file()
+    assert block["sampling_audit_status"] == "verified_transport_frames"
 
 
 def test_profile_uses_all_directed_pairs_and_no_confidence(tmp_path: Path,

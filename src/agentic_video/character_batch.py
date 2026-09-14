@@ -13,6 +13,7 @@ import itertools
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -376,6 +377,76 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
     return occurrences, event_candidates
 
 
+def _build_coverage_transport(ffmpeg_bin: str, ffprobe_bin: str,
+                              source_video: Path, destination: Path, *,
+                              start_s: float, end_s: float,
+                              requested_fps: float,
+                              source_fps: float | None = None
+                              ) -> tuple[Path, dict[str, Any]]:
+    """Create a video containing exactly the frames offered to FlashVID.
+
+    Coverage browsing is visual-only.  Sampling before transport makes the
+    transmitted frame set auditable even though the OpenAI-compatible response
+    does not expose its decoder metadata.
+    """
+    if requested_fps <= 0 or end_s <= start_s:
+        raise ValueError("coverage transport requires a positive interval and FPS")
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    clip = destination / "clip.mp4"
+    common.run_ffmpeg(ffmpeg_bin, [
+        "-y", "-loglevel", "error", "-ss", f"{start_s}", "-to", f"{end_s}",
+        "-i", str(source_video), "-map", "0:v:0",
+        "-vf", f"fps={requested_fps:.9f},scale='min(1920,iw)':-2,setpts=PTS-STARTPTS",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-movflags", "+faststart", str(clip),
+    ], timeout_s=300)
+    probe = subprocess.run([
+        ffprobe_bin, "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "frame=best_effort_timestamp_time",
+        "-of", "json", str(clip),
+    ], capture_output=True, text=True, timeout=120)
+    if probe.returncode != 0:
+        raise common.FFmpegError(
+            f"coverage transport ffprobe failed: {(probe.stderr or '')[-300:]}")
+    payload = json.loads(probe.stdout)
+    relative = [
+        round(float(row["best_effort_timestamp_time"]), 6)
+        for row in payload.get("frames") or []
+        if row.get("best_effort_timestamp_time") is not None
+    ]
+    duration_s = float(end_s - start_s)
+    requested_frames = int(round(duration_s * requested_fps))
+    absolute = [round(float(start_s) + value, 6) for value in relative]
+    verified = (
+        len(relative) == requested_frames and
+        all(0 <= value < duration_s + 1e-6 for value in relative) and
+        all(left < right for left, right in zip(relative, relative[1:]))
+    )
+    audit = {
+        "audit_basis": "deterministic_presampled_transport",
+        "requested_fps": float(requested_fps),
+        "effective_fps": round(len(relative) / duration_s, 6),
+        "source_fps": source_fps,
+        "requested_frame_count": requested_frames,
+        "actual_frame_count": len(relative),
+        "actual_frame_indices": list(range(len(relative))),
+        "actual_frame_timestamps_relative_s": relative,
+        "actual_frame_timestamps_absolute_s": absolute,
+        "source_time_origin_s": float(start_s),
+        "do_sample_frames": False,
+        "transport_sha256": sha256_file(clip),
+        "sampling_verified": verified,
+    }
+    _write_json(destination / "sampling_manifest.json", audit)
+    if not verified:
+        raise V8Blocked("coverage", "sampling_audit_failed", json.dumps({
+            "requested": requested_frames, "actual": len(relative),
+            "interval": [start_s, end_s],
+        }))
+    return clip, audit
+
+
 def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir: Path, *,
                                client, source_video: Path, source_sha256: str,
                                reuse_completed: bool = True) -> dict[str, Any]:
@@ -400,6 +471,17 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
     completed: dict[str, dict] = {}
     jobs = []
     ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
+    ffprobe = cfg.perception.get("ffprobe_bin", "ffprobe")
+    source_probe = common.run_ffprobe_json(ffprobe, Path(source_video))
+    video_stream = next(
+        (row for row in source_probe.get("streams") or []
+         if row.get("codec_type") == "video"), {})
+    rate_text = str(video_stream.get("avg_frame_rate") or "0/1")
+    try:
+        numerator, denominator = rate_text.split("/", 1)
+        source_fps = float(numerator) / float(denominator)
+    except (ValueError, ZeroDivisionError):
+        source_fps = None
 
     def stage_for_service(clip: Path, block_id: str) -> tuple[Path, dict[str, Any]]:
         """Copy one transport clip into the server's explicit media allow-list.
@@ -449,9 +531,10 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             prior = _read_json(result_path)
             if prior.get("cache_key") == cache_key and prior.get("status") == "covered":
                 return prior
-        clip = cut_clip(
-            ffmpeg, Path(source_video), block_dir / "transport",
-            start_s=start, end_s=end)
+        clip, transport_sampling = _build_coverage_transport(
+            ffmpeg, ffprobe, Path(source_video), block_dir / "transport",
+            start_s=start, end_s=end, requested_fps=float(coverage["fps"]),
+            source_fps=source_fps)
         request_clip, media_transport_audit = stage_for_service(clip, block_id)
         try:
             answer = client.watch(
@@ -477,8 +560,19 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             occurrence["source_video"] = str(source_video)
         for event in events:
             event["source_video"] = str(source_video)
-        sampling = (answer.raw.get("sampling_audit") or
-                    answer.raw.get("video_metadata") or {})
+        server_sampling = (answer.raw.get("sampling_audit") or
+                           answer.raw.get("video_metadata") or {})
+        sampling = {
+            **transport_sampling,
+            "server_sampling_audit": server_sampling,
+            "server_sampling_audit_status": (
+                "available" if server_sampling else "unavailable_from_server"),
+            "server_requested_frame_count": answer.request_audit.get("requested_frames"),
+        }
+        if answer.request_audit.get("requested_frames") != transport_sampling[
+                "actual_frame_count"]:
+            raise V8Blocked("coverage", "sampling_audit_failed",
+                            "request count differs from transmitted frame count")
         row = {
             "schema_version": "coverage_block_v1",
             "block_id": block_id,
@@ -491,7 +585,7 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             "request_audit": answer.request_audit,
             "media_transport_audit": media_transport_audit,
             "sampling_audit": sampling,
-            "sampling_audit_status": "available" if sampling else "unavailable_from_server",
+            "sampling_audit_status": "verified_transport_frames",
             "raw_response": answer.text,
         }
         _write_json(result_path, row)
