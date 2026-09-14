@@ -170,6 +170,17 @@ def test_uniform_coverage_drops_regions_not_worth_rewatch() -> None:
     assert occurrences[0]["source_interval"] == [95.0, 98.0]
 
 
+def test_coverage_parser_wraps_bare_array_but_keeps_interval_contract() -> None:
+    payload, shape = v8._parse_coverage_payload('[{"interval":[1,4]}]')
+    assert shape == "bare_array_wrapped"
+    assert payload == {"regions": [{"interval": [1, 4]}]}
+    with pytest.raises(v8.V8Blocked, match="candidate_interval_outside"):
+        v8._normalize_coverage_response({"regions": [{
+            "interval": [0, 10], "worth_rewatch": True,
+            "occurrences": [], "event_candidates": [],
+        }]}, block_id="b", start_s=0, end_s=45)
+
+
 def test_occurrence_bank_deduplicates_without_identity_and_leads_are_not_truth(
         tmp_path: Path) -> None:
     occurrence = {"occurrence_id": "occ_A", "source_interval": [1, 2],

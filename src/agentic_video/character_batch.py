@@ -290,13 +290,16 @@ or assign editorial functions. Give local subjects temporary labels A/B/C within
 Inspect the entire block before selecting regions. Report only visible state changes,
 interactions, entrances/exits, or other concrete activity that genuinely merits a closer
 original-video rewatch; never report routine static presence merely to fill the list.
-Return strict JSON:
+Return strict JSON with one top-level object (never a bare array):
 {"regions":[{"interval":[0.0,2.0],"activity":"visible coarse activity",
 "worth_rewatch":true,"occurrences":[{"local_id":"A","local_description":"visible
 appearance only","visual_state":"visible state/activity","roi":null}],
 "event_candidates":[{"actor_local_id":"A","action":"visible action",
 "patient_local_id":null,"visible_result":"visible change or empty"}]}]}
-Times are seconds relative to this block. Return at most three regions, each 2-6 seconds.
+Times are seconds relative to this block. First inspect the full 45-second input, then
+select at most three non-overlapping regions. Every interval must be 2-6 seconds; do not
+split the timeline into fixed bins. For a longer action, return the tightest 6-second
+excerpt containing its clearest state change and set "temporal_refinement_needed":true.
 Every returned region must have worth_rewatch=true. If nothing merits rewatch return
 {"regions":[]}. Not observed never means absent."""
 
@@ -305,6 +308,23 @@ _FORBIDDEN_NEUTRAL_KEYS = {
     "character_id", "canonical_id", "target_id", "assigned_goal", "editing_role",
     "adversity", "agency", "outcome",
 }
+
+
+def _parse_coverage_payload(text: str) -> tuple[dict[str, Any], str]:
+    """Accept the requested object and one harmless model formatting variant."""
+    candidate = str(text or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", candidate, re.S | re.I)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise V8Blocked("model", "invalid_json_response", str(exc)) from exc
+    if isinstance(value, list):
+        return {"regions": value}, "bare_array_wrapped"
+    if not isinstance(value, dict):
+        raise V8Blocked("model", "json_response_not_object_or_array")
+    return value, "object"
 
 
 def _contains_forbidden_key(value: Any) -> bool:
@@ -335,8 +355,8 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
         rel_start, rel_end = map(float, interval)
         if not 0 <= rel_start < rel_end <= end_s - start_s + 1e-6:
             continue
-        if not 1.5 <= rel_end - rel_start <= 6.5:
-            continue
+        if not 2.0 - 1e-6 <= rel_end - rel_start <= 6.0 + 1e-6:
+            raise V8Blocked("coverage", "candidate_interval_outside_2_to_6_seconds")
         absolute = [round(start_s + rel_start, 6), round(start_s + rel_end, 6)]
         local_to_global: dict[str, str] = {}
         for occurrence_index, raw in enumerate((region.get("occurrences") or [])[:6]):
@@ -525,6 +545,7 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
 
     def run_one(block_id: str, start: float, end: float) -> dict[str, Any]:
         block_dir = output_dir / "blocks" / block_id
+        block_dir.mkdir(parents=True, exist_ok=True)
         result_path = block_dir / "result.json"
         cache_key = _stable_sha({**contract, "source_interval": [start, end]})
         if reuse_completed and result_path.is_file():
@@ -539,11 +560,18 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
         try:
             answer = client.watch(
                 request_clip, NEUTRAL_COVERAGE_PROMPT, duration_s=end - start,
-                image_paths=None, max_tokens=768)
+                image_paths=None, max_tokens=2048)
         finally:
             if request_clip != clip:
                 request_clip.unlink(missing_ok=True)
-        raw = _parse_object(answer.text)
+        raw_path = block_dir / "raw_response.txt"
+        raw_path.write_text(str(answer.text), encoding="utf-8")
+        response_envelope_path = block_dir / "response_envelope.json"
+        _write_json(response_envelope_path, {
+            "request_audit": answer.request_audit,
+            "response": answer.raw,
+        })
+        raw, response_shape = _parse_coverage_payload(answer.text)
         forbidden_terms = {
             str(value).strip().lower()
             for character in spec.get("characters") or []
@@ -584,6 +612,9 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             "event_candidates": events,
             "request_audit": answer.request_audit,
             "media_transport_audit": media_transport_audit,
+            "raw_response_path": str(raw_path),
+            "response_envelope_path": str(response_envelope_path),
+            "response_shape": response_shape,
             "sampling_audit": sampling,
             "sampling_audit_status": "verified_transport_frames",
             "raw_response": answer.text,
@@ -618,6 +649,12 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
                     "source_interval": [start, end], "status": "failed",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
+                raw_path = output_dir / "blocks" / block_id / "raw_response.txt"
+                envelope_path = output_dir / "blocks" / block_id / "response_envelope.json"
+                if raw_path.is_file():
+                    failed["raw_response_path"] = str(raw_path)
+                if envelope_path.is_file():
+                    failed["response_envelope_path"] = str(envelope_path)
                 completed[block_id] = failed
                 _write_json(output_dir / "blocks" / block_id / "result.json", failed)
     ordered = [completed[f"b{index:04d}"] for index in range(len(blocks))]
