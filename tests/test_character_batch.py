@@ -66,6 +66,15 @@ def test_v8_cli_and_fixed_spec_contract(tmp_path: Path) -> None:
     assert len(digest) == 64
 
 
+def test_checked_in_v8_endpoints_use_actual_served_model_names() -> None:
+    spec = json.loads(Path(
+        "config/experiments/lxh1_v8_character_batch.json").read_text(encoding="utf-8"))
+    assert spec["coverage"]["endpoint"]["model"].endswith("FlashVID-r010")
+    assert spec["reference_backend"]["model"].endswith("FlashVID-r100")
+    for arm in spec["targeted_escalation"]["arms"]:
+        assert arm["model"].endswith(f"FlashVID-r{int(arm['retention_ratio'] * 100):03d}")
+
+
 def test_v8_cli_classifies_unhandled_bootstrap_failure(tmp_path: Path,
                                                        monkeypatch) -> None:
     monkeypatch.setattr(cli, "_character_batch_impl",

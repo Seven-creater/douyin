@@ -91,7 +91,7 @@
     "backend": "native_bypass"
   },
   "reference_backend": {
-    "model": "Qwen3.5-4B",
+    "model": "Qwen3.5-4B-FlashVID-r100",
     "base_url": "http://127.0.0.1:8104/v1",
     "backend": "native_bypass"
   },
@@ -105,7 +105,7 @@
     "max_regions_per_block": 3,
     "workers": 8,
     "endpoint": {
-      "model": "Qwen3.5-4B",
+      "model": "Qwen3.5-4B-FlashVID-r010",
       "base_url": "http://127.0.0.1:8101/v1",
       "backend": "flashvid"
     }
@@ -114,10 +114,10 @@
     "transport_window_s": 6.0,
     "transport_overlap_s": 0.5,
     "arms": [
-      {"id": "A", "fps": 2.0, "retention_ratio": 0.1, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1"},
-      {"id": "B", "fps": 4.0, "retention_ratio": 0.1, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1"},
-      {"id": "C", "fps": 4.0, "retention_ratio": 0.25, "backend": "flashvid", "base_url": "http://127.0.0.1:8102/v1"},
-      {"id": "D", "fps": 4.0, "retention_ratio": 1.0, "backend": "native_bypass", "base_url": "http://127.0.0.1:8104/v1"}
+      {"id": "A", "model": "Qwen3.5-4B-FlashVID-r010", "fps": 2.0, "retention_ratio": 0.1, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1"},
+      {"id": "B", "model": "Qwen3.5-4B-FlashVID-r010", "fps": 4.0, "retention_ratio": 0.1, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1"},
+      {"id": "C", "model": "Qwen3.5-4B-FlashVID-r025", "fps": 4.0, "retention_ratio": 0.25, "backend": "flashvid", "base_url": "http://127.0.0.1:8102/v1"},
+      {"id": "D", "model": "Qwen3.5-4B-FlashVID-r100", "fps": 4.0, "retention_ratio": 1.0, "backend": "native_bypass", "base_url": "http://127.0.0.1:8104/v1"}
     ]
   },
   "flashvid_runtime": "/data02/usr/wangqihao/Demo/test/flashvid",
