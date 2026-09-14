@@ -683,6 +683,7 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
                   "diagnosis": browse["comparison"]["diagnostic_attribution"]}
     else:
         from src.perception.omni_pool import OmniProcessPool
+        from src.agentic_video.target_v7 import V7Blocked
 
         reference_task = json.loads((output / "reference_task.json").read_text(
             encoding="utf-8"))
@@ -692,21 +693,47 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
                                  "browse_results.json").read_text(encoding="utf-8"))
                 for arm in ("A", "B", "C", "D")}
         oracle = json.loads(oracle_path.read_text(encoding="utf-8"))
+        automatic_result = None
+        automatic_failure = None
+        oracle_result = None
+        oracle_failure = None
         with OmniProcessPool(
                 _v7_omni_pairs(spec, args), cfg.perception.get("omni") or {},
                 ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
                 response_timeout_s=args.worker_timeout) as runner:
-            automatic_bank = verify_target_evidence(
-                cfg, spec, output / "agent", runner=runner,
-                source_video=source, browse_arms=arms, target_album=album)
-            plan = build_reference_driven_edit_plan(reference_task, automatic_bank)
-            (output / "edit_plan.json").write_text(
-                json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-            if not plan.get("passed"):
-                raise RuntimeError(f"automatic V7 plan blocked: {plan.get('missing_goals')}")
-            automatic_result = finalize_target_microcut(
-                cfg, plan, output, source_video=source, bgm_path=bgm,
-                runner=runner, force=args.force)
+            try:
+                automatic_bank = verify_target_evidence(
+                    cfg, spec, output / "agent", runner=runner,
+                    source_video=source, browse_arms=arms, target_album=album)
+                plan = build_reference_driven_edit_plan(reference_task, automatic_bank)
+                (output / "edit_plan.json").write_text(
+                    json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+                if plan.get("passed"):
+                    automatic_result = finalize_target_microcut(
+                        cfg, plan, output, source_video=source, bgm_path=bgm,
+                        runner=runner, force=args.force)
+                else:
+                    automatic_failure = {
+                        "failure_class": plan.get("failure_class", "verification"),
+                        "failure_stage": plan.get("failure_stage", "planning"),
+                        "reason_code": plan.get("reason_code", "automatic_plan_blocked"),
+                        "detail": str(plan.get("missing_goals") or ""),
+                    }
+            except V7Blocked as exc:
+                automatic_failure = {
+                    "failure_class": ("content" if exc.failure_stage == "browsing"
+                                      else "verification"),
+                    "failure_stage": exc.failure_stage,
+                    "reason_code": exc.reason_code,
+                    "detail": str(exc),
+                }
+                blocked_plan = {
+                    "schema_version": "reference_driven_edit_plan_v1",
+                    "passed": False, **automatic_failure, "segments": [],
+                }
+                (output / "edit_plan.json").write_text(
+                    json.dumps(blocked_plan, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
             oracle_bank = oracle_evidence_bank(oracle, source)
             oracle_dir = output / "arms" / "oracle"
             oracle_dir.mkdir(parents=True, exist_ok=True)
@@ -715,9 +742,22 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
             oracle_plan = build_reference_driven_edit_plan(reference_task, oracle_bank)
             (oracle_dir / "edit_plan.json").write_text(
                 json.dumps(oracle_plan, ensure_ascii=False, indent=2), encoding="utf-8")
-            oracle_result = finalize_target_microcut(
-                cfg, oracle_plan, oracle_dir, source_video=source, bgm_path=bgm,
-                runner=runner, force=args.force)
+            if oracle_plan.get("passed"):
+                oracle_result = finalize_target_microcut(
+                    cfg, oracle_plan, oracle_dir, source_video=source, bgm_path=bgm,
+                    runner=runner, force=args.force)
+            else:
+                oracle_failure = {
+                    "failure_class": oracle_plan.get("failure_class", "verification"),
+                    "failure_stage": oracle_plan.get("failure_stage", "planning"),
+                    "reason_code": oracle_plan.get("reason_code", "oracle_plan_blocked"),
+                    "detail": str(oracle_plan.get("missing_goals") or ""),
+                }
+                (oracle_dir / "acceptance.json").write_text(json.dumps({
+                    "schema_version": "v7_acceptance_v1",
+                    "automated_passed": False, "human_passed": None,
+                    "passed": False, "delivery": "blocked", **oracle_failure,
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
         comparison = json.loads((output / "browse" / "arm_comparison.json").read_text(
             encoding="utf-8"))
         identity_audit = evaluate_target_album(album, oracle)
@@ -726,8 +766,40 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
         best_hits = max(int(row.get("candidate_temporal_hits") or 0)
                         for row in comparison["metrics"].values())
         browse_failures = sum(len(row.get("failures") or []) for row in arms.values())
-        automatic_passed = bool(automatic_result["acceptance"]["automated_passed"])
-        oracle_passed = bool(oracle_result["acceptance"]["automated_passed"])
+        automatic_passed = bool(automatic_result and
+                                automatic_result["acceptance"]["automated_passed"])
+        oracle_passed = bool(oracle_result and
+                             oracle_result["acceptance"]["automated_passed"])
+        if identity_audit["hard_negative_false_merges"]:
+            first_failure = ("identity", "heldout_hard_negative_false_merge")
+        elif best_hits < 4:
+            first_failure = ("browsing", "browse_gt_recall_below_threshold")
+        elif automatic_failure:
+            first_failure = (automatic_failure["failure_stage"],
+                             automatic_failure["reason_code"])
+        elif not oracle_passed:
+            first_failure = ((oracle_failure or {}).get("failure_stage", "blind"),
+                             (oracle_failure or {}).get("reason_code",
+                                                        "oracle_control_failed"))
+        else:
+            first_failure = ("acceptance", "v7_automatic_acceptance_failed")
+        module_diagnosis = {
+            "schema_version": "v7_module_diagnosis_v1",
+            "first_failure_stage": first_failure[0],
+            "reason_code": first_failure[1],
+            "automatic_failure": automatic_failure,
+            "oracle_failure": oracle_failure,
+            "identity_audit": identity_audit,
+            "browse_gt_hits_best_arm": best_hits,
+            "automatic_plan_blind_passed": automatic_passed,
+            "oracle_plan_blind_passed": oracle_passed,
+            "oracle_executed_despite_automatic_block": True,
+        }
+        metrics_dir = output / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        (metrics_dir / "module_diagnosis.json").write_text(
+            json.dumps(module_diagnosis, ensure_ascii=False, indent=2),
+            encoding="utf-8")
         top = {
             "schema_version": "v7_acceptance_v1",
             "automated_passed": (automatic_passed and oracle_passed and best_hits >= 4 and
@@ -743,8 +815,11 @@ def _evidence_v7_target_impl(args, cfg) -> dict:
             "oracle_plan_blind_passed": oracle_passed,
         }
         if not top["automated_passed"]:
-            top.update({"failure_class": "verification", "failure_stage": "acceptance",
-                        "reason_code": "v7_automatic_acceptance_failed"})
+            top.update({"failure_class": "verification",
+                        "failure_stage": first_failure[0],
+                        "reason_code": first_failure[1],
+                        "automatic_failure": automatic_failure,
+                        "oracle_failure": oracle_failure})
         (output / "acceptance.json").write_text(
             json.dumps(top, ensure_ascii=False, indent=2), encoding="utf-8")
         (output / "rendered.mp4").unlink(missing_ok=True)

@@ -121,14 +121,26 @@ class FlashVIDClient:
             raise ValueError("V7 services accept at most four images")
         video = Path(video_path).resolve()
         frames = self.requested_frames(duration_s, self.endpoint.fps)
+        # Keep the transport video first.  In the initial V7 machine run the
+        # album images preceded the video, and Qwen assigned 0..1 second
+        # intervals to those timeless references.  Interleaved labels make
+        # the temporal ownership explicit without changing FlashVID itself.
         content = [
-            {"type": "image_url", "image_url": {"url": path.as_uri()}}
-            for path in images
-        ]
-        content.extend([
+            {"type": "text", "text": (
+                "SOURCE WINDOW follows. Candidate timestamps and observations "
+                "must come only from this video.")},
             {"type": "video_url", "video_url": {"url": video.as_uri()}},
-            {"type": "text", "text": prompt},
-        ])
+        ]
+        if images:
+            content.append({"type": "text", "text": (
+                "IDENTITY ALBUM follows. These still images have no timeline, "
+                "must never be reported as source-window candidates, and are "
+                "provided only to recognize S0.")})
+            content.extend(
+                {"type": "image_url", "image_url": {"url": path.as_uri()}}
+                for path in images
+            )
+        content.append({"type": "text", "text": prompt})
         payload = {
             "model": self.endpoint.model,
             "messages": [{"role": "user", "content": content}],
@@ -158,6 +170,8 @@ class FlashVIDClient:
             "do_sample_frames": False,
             "image_count": len(images),
             "video_count": 1,
+            "media_order": ["source_video", "identity_album", "prompt"],
+            "candidate_time_owner": "source_video_only",
             "transport_clip": str(video),
             "transport_clip_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
             "request_sha256": request_sha,

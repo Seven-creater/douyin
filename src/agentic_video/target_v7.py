@@ -31,6 +31,11 @@ ALLOWED_BROWSE_RELATIONS = {
     "not_observed",
 }
 REQUIRED_GOALS = ("adversity", "agency", "outcome")
+GOAL_DEFINITIONS = {
+    "adversity": "visible limitation, pressure, injury, danger, or setback around S0",
+    "agency": "S0 visibly initiates an action, recovery, decision, or counter-move",
+    "outcome": "a visible consequence or result linked to S0 by the reference section",
+}
 ARM_CONTRACT = {
     "A": {"fps": 2.0, "retention_ratio": 0.10, "backend": "flashvid"},
     "B": {"fps": 4.0, "retention_ratio": 0.10, "backend": "flashvid"},
@@ -220,8 +225,13 @@ def prepare_reference_task(cfg: AppConfig, experiment_spec: dict[str, Any],
     prompt = (
         "Analyze this short reference video at full semantic fidelity. Do not infer cut "
         "times: deterministic shot rows are supplied below. Explain the actual editing "
-        "sections and which evidence goals each section serves. Do not invent a fixed "
-        "four-slot grammar. Return JSON only as {\"perception_center\":{\"kind\":"
+        "sections and which evidence goals each section serves. Allowed goal_ids are "
+        "exactly adversity (limitation/pressure/setback), agency (the subject visibly "
+        "acts or demonstrates capability), and outcome (visible consequence, result, "
+        "achievement, or changed state). Use no synonyms such as resilience. Assign "
+        "each of these three required goals to at least one actual section when the "
+        "reference supports it. Do not invent a fixed four-slot grammar. Return JSON "
+        "only as {\"perception_center\":{\"kind\":"
         "\"subject\",\"target_id\":\"S0\"},\"edit_sections\":[{\"id\":\"...\","
         "\"shot_indices\":[0],\"purpose\":\"...\",\"goal_ids\":[\"adversity\"]}]} .\n"
         f"Deterministic shots: {json.dumps(detected['shots'], ensure_ascii=False)}"
@@ -249,13 +259,21 @@ def prepare_reference_task(cfg: AppConfig, experiment_spec: dict[str, Any],
         })
     if not sections:
         raise V7Blocked("reference", "reference_sections_not_observed")
+    mapped_goals = {goal for row in sections for goal in row["goal_ids"]}
+    missing_goals = [goal for goal in REQUIRED_GOALS if goal not in mapped_goals]
+    if missing_goals:
+        raise V7Blocked(
+            "reference", "reference_required_goal_unmapped", ",".join(missing_goals))
     durations = [float(row["duration_s"]) for row in shots]
     result = {
         "schema_version": "reference_task_v2",
         "reference_video": str(reference),
         "reference_sha256": sha256_file(reference),
         "perception_center": {"kind": "subject", "target_id": "S0"},
-        "evidence_goals": [{"id": goal, "required": True} for goal in REQUIRED_GOALS],
+        "evidence_goals": [
+            {"id": goal, "required": True, "definition": GOAL_DEFINITIONS[goal]}
+            for goal in REQUIRED_GOALS
+        ],
         "consistency_rules": {
             "adversity_and_agency_require_target_visible": True,
             "outcome_requires_verified_relation": True,
@@ -670,9 +688,13 @@ def _normalize_candidates(payload: dict[str, Any], *, arm: str, window_id: str,
 def _browse_prompt(reference_task: dict[str, Any]) -> str:
     goals = [row["id"] for row in reference_task.get("evidence_goals") or []]
     return (
-        "Browse this source window around the frozen visual subject S0 shown in the album "
-        "images. Report at most three candidate regions, not final evidence. "
-        f"Evidence goals: {goals}. The relation field must be one of target_direct, "
+        "Browse only the SOURCE WINDOW video around the frozen visual subject S0. "
+        "The later IDENTITY ALBUM still images are timeless recognition references: "
+        "never describe them as candidates and never assign them a relative time. "
+        "Report at most three source-video candidate regions, not final evidence. "
+        f"Evidence goals: {goals}. Definitions: "
+        f"{json.dumps(GOAL_DEFINITIONS, ensure_ascii=False)}. The relation field must "
+        "be one of target_direct, "
         "related_interaction, possible_outcome, uncertain, not_observed. not_observed "
         "means this sampling did not see it and never means absent. Times are relative to "
         "this transport clip. Return JSON only: {\"candidates\":[{\"relative_interval\":"
@@ -809,8 +831,14 @@ def compare_browse_arms(arms: Mapping[str, dict[str, Any]], *,
                 right["observation_interval"], left["observation_interval"], 0.5)
                 for right in candidates[index + 1:])
         usage = [audit.get("usage") or {} for audit in row.get("request_audits") or []]
-        visual_tokens = sum(int((value.get("prompt_tokens_details") or {}).get(
-            "video_tokens", value.get("visual_tokens", 0)) or 0) for value in usage)
+        prompt_tokens = sum(int(value.get("prompt_tokens") or 0) for value in usage)
+        visual_values = []
+        for value in usage:
+            details = value.get("prompt_tokens_details") or {}
+            visual = details.get("video_tokens", value.get("visual_tokens"))
+            if visual is not None:
+                visual_values.append(int(visual))
+        visual_tokens = sum(visual_values) if len(visual_values) == len(usage) else None
         s0_facts = [fact for fact in facts if fact.get("subject_track_id")]
         s0_hits = sum(any(
             _interval_hit(candidate["observation_interval"], fact["core_interval"])
@@ -824,7 +852,10 @@ def compare_browse_arms(arms: Mapping[str, dict[str, Any]], *,
             "candidate_count": len(candidates),
             "duplicate_candidate_rate": round(
                 duplicate_pairs / max(1, len(candidates)), 6),
+            "prompt_tokens": prompt_tokens,
             "visual_tokens": visual_tokens,
+            "visual_token_audit_status": ("available" if visual_tokens is not None
+                                           else "unavailable_from_server"),
             "latency_s": round(sum(float(audit.get("latency_s", 0))
                                    for audit in row.get("request_audits") or []), 6),
             "failure_rate": round(len(row.get("failures") or []) /

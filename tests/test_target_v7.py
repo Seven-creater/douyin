@@ -94,7 +94,9 @@ def test_browse_metrics_accept_null_prompt_token_details() -> None:
         for arm in ("A", "B", "C", "D")
     }
     result = compare_browse_arms(arms, oracle={"facts": []})
-    assert all(row["visual_tokens"] == 0 for row in result["metrics"].values())
+    assert all(row["visual_tokens"] is None for row in result["metrics"].values())
+    assert all(row["visual_token_audit_status"] == "unavailable_from_server"
+               for row in result["metrics"].values())
 
 
 def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path: Path) -> None:
@@ -119,10 +121,14 @@ def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path:
     answer = client.watch(video, "prompt", duration_s=6, image_paths=paths)
     content = captured["messages"][0]["content"]
     assert [row["type"] for row in content] == [
-        "image_url", "image_url", "image_url", "image_url", "video_url", "text"]
+        "text", "video_url", "text", "image_url", "image_url", "image_url",
+        "image_url", "text"]
+    assert "SOURCE WINDOW" in content[0]["text"]
+    assert "IDENTITY ALBUM" in content[2]["text"]
     assert captured["mm_processor_kwargs"] == {"do_sample_frames": False}
     assert captured["media_io_kwargs"]["video"] == {"num_frames": 24, "fps": -1}
     assert answer.request_audit["image_count"] == 4
+    assert answer.request_audit["candidate_time_owner"] == "source_video_only"
 
 
 def test_openai_transport_preserves_file_uri_for_vllm() -> None:
@@ -295,7 +301,8 @@ def test_reference_task_uses_native_semantics_and_deterministic_times(
             assert "deterministic" in prompt.lower()
             return SimpleNamespace(text=json.dumps({
                 "edit_sections": [{"id": "actual", "shot_indices": [0, 1],
-                                   "purpose": "measured", "goal_ids": ["agency"]}]}),
+                                   "purpose": "measured", "goal_ids": [
+                                       "adversity", "agency", "outcome"]}]}),
                                    request_audit={"backend": "native_bypass"})
 
     task = prepare_reference_task(
