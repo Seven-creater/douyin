@@ -181,6 +181,16 @@ def test_coverage_parser_wraps_bare_array_but_keeps_interval_contract() -> None:
         }]}, block_id="b", start_s=0, end_s=45)
 
 
+def test_coverage_event_cannot_reference_missing_occurrence() -> None:
+    with pytest.raises(v8.V8Blocked, match="event_patient_missing_occurrence"):
+        v8._normalize_coverage_response({"regions": [{
+            "interval": [0, 3], "worth_rewatch": True,
+            "occurrences": [{"local_id": "A", "visual_state": "raises arm"}],
+            "event_candidates": [{"actor_local_id": "A", "action": "strikes",
+                                  "patient_local_id": "B"}],
+        }]}, block_id="b", start_s=0, end_s=45)
+
+
 def test_occurrence_bank_deduplicates_without_identity_and_leads_are_not_truth(
         tmp_path: Path) -> None:
     occurrence = {"occurrence_id": "occ_A", "source_interval": [1, 2],

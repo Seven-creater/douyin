@@ -297,9 +297,13 @@ appearance only","visual_state":"visible state/activity","roi":null}],
 "event_candidates":[{"actor_local_id":"A","action":"visible action",
 "patient_local_id":null,"visible_result":"visible change or empty"}]}]}
 Times are seconds relative to this block. First inspect the full 45-second input, then
-select at most three non-overlapping regions. Every interval must be 2-6 seconds; do not
-split the timeline into fixed bins. For a longer action, return the tightest 6-second
+evaluate its early [0,15), middle [15,30), and late [30,45] thirds independently.
+Select at most one strongest qualifying region per third. Every interval must be 2-6
+seconds; do not split the timeline into fixed bins. For a longer action, return the tightest 6-second
 excerpt containing its clearest state change and set "temporal_refinement_needed":true.
+Every actor_local_id and non-null patient_local_id used by an event must have its own
+entry in that same region's occurrences list; never group multiple visible subjects into
+one occurrence.
 Every returned region must have worth_rewatch=true. If nothing merits rewatch return
 {"regions":[]}. Not observed never means absent."""
 
@@ -380,9 +384,12 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
             if not isinstance(raw, dict):
                 continue
             actor = local_to_global.get(str(raw.get("actor_local_id") or ""))
-            patient = local_to_global.get(str(raw.get("patient_local_id") or ""))
+            patient_local_id = str(raw.get("patient_local_id") or "")
+            patient = local_to_global.get(patient_local_id)
             if not actor:
-                continue
+                raise V8Blocked("coverage", "event_actor_missing_occurrence")
+            if patient_local_id and not patient:
+                raise V8Blocked("coverage", "event_patient_missing_occurrence")
             event_candidates.append({
                 "event_candidate_id": f"candidate_{block_id}_{region_index:02d}_{event_index:02d}",
                 "source_interval": absolute,
