@@ -942,14 +942,16 @@ def _v8_omni_pairs(spec: dict, args) -> str:
 
 def _character_batch_impl(args, cfg) -> dict:
     from src.agentic_video.character_batch import (
-        bind_occurrence_identities,
+        V8Blocked, bind_occurrence_identities,
         build_character_creation_queue, build_character_profiles,
         build_external_character_prior, build_mention_index,
+        build_investigation_leads, build_occurrence_bank_from_leads,
         build_seed_review_sheet, build_uniform_coverage_map,
         derive_character_evidence_views, read_v8_spec, run_character_batch,
         verify_shared_event_facts,
     )
     from src.agentic_video.recipe_v2 import sha256_file
+    from src.agentic_video.target_v7 import collect_flashvid_runtime
 
     spec_path = _v8_path(args.spec)
     spec, spec_sha = read_v8_spec(spec_path)
@@ -957,6 +959,8 @@ def _character_batch_impl(args, cfg) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     source = _v8_path(args.video or spec["source_video"])
     bgm = _v8_path(spec["bgm_path"])
+    transcript_path = _v8_path(spec["transcript_path"])
+    reference = _v8_path(spec["reference_video"])
     manifest_path = output / "run_manifest.json"
     previous = (json.loads(manifest_path.read_text(encoding="utf-8"))
                 if manifest_path.is_file() else {})
@@ -973,6 +977,16 @@ def _character_batch_impl(args, cfg) -> dict:
         "fixed_characters": [row["character_id"] for row in spec["characters"]],
         "automatic_character_selection_claimed": False,
         "no_yolo_tracker_reid": True,
+        "custom_flashvid_port": True,
+        "base_model": "Qwen3.5-4B",
+        "flashvid_official_support_claimed": False,
+        "flashvid_runtime": collect_flashvid_runtime(Path(spec["flashvid_runtime"])),
+        "transcript_path": str(transcript_path),
+        "transcript_sha256": sha256_file(transcript_path),
+        "reference_video": str(reference),
+        "reference_sha256": sha256_file(reference),
+        "bgm_path": str(bgm),
+        "bgm_sha256": sha256_file(bgm),
         "phases": dict(previous.get("phases") or {}),
     }
     # Persist the expensive source hash before phase work so a late failure can resume.
@@ -980,7 +994,6 @@ def _character_batch_impl(args, cfg) -> dict:
                              encoding="utf-8")
     if args.phase == "bootstrap":
         prior = build_external_character_prior(spec, output / "external_prior")
-        transcript_path = _v8_path(spec["transcript_path"])
         raw_transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
         transcript_rows = (raw_transcript.get("segments") or
                            raw_transcript.get("utterances") or []) \
@@ -1039,10 +1052,23 @@ def _character_batch_impl(args, cfg) -> dict:
             if args.phase == "identity":
                 if not args.seed_manifest:
                     raise ValueError("V8 identity requires --seed-manifest")
+                coverage_manifest = json.loads((output / "coverage" /
+                    "coverage_manifest.json").read_text(encoding="utf-8"))
+                if not coverage_manifest.get("complete"):
+                    raise V8Blocked("coverage", "uniform_coverage_incomplete")
                 seed_manifest = json.loads(
                     Path(args.seed_manifest).read_text(encoding="utf-8"))
                 profiles = build_character_profiles(
                     cfg, spec, seed_manifest, output / "character_profiles",
+                    source_video=source, runner=runner)
+                coverage_candidates_path = output / "coverage" / "event_candidates.jsonl"
+                if not coverage_candidates_path.is_file():
+                    coverage_candidates_path = output / "event_candidates.jsonl"
+                mentions = _read_jsonl(output / "mention_index.jsonl")
+                coverage_candidates = _read_jsonl(coverage_candidates_path)
+                leads = build_investigation_leads(mentions, coverage_candidates)
+                occurrence_manifest = build_occurrence_bank_from_leads(
+                    cfg, spec, leads, output / "occurrence_observation",
                     source_video=source, runner=runner)
                 occurrences = _read_jsonl(output / "occurrence_bank.jsonl")
                 bindings = bind_occurrence_identities(
@@ -1050,6 +1076,9 @@ def _character_batch_impl(args, cfg) -> dict:
                     source_video=source, runner=runner)
                 result = {
                     "usable_forms": profiles["usable_form_count"],
+                    "neutral_observations": occurrence_manifest["observation_count"],
+                    "neutral_observation_failures": occurrence_manifest[
+                        "failed_observation_count"],
                     **bindings["metrics"],
                 }
             elif args.phase == "events":

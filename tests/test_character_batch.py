@@ -129,7 +129,8 @@ def test_cache_invalidation_preserves_independent_visual_facts() -> None:
 
 
 def test_neutral_prompts_do_not_receive_names_or_editorial_functions() -> None:
-    text = (v8.NEUTRAL_COVERAGE_PROMPT + v8.NEUTRAL_EVENT_PROMPT).lower()
+    text = (v8.NEUTRAL_COVERAGE_PROMPT + v8.NEUTRAL_OCCURRENCE_PROMPT
+            + v8.NEUTRAL_EVENT_PROMPT).lower()
     for forbidden in ("小黑", "无限", "风息", "char:xiaohei", "adversity",
                       "agency", "outcome"):
         assert forbidden not in text
@@ -278,6 +279,100 @@ def test_coverage_stages_transport_inside_service_allowlist(tmp_path: Path,
     assert not client.request_path.exists()
     assert clip.is_file()
     assert block["sampling_audit_status"] == "verified_transport_frames"
+    assert (tmp_path / "coverage" / "occurrence_candidates.jsonl").is_file()
+    assert not (tmp_path / "occurrence_bank.jsonl").exists()
+
+
+def test_coverage_retries_one_model_contract_failure(tmp_path: Path,
+                                                      monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"transport")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 10.0)
+    monkeypatch.setattr(v8.common, "run_ffprobe_json", lambda *_: {"streams": []})
+    monkeypatch.setattr(v8, "_build_coverage_transport", lambda *_args, **_kwargs: (
+        clip, {"actual_frame_count": 20, "sampling_verified": True}))
+
+    class Client:
+        calls = 0
+
+        def watch(self, _video, prompt, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                text = ""
+            else:
+                assert "CONTRACT RETRY" in prompt
+                text = json.dumps({"regions": []})
+            return SimpleNamespace(text=text, raw={},
+                request_audit={"requested_frames": 20})
+
+    client = Client()
+    spec = _spec()
+    spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
+    result = v8.build_uniform_coverage_map(
+        cfg, spec, tmp_path / "coverage", client=client, source_video=source,
+        source_sha256="x")
+    block = result["blocks"][0]
+    assert block["status"] == "covered"
+    assert client.calls == 2
+    assert len(block["response_attempts"]) == 2
+    assert block["response_attempts"][0]["validation_error"]
+    assert block["response_attempts"][1]["validation_error"] is None
+
+
+def test_occurrence_rewatch_replaces_coarse_group_with_local_subjects(
+        tmp_path: Path, monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 20.0)
+
+    class Runner:
+        def watch_many(self, requests):
+            assert len(requests) == 1
+            assert "小黑" not in requests[0]["prompt"]
+            return [SimpleNamespace(text=json.dumps({
+                "occurrences": [
+                    {"local_id": "A", "visible_interval": [0, 3],
+                     "local_description": "small light subject",
+                     "visual_state": "raises an arm"},
+                    {"local_id": "B", "visible_interval": [0, 3],
+                     "local_description": "tall dark subject",
+                     "visual_state": "moves backward"},
+                ],
+                "event_candidates": [{"interval": [1, 2.5],
+                    "actor_local_id": "A", "action": "strikes",
+                    "patient_local_id": "B", "visible_result": "B moves back"}],
+                "passed": True,
+            }), sampling={"sampling_verified": True}, gpu_pair="0,1")]
+
+    leads = [{"source_interval": [5, 7], "lead_kind": "coverage",
+              "lead_id": "coarse_group"}]
+    result = v8.build_occurrence_bank_from_leads(
+        cfg, _spec(), leads, tmp_path / "observations", source_video=source,
+        runner=Runner())
+    occurrence_rows = [json.loads(line) for line in (
+        tmp_path / "occurrence_bank.jsonl").read_text().splitlines()]
+    event_rows = [json.loads(line) for line in (
+        tmp_path / "event_candidates.jsonl").read_text().splitlines()]
+    assert result["occurrence_count"] == 2
+    assert {row["local_description"] for row in occurrence_rows} == {
+        "small light subject", "tall dark subject"}
+    assert event_rows[0]["actor_occurrence_id"] != event_rows[0][
+        "patient_occurrence_id"]
+    assert all("character_id" not in json.dumps(row) for row in occurrence_rows)
+
+
+def test_investigation_windows_merge_near_duplicate_leads() -> None:
+    rows = v8.investigation_windows([
+        {"source_interval": [10, 12], "lead_kind": "asr", "lead_id": "a"},
+        {"source_interval": [10.2, 12.2], "lead_kind": "coverage", "lead_id": "b"},
+    ], duration_s=100, window_s=6)
+    assert len(rows) == 1
+    assert len(rows[0]["lead_refs"]) == 2
+    assert rows[0]["source_interval"][1] - rows[0]["source_interval"][0] == 6
 
 
 def test_profile_uses_all_directed_pairs_and_no_confidence(tmp_path: Path,
