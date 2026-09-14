@@ -12,6 +12,8 @@ import hashlib
 import itertools
 import json
 import re
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -393,6 +395,46 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
     jobs = []
     ffmpeg = cfg.perception.get("ffmpeg_bin", "ffmpeg")
 
+    def stage_for_service(clip: Path, block_id: str) -> tuple[Path, dict[str, Any]]:
+        """Copy one transport clip into the server's explicit media allow-list.
+
+        The copy is request-scoped and removed after the synchronous response.  The
+        repository copy remains the durable audit artifact.
+        """
+        configured_root = str((coverage.get("endpoint") or {}).get("media_root") or "").strip()
+        clip_digest = sha256_file(clip)
+        if not configured_root:
+            return clip, {
+                "staged": False,
+                "source_transport_clip": str(clip),
+                "source_transport_clip_sha256": clip_digest,
+                "request_transport_clip": str(clip),
+                "request_transport_clip_sha256": clip_digest,
+            }
+        media_root = Path(configured_root).resolve()
+        media_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+                prefix=f"v8_coverage_{block_id}_", suffix=".mp4",
+                dir=media_root, delete=False) as handle:
+            staged = Path(handle.name)
+        try:
+            staged.resolve().relative_to(media_root)
+            shutil.copy2(clip, staged)
+            staged_digest = sha256_file(staged)
+            if staged_digest != clip_digest:
+                raise V8Blocked("coverage", "media_staging_hash_mismatch", block_id)
+        except Exception:
+            staged.unlink(missing_ok=True)
+            raise
+        return staged, {
+            "staged": True,
+            "media_root": str(media_root),
+            "source_transport_clip": str(clip),
+            "source_transport_clip_sha256": clip_digest,
+            "request_transport_clip": str(staged),
+            "request_transport_clip_sha256": staged_digest,
+        }
+
     def run_one(block_id: str, start: float, end: float) -> dict[str, Any]:
         block_dir = output_dir / "blocks" / block_id
         result_path = block_dir / "result.json"
@@ -404,9 +446,14 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
         clip = cut_clip(
             ffmpeg, Path(source_video), block_dir / "transport",
             start_s=start, end_s=end)
-        answer = client.watch(
-            clip, NEUTRAL_COVERAGE_PROMPT, duration_s=end - start,
-            image_paths=None, max_tokens=768)
+        request_clip, media_transport_audit = stage_for_service(clip, block_id)
+        try:
+            answer = client.watch(
+                request_clip, NEUTRAL_COVERAGE_PROMPT, duration_s=end - start,
+                image_paths=None, max_tokens=768)
+        finally:
+            if request_clip != clip:
+                request_clip.unlink(missing_ok=True)
         raw = _parse_object(answer.text)
         forbidden_terms = {
             str(value).strip().lower()
@@ -436,6 +483,7 @@ def build_uniform_coverage_map(cfg: AppConfig, spec: dict[str, Any], output_dir:
             "occurrences": occurrences,
             "event_candidates": events,
             "request_audit": answer.request_audit,
+            "media_transport_audit": media_transport_audit,
             "sampling_audit": sampling,
             "sampling_audit_status": "available" if sampling else "unavailable_from_server",
             "raw_response": answer.text,

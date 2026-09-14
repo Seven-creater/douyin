@@ -196,6 +196,45 @@ def test_coverage_rejects_character_name_in_neutral_response(tmp_path: Path,
     assert result["blocks"][0]["status"] == "failed"
 
 
+def test_coverage_stages_transport_inside_service_allowlist(tmp_path: Path,
+                                                             monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"transport-media")
+    media_root = tmp_path / "service-media"
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 10.0)
+    monkeypatch.setattr(v8, "cut_clip", lambda *_args, **_kwargs: clip)
+
+    class Client:
+        request_path = None
+
+        def watch(self, video, *_args, **_kwargs):
+            self.request_path = Path(video)
+            assert self.request_path.parent == media_root.resolve()
+            assert self.request_path.read_bytes() == clip.read_bytes()
+            return SimpleNamespace(
+                text=json.dumps({"regions": []}), raw={},
+                request_audit={"transport_clip": str(video)})
+
+    client = Client()
+    spec = _spec()
+    spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
+    spec["coverage"]["endpoint"] = {"media_root": str(media_root)}
+    result = v8.build_uniform_coverage_map(
+        cfg, spec, tmp_path / "coverage", client=client, source_video=source,
+        source_sha256="x")
+    block = result["blocks"][0]
+    assert block["status"] == "covered"
+    audit = block["media_transport_audit"]
+    assert audit["staged"] is True
+    assert audit["source_transport_clip_sha256"] == audit["request_transport_clip_sha256"]
+    assert client.request_path is not None
+    assert not client.request_path.exists()
+    assert clip.is_file()
+
+
 def test_profile_uses_all_directed_pairs_and_no_confidence(tmp_path: Path,
                                                            monkeypatch) -> None:
     cfg = load_config()

@@ -107,7 +107,8 @@
     "endpoint": {
       "model": "Qwen3.5-4B-FlashVID-r010",
       "base_url": "http://127.0.0.1:8101/v1",
-      "backend": "flashvid"
+      "backend": "flashvid",
+      "media_root": "/dev/shm/flashvid_perception"
     }
   },
   "targeted_escalation": {
