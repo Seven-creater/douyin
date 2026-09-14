@@ -18,7 +18,11 @@ from src.agentic_video.target_v7 import (
     transport_windows, validate_album_consistency, verify_target_evidence,
 )
 from src.config import load_config
-from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
+from src.perception.flashvid_client import (
+    FlashVIDClient,
+    FlashVIDEndpoint,
+    OpenAICompatibleClient,
+)
 
 
 def _candidate(candidate_id: str, arm: str, goal: str, start: float) -> dict:
@@ -107,6 +111,11 @@ def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path:
     assert captured["mm_processor_kwargs"] == {"do_sample_frames": False}
     assert captured["media_io_kwargs"]["video"] == {"num_frames": 24, "fps": -1}
     assert answer.request_audit["image_count"] == 4
+
+
+def test_openai_transport_preserves_file_uri_for_vllm() -> None:
+    transport = OpenAICompatibleClient("http://localhost/v1")
+    assert transport.local_file_urls_as_paths is False
 
 
 def test_transport_windows_cover_scope_with_only_transport_overlap() -> None:

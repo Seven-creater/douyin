@@ -4,10 +4,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
-from src.agentic_video.target_v7 import export_frame
-from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
-from src.perception.omni_runner import cut_clip
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.agentic_video.target_v7 import export_frame  # noqa: E402
+from src.perception.flashvid_client import (  # noqa: E402
+    FlashVIDClient,
+    FlashVIDEndpoint,
+)
+from src.perception.omni_runner import cut_clip  # noqa: E402
 
 
 def main() -> int:

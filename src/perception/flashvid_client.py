@@ -71,7 +71,7 @@ class OpenAICompatibleClient:
 
     def __init__(self, base_url: str, *, api_key: str = "no",
                  timeout_s: float = 900.0,
-                 local_file_urls_as_paths: bool = True):
+                 local_file_urls_as_paths: bool = False):
         self.endpoint = base_url.rstrip("/") + "/chat/completions"
         self.api_key = api_key
         self.timeout_s = float(timeout_s)
