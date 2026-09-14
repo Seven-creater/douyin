@@ -42,7 +42,8 @@ def set_visible_gpus(spec: str) -> None:
 
 
 def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
-             start_s: float, end_s: float, max_width: int = 1920) -> Path:
+             start_s: float, end_s: float, max_width: int = 1920,
+             include_audio: bool = True) -> Path:
     """切片段（重编码保证帧精确）；已存在且时长匹配则复用。
 
     分辨率策略（用户拍板 2026-09-11 晚：1K/1080p）：2160p 原生切片视觉 token
@@ -55,7 +56,7 @@ def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
         raise ValueError("clip_dir is required when start_s/end_s are provided")
     clip_dir = Path(clip_dir)
     clip_dir.mkdir(parents=True, exist_ok=True)
-    clip = clip_dir / "clip.mp4"
+    clip = clip_dir / ("clip.mp4" if include_audio else "clip_visual.mp4")
     if clip.exists():
         try:
             dur = common.video_duration_s("ffprobe", clip)
@@ -63,13 +64,17 @@ def cut_clip(ffmpeg_bin: str, video_path: Path, clip_dir: Path, *,
                 return clip
         except common.FFmpegError:
             pass
-    common.run_ffmpeg(ffmpeg_bin, [
+    command = [
         "-y", "-ss", f"{start_s}", "-to", f"{end_s}", "-i", str(video_path),
         "-vf", f"scale='min({max_width},iw)':-2",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-ac", "2", "-c:a", "aac", "-movflags", "+faststart",
-        str(clip),
-    ], timeout_s=300)
+    ]
+    if include_audio:
+        command.extend(["-ac", "2", "-c:a", "aac"])
+    else:
+        command.append("-an")
+    command.extend(["-movflags", "+faststart", str(clip)])
+    common.run_ffmpeg(ffmpeg_bin, command, timeout_s=300)
     return clip
 
 
@@ -149,7 +154,8 @@ class OmniRunner:
         }
 
     def _build_inputs(self, video_path: Path, prompt: str, *, fps: float | None = None,
-                      source_origin_s: float = 0.0):
+                      source_origin_s: float = 0.0,
+                      use_audio_in_video: bool = True):
         requested_fps = float(fps if fps is not None else self.cfg.get("fps", 2.0))
         conversation = [{
             "role": "user",
@@ -167,7 +173,9 @@ class OmniRunner:
             try:
                 from qwen_omni_utils import process_audio_info, process_vision_info
 
-                audios = process_audio_info(conversation, use_audio_in_video=True)
+                audios = (process_audio_info(
+                    conversation, use_audio_in_video=True)
+                    if use_audio_in_video else None)
                 images, video_records = process_vision_info(
                     conversation, return_video_metadata=True)
                 videos = []
@@ -188,7 +196,7 @@ class OmniRunner:
                 from qwen_omni_utils import process_mm_info
 
                 audios, images, videos = process_mm_info(
-                    conversation, use_audio_in_video=True)
+                    conversation, use_audio_in_video=use_audio_in_video)
                 processor_fps = requested_fps
                 self._last_sampling = {
                     "requested_fps": requested_fps,
@@ -198,20 +206,21 @@ class OmniRunner:
             text = self._processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
             inputs = self._processor(
                 text=text, audio=audios, images=images, videos=videos,
-                return_tensors="pt", padding=True, use_audio_in_video=True,
+                return_tensors="pt", padding=True,
+                use_audio_in_video=use_audio_in_video,
                 do_sample_frames=False, fps=processor_fps,
             )
         else:
             inputs = self._processor.apply_chat_template(
                 conversation,
-                load_audio_from_video=True,
+                load_audio_from_video=use_audio_in_video,
                 add_generation_prompt=True,
                 tokenize=True,
                 return_dict=True,
                 return_tensors="pt",
                 fps=requested_fps,
                 padding=True,
-                use_audio_in_video=True,
+                use_audio_in_video=use_audio_in_video,
             )
             self._last_sampling = {
                 "requested_fps": requested_fps,
@@ -295,19 +304,23 @@ class OmniRunner:
               start_s: float | None = None, end_s: float | None = None,
               clip_dir: Path | None = None, max_new_tokens: int | None = None,
               duration_s: float | None = None,
-              fps: float | None = None) -> OmniAnswer:
+              fps: float | None = None,
+              use_audio_in_video: bool = True) -> OmniAnswer:
         self.load()
         clip_path = None
         t_pre0 = time.time()
         if start_s is not None and end_s is not None:
-            clip_path = cut_clip(self.ffmpeg_bin, video_path, clip_dir, start_s=start_s, end_s=end_s)
+            clip_path = cut_clip(
+                self.ffmpeg_bin, video_path, clip_dir, start_s=start_s,
+                end_s=end_s, include_audio=use_audio_in_video)
             actual = clip_path
         else:
             actual = video_path
         requested_fps = float(fps if fps is not None else self.cfg.get("fps", 2.0))
         inputs = self._build_inputs(
             actual, prompt, fps=requested_fps,
-            source_origin_s=float(start_s or 0.0))
+            source_origin_s=float(start_s or 0.0),
+            use_audio_in_video=use_audio_in_video)
         input_build_s = time.time() - t_pre0
 
         frames_est = None
@@ -321,7 +334,8 @@ class OmniRunner:
                                "estimated": False}
 
         return self._generate(inputs, max_new_tokens=max_new_tokens,
-                              use_audio_in_video=True, frames_estimate=frames_est,
+                              use_audio_in_video=use_audio_in_video,
+                              frames_estimate=frames_est,
                               clip_path=clip_path, input_build_s=input_build_s)
 
     def inspect_media(self, image_paths: list[Path], prompt: str, *,

@@ -378,6 +378,7 @@ def test_occurrence_rewatch_replaces_coarse_group_with_local_subjects(
         def watch_many(self, requests):
             assert len(requests) == 1
             assert "小黑" not in requests[0]["prompt"]
+            assert requests[0]["kwargs"]["use_audio_in_video"] is False
             return [SimpleNamespace(text=json.dumps({
                 "occurrences": [
                     {"local_id": "A", "visible_interval": [0, 3],

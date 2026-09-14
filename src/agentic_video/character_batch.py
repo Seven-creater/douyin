@@ -981,6 +981,7 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
             NEUTRAL_OCCURRENCE_PROMPT.encode("utf-8")).hexdigest(),
         "fps": 12.0,
         "window_s": 6.0,
+        "use_audio_in_video": False,
     }
     contract_sha256 = _stable_sha(contract)
     forbidden_terms = {
@@ -1033,6 +1034,7 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
                 "fps": 12.0,
                 "duration_s": row["source_interval"][1] - row["source_interval"][0],
                 "max_new_tokens": 1536,
+                "use_audio_in_video": False,
             },
         } for row in batch]
         answers = runner.watch_many(requests)
@@ -1656,10 +1658,12 @@ def verify_shared_event_facts(cfg: AppConfig,
         event_id = f"film1_event_{event_index:04d}"
         event_dir = output_dir / event_id
         try:
-            clip = cut_clip(ffmpeg, source_video, event_dir / "source_clip",
-                            start_s=start_s, end_s=end_s)
+            clip = cut_clip(
+                ffmpeg, source_video, event_dir / "source_clip",
+                start_s=start_s, end_s=end_s, include_audio=False)
             answer = runner.watch(
-                clip, prompt, fps=12.0, duration_s=end_s - start_s, max_new_tokens=768)
+                clip, prompt, fps=12.0, duration_s=end_s - start_s,
+                max_new_tokens=768, use_audio_in_video=False)
             parsed = _parse_object(str(answer.text))
             if _contains_key_recursive(parsed, "character_id"):
                 raise V8Blocked("events", "event_fact_contains_character_id")
@@ -1696,7 +1700,8 @@ def verify_shared_event_facts(cfg: AppConfig,
                 relation_answer = runner.watch(
                     clip, NEUTRAL_RELATION_PROMPT + "\nLocal occurrence IDs: "
                     + json.dumps(occurrence_ids), fps=12.0,
-                    duration_s=end_s - start_s, max_new_tokens=512)
+                    duration_s=end_s - start_s, max_new_tokens=512,
+                    use_audio_in_video=False)
                 relation_payload = _parse_object(str(relation_answer.text))
                 if _contains_key_recursive(relation_payload, "character_id"):
                     raise V8Blocked("relation", "relation_contains_character_id")

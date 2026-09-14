@@ -1,6 +1,7 @@
 """omni 模块单测：prompt 小节解析、clip prompt、（无 torch 的）纯函数部分。"""
 from __future__ import annotations
 
+from src.perception import omni_runner
 from src.perception.omni_prompts import (
     BASELINE_PROMPT,
     build_clip_prompt,
@@ -69,3 +70,20 @@ def test_build_prompt_with_question():
 
 def test_build_prompt_without_question_is_baseline():
     assert build_prompt(None) == BASELINE_PROMPT
+
+
+def test_visual_only_clip_omits_audio(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_ffmpeg(_binary, args, **_kwargs):
+        captured["args"] = args
+
+    monkeypatch.setattr(omni_runner.common, "run_ffmpeg", fake_ffmpeg)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    result = omni_runner.cut_clip(
+        "ffmpeg", source, tmp_path / "clip", start_s=1.0, end_s=2.0,
+        include_audio=False)
+    assert result.name == "clip_visual.mp4"
+    assert "-an" in captured["args"]
+    assert "-c:a" not in captured["args"]
