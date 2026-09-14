@@ -16,7 +16,8 @@ from src.agentic_video.target_v7 import (
     diagnose_browse, evaluate_target_album, extract_native_frames, finalize_target_microcut,
     oracle_evidence_bank,
     prepare_reference_task, run_browse_escalation, run_browse_matrix,
-    transport_windows, validate_album_consistency, verify_target_evidence,
+    select_consistent_album_examples, transport_windows, validate_album_consistency,
+    verify_target_evidence,
 )
 from src.config import load_config
 from src.perception.flashvid_client import (
@@ -159,6 +160,37 @@ def test_album_contract_checks_all_directed_edges_without_confidence() -> None:
     checks = validate_album_consistency(positives, negatives, compare=compare)
     assert len(checks) == 12  # 3*2 positive directions + 3*1*2 negative directions
     assert all("confidence" not in row and "margin" not in row for row in checks)
+
+
+def test_album_selection_searches_past_asymmetric_proposal_labels() -> None:
+    seed = {"id": "seed", "source_time_s": 10.0}
+    candidates = [
+        {"id": "bad_first", "source_time_s": 8.0,
+         "candidate_class": "possible_same"},
+        {"id": "p1", "source_time_s": 12.0,
+         "candidate_class": "hard_negative"},
+        {"id": "p2", "source_time_s": 14.0,
+         "candidate_class": "uncertain"},
+        {"id": "n1", "source_time_s": 16.0,
+         "candidate_class": "possible_same"},
+    ]
+
+    def compare(left, right, _direction):
+        pair = (left["id"], right["id"])
+        if pair == ("seed", "bad_first"):
+            return "same"
+        if pair == ("bad_first", "seed"):
+            return "different"
+        if "n1" in pair:
+            return "different"
+        return "same"
+
+    positives, negatives, audit = select_consistent_album_examples(
+        seed, candidates, compare=compare)
+    assert [row["id"] for row in positives] == ["seed", "p2", "p1"]
+    assert [row["id"] for row in negatives] == ["n1"]
+    assert audit["passed"] is True
+    assert audit["positive_attempts"][0]["accepted"] is False
 
 
 def test_album_asymmetry_or_uncertainty_blocks_freeze() -> None:

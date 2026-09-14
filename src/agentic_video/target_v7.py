@@ -366,6 +366,94 @@ def validate_album_consistency(positives: list[dict[str, Any]],
     return checks
 
 
+def select_consistent_album_examples(
+        seed: dict[str, Any], candidates: list[dict[str, Any]], *,
+        compare: Callable[[Mapping[str, Any], Mapping[str, Any], str], str],
+        min_spacing_s: float = 1.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Find a directed-consistent positive clique and one hard negative.
+
+    The browse model's candidate class is only an ordering hint. Omni's
+    bidirectional identity decisions own the final positive/negative labels.
+    """
+    seed_time = float(seed["source_time_s"])
+    class_priority = {"possible_same": 0, "uncertain": 1, "hard_negative": 2}
+    ordered = sorted(
+        candidates,
+        key=lambda row: (
+            class_priority.get(str(row.get("candidate_class")), 1),
+            abs(float(row["source_time_s"]) - seed_time),
+            float(row["source_time_s"]),
+            str(row["id"]),
+        ),
+    )
+    audit: dict[str, Any] = {"candidate_class_is_hint_only": True,
+                             "positive_attempts": [], "negative_attempts": []}
+
+    def directed_pair(left: Mapping[str, Any], right: Mapping[str, Any],
+                      expected: str) -> tuple[bool, list[dict[str, str]]]:
+        rows = []
+        for first, second in ((left, right), (right, left)):
+            direction = f"{first['id']}__to__{second['id']}"
+            result = compare(first, second, direction)
+            rows.append({"left": str(first["id"]), "right": str(second["id"]),
+                         "expected": expected, "result": result})
+        return all(row["result"] == expected for row in rows), rows
+
+    positives = [seed]
+    for row in ordered:
+        if any(abs(float(row["source_time_s"]) - float(existing["source_time_s"])) <
+               min_spacing_s for existing in positives):
+            continue
+        attempt = {"candidate_id": row["id"], "source_time_s": row["source_time_s"],
+                   "proposal_class": row.get("candidate_class"), "checks": []}
+        accepted = True
+        for existing in positives:
+            passed, checks = directed_pair(existing, row, "same")
+            attempt["checks"].extend(checks)
+            if not passed:
+                accepted = False
+                break
+        attempt["accepted"] = accepted
+        audit["positive_attempts"].append(attempt)
+        if accepted:
+            positives.append(row)
+        if len(positives) == 3:
+            break
+
+    negatives: list[dict[str, Any]] = []
+    if len(positives) == 3:
+        positive_ids = {str(row["id"]) for row in positives}
+        negative_order = sorted(
+            (row for row in candidates if str(row["id"]) not in positive_ids),
+            key=lambda row: (
+                0 if row.get("candidate_class") == "hard_negative" else 1,
+                abs(float(row["source_time_s"]) - seed_time),
+                float(row["source_time_s"]),
+            ),
+        )
+        for row in negative_order:
+            attempt = {"candidate_id": row["id"],
+                       "source_time_s": row["source_time_s"],
+                       "proposal_class": row.get("candidate_class"), "checks": []}
+            accepted = True
+            for positive in positives:
+                passed, checks = directed_pair(positive, row, "different")
+                attempt["checks"].extend(checks)
+                if not passed:
+                    accepted = False
+                    break
+            attempt["accepted"] = accepted
+            audit["negative_attempts"].append(attempt)
+            if accepted:
+                negatives.append(row)
+                break
+    audit["selected_positive_ids"] = [str(row["id"]) for row in positives]
+    audit["selected_hard_negative_ids"] = [str(row["id"]) for row in negatives]
+    audit["passed"] = len(positives) == 3 and len(negatives) == 1
+    return positives, negatives, audit
+
+
 def evaluate_target_album(target_album: dict[str, Any], oracle: dict[str, Any]) \
         -> dict[str, Any]:
     """Post-hoc identity audit; held-out labels never enter album construction."""
@@ -422,7 +510,9 @@ def build_target_album(cfg: AppConfig, experiment_spec: dict[str, Any],
             "Find appearances that may show the same visual subject and visually "
             "confusable but different subjects. Do not use plot, action or story coverage. "
             "Report at most three representative candidates total; do not enumerate "
-            "sampling frames. If none are visible, return an empty candidates list. "
+            "sampling frames. Prefer distinct shots and timestamps at least one second "
+            "apart. ROI must tightly enclose one subject; use null when no useful crop "
+            "can be proposed. If none are visible, return an empty candidates list. "
             "Return JSON only: {\"candidates\":[{\"id\":\"...\","
             "\"relative_time_s\":0.0,\"candidate_class\":\"possible_same|hard_negative|"
             "uncertain\",\"roi\":[0,0,1,1]}]}."
@@ -480,35 +570,37 @@ def build_target_album(cfg: AppConfig, experiment_spec: dict[str, Any],
         full = export_frame(ffmpeg, source_video, timestamp,
                             frames_dir / f"{candidate_id}_full.jpg")
         crop = None
-        if proposal.get("roi") is not None:
-            crop = export_roi(ffmpeg, full, proposal["roi"],
-                              frames_dir / f"{candidate_id}_roi.jpg")
+        roi = proposal.get("roi")
+        if isinstance(roi, (list, tuple)) and len(roi) == 4:
+            try:
+                x0, y0, x1, y1 = map(float, roi)
+                area = (x1 - x0) * (y1 - y0)
+                if 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1 and area < 0.95:
+                    crop = export_roi(ffmpeg, full, roi,
+                                      frames_dir / f"{candidate_id}_roi.jpg")
+            except (TypeError, ValueError):
+                crop = None
         normalized.append({
             "id": candidate_id, "source_time_s": timestamp,
             "candidate_class": str(proposal.get("candidate_class") or "uncertain"),
             "full_frame": str(full), "roi_crop": str(crop) if crop else None,
         })
-    positive_candidates = [row for row in normalized
-                           if row["candidate_class"] == "possible_same"]
-    negatives = [row for row in normalized
-                 if row["candidate_class"] == "hard_negative"][:1]
-    selected_positive = []
-    for row in positive_candidates:
-        if abs(float(row["source_time_s"]) - float(seed["source_time_s"])) < 1.0:
-            continue
-        if any(abs(float(row["source_time_s"]) - float(other["source_time_s"])) < 1.0
-               for other in selected_positive):
-            continue
-        selected_positive.append(row)
-        if len(selected_positive) == 2:
-            break
-    positives = [seed, *selected_positive]
-
+    comparison_cache: dict[tuple[str, str], str] = {}
     def compare(left, right, direction):
-        return _compare_pair(runner, left, right, direction=direction,
-                             output_dir=checks_dir)["result"]
+        key = (str(left["id"]), str(right["id"]))
+        if key not in comparison_cache:
+            comparison_cache[key] = _compare_pair(
+                runner, left, right, direction=direction,
+                output_dir=checks_dir)["result"]
+        return comparison_cache[key]
 
+    positives, negatives, selection_audit = select_consistent_album_examples(
+        seed, normalized, compare=compare)
+    _write_json(output_dir / "selection_audit.json", selection_audit)
+    if not selection_audit["passed"]:
+        raise V7Blocked("identity", "target_album_no_consistent_clique")
     checks = validate_album_consistency(positives, negatives, compare=compare)
+    selected_ids = {str(row["id"]) for row in [*positives, *negatives]}
     result = {
         "schema_version": "target_album_v1",
         "target_id": "S0",
@@ -518,8 +610,9 @@ def build_target_album(cfg: AppConfig, experiment_spec: dict[str, Any],
         "positive": positives,
         "hard_negative": negatives,
         "uncertain": [row for row in normalized
-                      if row["candidate_class"] == "uncertain"],
+                      if str(row["id"]) not in selected_ids],
         "consistency_checks": checks,
+        "selection_audit": selection_audit,
         "uses_model_confidence": False,
         "uses_margin_threshold": False,
         "proposal_audit": proposal_audit,
