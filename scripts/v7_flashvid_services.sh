@@ -13,6 +13,7 @@ V7_VLLM_BIN="${V7_VLLM_BIN:-${FLASHVID_DIR}/.venv/bin/vllm}"
 V7_FLASHVID_BIN="${V7_FLASHVID_BIN:-${FLASHVID_DIR}/.venv/bin/flashvid-serve}"
 V7_VLLM_PYTHON="${V7_VLLM_PYTHON:-}"
 V7_FLASHVID_SITE_PACKAGES="${V7_FLASHVID_SITE_PACKAGES:-}"
+V7_VANILLA_VLLM_PLUGINS="${V7_VANILLA_VLLM_PLUGINS:-__none__}"
 mkdir -p "$V7_STATE_DIR"
 
 service_port() {
@@ -57,7 +58,7 @@ start_one() {
     else
       vllm_command=("$V7_VLLM_BIN")
     fi
-    nohup setsid env -u VLLM_PLUGINS DOUYIN_V7_SERVICE_ID="$id" \
+    nohup setsid env VLLM_PLUGINS="$V7_VANILLA_VLLM_PLUGINS" DOUYIN_V7_SERVICE_ID="$id" \
       CUDA_VISIBLE_DEVICES="$gpu" "${vllm_command[@]}" serve "$MODEL_PATH" \
       --served-model-name Qwen3.5-4B --default-chat-template-kwargs '{"enable_thinking":false}' \
       --host 127.0.0.1 --port "$port" --tensor-parallel-size 1 --dtype bfloat16 \
