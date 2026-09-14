@@ -24,6 +24,7 @@
       "character_id": "char:wuxian",
       "display_name": "无限",
       "aliases": ["无限", "Wuxian"],
+      "asr_aliases": ["无羡", "吴羡", "无线", "五仙"],
       "external_claims": [
         {
           "claim": "无限是本轮人工指定的候选角色；外部名称不构成本片身份真值。",
@@ -37,6 +38,7 @@
       "character_id": "char:fengxi",
       "display_name": "风息",
       "aliases": ["风息", "Fengxi"],
+      "asr_aliases": ["风隙", "凤曦", "封隙", "缝隙", "风心"],
       "external_claims": [
         {
           "claim": "风息是本轮人工指定的候选角色；名字命中只生成调查线索。",

@@ -227,18 +227,25 @@ def build_mention_index(transcript: Mapping[str, Any] | Iterable[Mapping[str, An
                         characters: Iterable[dict[str, Any]],
                         output_path: Path) -> list[dict[str, Any]]:
     """Create name leads; never bind a visible or speaking occurrence here."""
-    aliases: list[tuple[str, str]] = []
+    aliases: list[tuple[str, str, str]] = []
     for character in characters:
         character_id = str(character["character_id"])
         names = dict.fromkeys(
             [character.get("display_name"), *(character.get("aliases") or [])])
-        aliases.extend((str(name), character_id) for name in names if str(name or "").strip())
+        aliases.extend((str(name), character_id, "canonical_or_alias")
+                       for name in names if str(name or "").strip())
+        # ASR aliases are noisy transcript spellings, not character aliases and
+        # never identity evidence.  They exist only to avoid losing investigation
+        # leads such as 风息 -> 风隙/凤曦.
+        asr_names = dict.fromkeys(character.get("asr_aliases") or [])
+        aliases.extend((str(name), character_id, "asr_alias")
+                       for name in asr_names if str(name or "").strip())
     rows = []
     segments = (transcript.get("segments") or transcript.get("utterances") or []) \
         if isinstance(transcript, Mapping) else transcript
     for index, segment in enumerate(segments):
         text = str(segment.get("text") or "")
-        for name, character_id in aliases:
+        for name, character_id, match_basis in aliases:
             if name not in text:
                 continue
             rows.append({
@@ -254,6 +261,7 @@ def build_mention_index(transcript: Mapping[str, Any] | Iterable[Mapping[str, An
                     else float(segment.get("end_ms") or 0) / 1000), 3)],
                 "text": text,
                 "matched_name": name,
+                "match_basis": match_basis,
                 "mention_type": _mention_type(text, name),
                 "visual_presence": "unknown",
                 "speaker_occurrence_id": None,
@@ -984,10 +992,28 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
     }
     completed: dict[str, dict[str, Any]] = {}
     pending: list[dict[str, Any]] = []
+    cached_by_interval: dict[tuple[float, float], dict[str, Any]] = {}
+    if reuse_completed and output_dir.is_dir():
+        for cached_path in output_dir.glob("*/result.json"):
+            try:
+                cached = _read_json(cached_path)
+                interval = tuple(map(float, cached.get("source_interval") or []))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if (len(interval) == 2 and
+                    cached.get("contract_sha256") == contract_sha256 and
+                    cached.get("status") in {"observed", "observed_empty"}):
+                cached_by_interval[interval] = cached
     for window in windows:
         result_path = output_dir / window["observation_id"] / "result.json"
+        cached = None
         if reuse_completed and result_path.is_file():
-            cached = _read_json(result_path)
+            direct = _read_json(result_path)
+            cached = direct if direct.get("source_interval") == window["source_interval"] \
+                else None
+        if cached is None:
+            cached = cached_by_interval.get(tuple(map(float, window["source_interval"])))
+        if cached is not None:
             if (cached.get("contract_sha256") == contract_sha256
                     and cached.get("source_interval") == window["source_interval"]
                     and cached.get("status") in {"observed", "observed_empty"}):

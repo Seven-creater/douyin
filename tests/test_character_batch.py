@@ -146,6 +146,23 @@ def test_mention_is_lead_not_visual_binding(tmp_path: Path) -> None:
     assert "character_id" not in rows[0]
 
 
+def test_asr_alias_is_only_an_investigation_lead(tmp_path: Path) -> None:
+    spec = _spec()
+    spec["characters"][2]["asr_aliases"] = ["凤曦"]
+    rows = v8.build_mention_index({"segments": [{
+        "start_ms": 1000, "end_ms": 2000, "text": "发现凤曦的踪迹",
+    }]}, spec["characters"], tmp_path / "mentions.jsonl")
+    assert len(rows) == 1
+    assert rows[0]["matched_name"] == "凤曦"
+    assert rows[0]["match_basis"] == "asr_alias"
+    assert rows[0]["mentioned_character_ids"] == ["char:fengxi"]
+    assert rows[0]["visual_presence"] == "unknown"
+    prior = v8.build_external_character_prior(spec, tmp_path / "prior")
+    fengxi = next(row for row in prior["candidates"]
+                  if row["character_id"] == "char:fengxi")
+    assert "凤曦" not in fengxi["aliases"]
+
+
 def test_uniform_coverage_blocks_exclude_head_tail_without_gaps() -> None:
     blocks = v8.coverage_blocks(5400, block_s=45, head_s=90, tail_s=360)
     assert blocks[0] == (90.0, 135.0)
@@ -428,6 +445,35 @@ def test_occurrence_rewatch_treats_empty_as_observed_and_reuses_it(
         cfg, _spec(), leads, tmp_path / "observations", source_video=source,
         runner=NoCallRunner(), source_sha256="source-hash")
     assert second["complete"] is True
+    assert second["reused_observation_count"] == 1
+
+
+def test_occurrence_cache_survives_observation_id_shift(tmp_path: Path,
+                                                        monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 30.0)
+
+    class Runner:
+        call_sizes = []
+
+        def watch_many(self, requests):
+            self.call_sizes.append(len(requests))
+            return [SimpleNamespace(text=json.dumps({
+                "occurrences": [], "event_candidates": [], "passed": False,
+            }), sampling={}, gpu_pair="0,1") for _ in requests]
+
+    runner = Runner()
+    later = {"source_interval": [20, 22], "lead_kind": "coverage", "lead_id": "b"}
+    v8.build_occurrence_bank_from_leads(
+        cfg, _spec(), [later], tmp_path / "observations", source_video=source,
+        runner=runner, source_sha256="source-hash")
+    earlier = {"source_interval": [2, 4], "lead_kind": "asr", "lead_id": "a"}
+    second = v8.build_occurrence_bank_from_leads(
+        cfg, _spec(), [earlier, later], tmp_path / "observations",
+        source_video=source, runner=runner, source_sha256="source-hash")
+    assert runner.call_sizes == [1, 1]
     assert second["reused_observation_count"] == 1
 
 
