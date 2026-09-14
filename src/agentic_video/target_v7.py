@@ -82,6 +82,34 @@ def _parse_json(text: str) -> dict[str, Any]:
     return value
 
 
+def _parse_candidate_response(text: str) -> list[dict[str, Any]]:
+    """Accept the requested object and the common bare-list model variant."""
+    candidate = str(text or "").strip()
+    fenced = _JSON_FENCE.search(candidate)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        parsed = None
+        for opening, closing in (("{", "}"), ("[", "]")):
+            start, end = candidate.find(opening), candidate.rfind(closing)
+            if start < 0 or end <= start:
+                continue
+            try:
+                parsed = json.loads(candidate[start:end + 1])
+                break
+            except json.JSONDecodeError:
+                continue
+        if parsed is None:
+            raise V7Blocked("model", "invalid_json_response")
+        value = parsed
+    rows = value.get("candidates") if isinstance(value, dict) else value
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise V7Blocked("model", "json_candidates_not_list")
+    return rows
+
+
 def _resolve(path: str | Path) -> Path:
     value = Path(path)
     return value if value.is_absolute() else repo_root() / value
@@ -393,6 +421,8 @@ def build_target_album(cfg: AppConfig, experiment_spec: dict[str, Any],
             "Identity-only album expansion. The first image is the trusted S0 seed. "
             "Find appearances that may show the same visual subject and visually "
             "confusable but different subjects. Do not use plot, action or story coverage. "
+            "Report at most three representative candidates total; do not enumerate "
+            "sampling frames. If none are visible, return an empty candidates list. "
             "Return JSON only: {\"candidates\":[{\"id\":\"...\","
             "\"relative_time_s\":0.0,\"candidate_class\":\"possible_same|hard_negative|"
             "uncertain\",\"roi\":[0,0,1,1]}]}."
@@ -416,7 +446,7 @@ def build_target_album(cfg: AppConfig, experiment_spec: dict[str, Any],
                 image_paths=[trusted_seed])
             (raw_dir / f"{window_id}.txt").write_text(answer.text, encoding="utf-8")
             rows = []
-            for row in _parse_json(answer.text).get("candidates") or []:
+            for row in _parse_candidate_response(answer.text):
                 normalized_row = dict(row)
                 normalized_row["source_time_s"] = start + float(
                     normalized_row.get("relative_time_s", -1))

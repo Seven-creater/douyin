@@ -10,7 +10,8 @@ import pytest
 from src.agentic_video.cli import build_parser
 from src.agentic_video.evidence_units import EvidenceUnitV3
 from src.agentic_video.target_v7 import (
-    REQUIRED_GOALS, V7Blocked, _normalize_candidates, apply_native_selection,
+    REQUIRED_GOALS, V7Blocked, _normalize_candidates, _parse_candidate_response,
+    apply_native_selection,
     build_reference_driven_edit_plan, build_target_album, compare_browse_arms,
     diagnose_browse, evaluate_target_album, extract_native_frames, finalize_target_microcut,
     oracle_evidence_bank,
@@ -116,6 +117,13 @@ def test_flashvid_request_contains_images_video_and_no_second_sampling(tmp_path:
 def test_openai_transport_preserves_file_uri_for_vllm() -> None:
     transport = OpenAICompatibleClient("http://localhost/v1")
     assert transport.local_file_urls_as_paths is False
+
+
+def test_album_proposal_accepts_bare_candidate_list() -> None:
+    rows = _parse_candidate_response(
+        '```json\n[{"id":"p1","relative_time_s":1.0,'
+        '"candidate_class":"possible_same","roi":[0,0,1,1]}]\n```')
+    assert rows[0]["id"] == "p1"
 
 
 def test_transport_windows_cover_scope_with_only_transport_overlap() -> None:
