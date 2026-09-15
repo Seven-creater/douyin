@@ -969,7 +969,12 @@ def test_v81_pilot_retries_fixed_bin_contract_violation(
                 "event_candidates": [],
             }]}
             return SimpleNamespace(
-                text=json.dumps(payload), request_audit={}, usage={}, latency_s=0)
+                text=json.dumps(payload), request_audit={
+                    "requested_fps": 2, "retention_ratio": .1,
+                    "usage": {"prompt_tokens_details": {
+                        "multimodal_tokens": {"video": 100}}},
+                    "latency_s": .5,
+                }, usage={}, latency_s=.5)
 
     clients = {arm: Client() for arm in ("A", "B", "C")}
     arms = {arm: {"fps": 2, "retention_ratio": .1,
@@ -991,6 +996,17 @@ def test_v81_pilot_retries_fixed_bin_contract_violation(
                       "result.json").read_text(encoding="utf-8"))
     assert row["attempt_audits"][0]["validation_error"]
     assert row["attempt_audits"][1]["validation_error"] is None
+    manifest = json.loads((tmp_path / "pilot" / "arms" / "A" /
+                           "arm_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["visual_tokens"] == 4000
+    assert manifest["latency_s"] == 20
+
+    # A resumed diagnostic reuses successful rows instead of paying for them again.
+    result = v8.run_v81_diagnostic(
+        cfg, spec, tmp_path / "pilot", source_video=source,
+        pilot_windows=windows, clients=clients, source_sha256="source")
+    assert result["complete"] is True
+    assert all(client.calls == 40 for client in clients.values())
 
 
 def test_v81_character_plan_uses_reference_soft_range_and_density() -> None:

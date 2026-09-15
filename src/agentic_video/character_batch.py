@@ -1807,6 +1807,40 @@ def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path
         source_fps = None
     source_digest = source_sha256 or sha256_file(source_video)
 
+    def request_cost(attempts: Iterable[Mapping[str, Any]]) -> tuple[int, float]:
+        visual_tokens = 0
+        latency_s = 0.0
+        for attempt in attempts:
+            audit = dict(attempt.get("request_audit") or {})
+            usage = dict(audit.get("usage") or {})
+            details = dict(usage.get("prompt_tokens_details") or {})
+            multimodal = dict(details.get("multimodal_tokens") or {})
+            visual_tokens += int(
+                usage.get("visual_tokens") or details.get("visual_tokens") or
+                multimodal.get("video") or 0)
+            latency_s += float(audit.get("latency_s") or 0.0)
+        return visual_tokens, latency_s
+
+    def reusable_result(result_path: Path, *, arm: Mapping[str, Any],
+                        source_interval: list[float]) -> dict[str, Any] | None:
+        if not result_path.is_file():
+            return None
+        try:
+            result = _read_json(result_path)
+        except (OSError, json.JSONDecodeError):
+            return None
+        audit = dict(result.get("request_audit") or {})
+        sampling = dict(result.get("sampling_audit") or {})
+        if (result.get("status") != "observed" or
+                list(map(float, result.get("source_interval") or [])) != source_interval or
+                float(audit.get("requested_fps") or -1) != float(arm["fps"]) or
+                float(audit.get("retention_ratio") or -1) !=
+                float(arm["retention_ratio"]) or
+                sampling.get("sampling_verified") is not True or
+                not result.get("attempt_audits")):
+            return None
+        return result
+
     def stage(clip: Path, arm: Mapping[str, Any], name: str) -> Path:
         media_root_text = str(arm.get("media_root") or "").strip()
         if not media_root_text:
@@ -1828,18 +1862,25 @@ def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path
         client = clients[arm_id]
         arm_dir = output_dir / "arms" / arm_id
         rows, candidates, failures = [], [], []
-        total_visual_tokens, total_latency = 0, 0.0
         for window in windows:
             pilot_id = str(window["pilot_id"])
             start_s, end_s = map(float, window["source_interval"])
             window_dir = arm_dir / pilot_id
             window_dir.mkdir(parents=True, exist_ok=True)
+            result_path = window_dir / "result.json"
+            cached = reusable_result(
+                result_path, arm=arm, source_interval=[start_s, end_s])
+            if cached is not None:
+                rows.append(cached)
+                candidates.extend(cached.get("candidates") or [])
+                continue
+            attempt_audits: list[dict[str, Any]] = []
+            sampling: dict[str, Any] = {}
             try:
                 clip, sampling = _build_coverage_transport(
                     ffmpeg, ffprobe, source_video, window_dir / "transport",
                     start_s=start_s, end_s=end_s,
                     requested_fps=float(arm["fps"]), source_fps=source_fps)
-                attempt_audits = []
                 for attempt in range(1, 3):
                     request_clip = stage(
                         clip, arm, f"{arm_id}_{pilot_id}_attempt_{attempt:02d}")
@@ -1901,13 +1942,6 @@ def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path
                     }
                     candidates.append(candidate)
                     window_candidates.append(candidate)
-                usage = dict(getattr(answer, "usage", {}) or {})
-                visual_tokens = int(
-                    usage.get("visual_tokens") or
-                    (usage.get("prompt_tokens_details") or {}).get("visual_tokens") or 0)
-                latency = float(getattr(answer, "latency_s", 0.0) or 0.0)
-                total_visual_tokens += visual_tokens
-                total_latency += latency
                 result = {
                     "schema_version": "v81_pilot_browse_result_v1",
                     "pilot_id": pilot_id, "category": window.get("category"),
@@ -1929,10 +1963,19 @@ def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path
                     "failure_stage": getattr(exc, "stage", "pilot"),
                     "reason_code": getattr(exc, "reason_code", "pilot_browse_failed"),
                     "detail": str(exc),
+                    "sampling_audit": sampling,
+                    "attempt_audits": attempt_audits,
                 }
                 failures.append(result)
-            _write_json(window_dir / "result.json", result)
+            _write_json(result_path, result)
             rows.append(result)
+        total_visual_tokens = 0
+        total_latency = 0.0
+        for row in rows:
+            visual_tokens, latency_s = request_cost(row.get("attempt_audits") or [])
+            total_visual_tokens += visual_tokens
+            total_latency += latency_s
+        failures = [row for row in rows if row.get("status") == "failed"]
         arm_result = {
             "schema_version": "v81_pilot_arm_v1", "arm": arm_id,
             "fps": float(arm["fps"]),
