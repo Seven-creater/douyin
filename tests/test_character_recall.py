@@ -39,6 +39,41 @@ def test_v82_profile_regressions_exclude_large_beast_and_wrong_proposals() -> No
     assert spec["preflight"]["cases"][6]["source_interval"] == [5391.2, 5391.8]
 
 
+def test_v82_form_specific_invalid_times_reach_profile_validator(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    spec, _ = v82.read_v82_spec(Path(
+        "config/experiments/lxh1_v82_target_recall.json"))
+    captured: dict = {}
+    source = tmp_path / "source.mp4"
+    source.touch()
+    monkeypatch.setattr(v82, "build_seed_review_sheet", lambda *_args, **_kwargs: {})
+
+    def fake_build(_cfg, compatibility_spec, *_args, **_kwargs):
+        captured["spec"] = compatibility_spec
+        return {
+            "profiles": [
+                {"form_id": f"char:xiaohei/{name}", "status": "usable"}
+                for name in ("form_black_cat", "form_black_hair_child",
+                             "form_white_hair_child")
+            ],
+            "usable_form_count": 3,
+            "conflict_form_count": 0,
+        }
+
+    monkeypatch.setattr(v82, "build_character_profiles", fake_build)
+    monkeypatch.setattr(v82, "build_profile_mosaics",
+                        lambda *_args, **_kwargs: {"ordered_inputs": []})
+    result = v82.prepare_multiform_profile(
+        load_config(), spec, tmp_path / "profile", source_video=source,
+        seed_manifest={"characters": []}, runner=object())
+
+    forms = {row["form_id"].split("/")[-1]: row for row in
+             captured["spec"]["seed_proposals"]["char:xiaohei"]["forms"]}
+    assert result["status"] == "ready"
+    assert forms["form_black_cat"]["invalid_source_times_s"] == [
+        465.0, 850.0, 925.0, 1040.0]
+
+
 def test_movie_knowledge_is_prior_and_browse_card_contains_no_relationships(
         tmp_path: Path) -> None:
     manifest = v82.bootstrap_movie_knowledge(

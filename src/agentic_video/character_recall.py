@@ -390,7 +390,8 @@ def prepare_multiform_profile(cfg: AppConfig, spec: Mapping[str, Any],
         "seed_proposals": {target_id: {
             "forms": [
                 {"form_id": f"{target_id}/{row['form_id']}",
-                 "source_times_s": row.get("proposal_times_s") or []}
+                 "source_times_s": row.get("proposal_times_s") or [],
+                 "invalid_source_times_s": row.get("invalid_source_times_s") or []}
                 for row in target.get("forms") or []
             ],
             "invalid_source_times_s": target.get("invalid_source_times_s") or [5391.5],
