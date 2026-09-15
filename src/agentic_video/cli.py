@@ -265,6 +265,19 @@ def build_parser() -> argparse.ArgumentParser:
     target_recall.add_argument("--worker-timeout", type=float, default=3600.0)
     target_recall.add_argument("--force", action="store_true")
 
+    omni_edit = sub.add_parser(
+        "omni-edit-trial",
+        help="run a human-anchored, Omni-planned debug microcut")
+    omni_edit.add_argument(
+        "--spec", default="config/experiments/lxh1_omni_edit_trial.json")
+    omni_edit.add_argument("--video", default=None)
+    omni_edit.add_argument("--output", required=True)
+    omni_edit.add_argument(
+        "--gpu-pairs", default=None,
+        help="Omni worker pairs, e.g. '0,1;2,3;4,5;6,7'")
+    omni_edit.add_argument("--worker-timeout", type=float, default=3600.0)
+    omni_edit.add_argument("--force", action="store_true")
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -1766,6 +1779,35 @@ def _target_recall_v82(args, cfg) -> dict:
         return {"output": str(output), "phase": args.phase, **failure}
 
 
+def _omni_edit_trial(args, cfg) -> dict:
+    from src.agentic_video.omni_edit_trial import (
+        OmniEditTrialBlocked, read_omni_edit_trial_spec,
+        run_omni_edit_trial, write_blocked_acceptance,
+    )
+    from src.perception.omni_pool import OmniProcessPool
+
+    spec_path = _v8_path(args.spec)
+    spec, spec_sha256 = read_omni_edit_trial_spec(spec_path)
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    source = _v8_path(args.video or spec["source_video"])
+    bgm = _v8_path(spec["bgm_path"])
+    pairs = args.gpu_pairs or ";".join(spec.get("gpu_pairs") or [])
+    if not pairs:
+        raise ValueError("omni-edit-trial requires --gpu-pairs")
+    try:
+        with OmniProcessPool(
+                pairs, cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            return run_omni_edit_trial(
+                cfg, spec, output, source_video=source, bgm_path=bgm,
+                runner=runner, spec_sha256=spec_sha256, force=args.force)
+    except OmniEditTrialBlocked as exc:
+        acceptance = write_blocked_acceptance(output, exc)
+        return {"output": str(output), **acceptance}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -1831,6 +1873,7 @@ def main(argv: list[str] | None = None) -> int:
                 "character-batch": _character_batch,
                 "character-batch-accept": _character_batch_accept,
                 "character-recall-v82": _target_recall_v82,
+                "omni-edit-trial": _omni_edit_trial,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
