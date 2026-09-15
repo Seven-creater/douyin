@@ -521,3 +521,11 @@ def test_cli_exposes_only_non_editorial_v82_phases() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args([
             "character-recall-v82", "--phase", "render", "--output", "out"])
+
+
+def test_v82_cli_phase_results_do_not_shadow_status_line_argument() -> None:
+    source = Path("src/agentic_video/cli.py").read_text(encoding="utf-8")
+    v82_runtime = source[source.index("def _v82_runtime"):source.index(
+        "def _target_recall_v82")]
+    assert 'result = {\n            "status":' not in v82_runtime
+    assert 'result = {"status": profile' not in v82_runtime

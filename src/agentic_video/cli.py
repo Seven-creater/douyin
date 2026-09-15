@@ -1444,7 +1444,7 @@ def _v82_runtime(args, cfg) -> dict:
             prior_path, knowledge_dir,
             target_id=spec["perception_objective"]["target_id"])
         result = {
-            "status": "ready", "knowledge_is_prior": True,
+            "phase_status": "ready", "knowledge_is_prior": True,
             "knowledge_manifest_sha256": knowledge["knowledge_manifest_sha256"],
             "source_count": knowledge["source_count"],
             "claim_count": knowledge["claim_count"],
@@ -1484,7 +1484,7 @@ def _v82_runtime(args, cfg) -> dict:
                 "aliases": target.get("aliases") or [],
             }], output / "mention_index.jsonl")
             mention_count = len(mentions)
-        result = {"status": profile["status"], "mention_count": mention_count,
+        result = {"phase_status": profile["status"], "mention_count": mention_count,
                   "identity_truth_claimed": profile["status"] == "ready",
                   "search_card_sha256": ((search_card or {}).get(
                       "search_card_sha256"))}
