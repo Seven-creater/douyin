@@ -899,6 +899,30 @@ def test_pilot_selection_has_fixed_category_mix() -> None:
             for category in ("known_hard", "random", "high_value")] == [8, 6, 6]
 
 
+def test_pilot_high_value_selection_balances_lead_kinds_and_timeline() -> None:
+    spec = _spec()
+    spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
+    spec["diagnostic"] = {"pilot": {
+        "browse_window_s": 10, "random_seed": 7,
+        "known_hard": [{"id": f"k{i}",
+                         "source_interval": [i * 20, i * 20 + 2],
+                         "reason": "hard"} for i in range(8)],
+    }}
+    leads = []
+    for kind, offset in (("asr_mention", 200),
+                         ("uniform_coverage_activity", 220)):
+        leads.extend({"source_interval": [offset + i * 60, offset + i * 60 + 2],
+                      "lead_kind": kind, "lead_id": f"{kind}_{i}"}
+                     for i in range(10))
+    windows = v8.select_v81_pilot_windows(
+        spec, duration_s=1000, high_value_leads=leads)
+    high = [row for row in windows if row["category"] == "high_value"]
+    assert {row["reason"] for row in high} == {
+        "asr_mention", "uniform_coverage_activity"}
+    centers = [sum(row["source_interval"]) / 2 for row in high]
+    assert max(centers) - min(centers) > 400
+
+
 def test_browse_arm_diagnosis_separates_sampling_and_compression() -> None:
     gt = [{"source_interval": [10, 11], "goal": "action"},
           {"source_interval": [20, 21], "goal": "subject"}]

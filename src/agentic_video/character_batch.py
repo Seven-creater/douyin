@@ -1644,18 +1644,54 @@ def select_v81_pilot_windows(spec: Mapping[str, Any], *, duration_s: float,
                    max(start, old["source_interval"][0]) > window_s * 0.5
                    for old in selected)
 
-    for lead in high_value_leads:
-        if sum(row["category"] == "high_value" for row in selected) >= 6:
-            break
+    valid_high_value: dict[str, list[dict[str, Any]]] = {}
+    for raw_lead in high_value_leads:
+        lead = dict(raw_lead)
         interval = list(map(float, lead.get("source_interval") or []))
         if len(interval) != 2 or interval[1] <= interval[0]:
             continue
-        candidate = window(
-            sum(interval) / 2.0, category="high_value",
-            reason=str(lead.get("lead_kind") or "high-value investigation lead"),
-            source_ref=lead.get("lead_id"))
-        if not overlaps_existing(candidate):
-            selected.append(candidate)
+        kind = str(lead.get("lead_kind") or "high-value investigation lead")
+        valid_high_value.setdefault(kind, []).append(lead)
+
+    def spread_over_timeline(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = sorted(rows, key=lambda row: (
+            sum(map(float, row["source_interval"])) / 2.0,
+            str(row.get("lead_id") or "")))
+        if len(ordered) <= 6:
+            return ordered
+        last = len(ordered) - 1
+        anchors = []
+        for position in (0, last, round(last / 2), round(last / 4),
+                         round(3 * last / 4), round(last / 8)):
+            if position not in anchors:
+                anchors.append(position)
+        anchor_set = set(anchors)
+        return [ordered[index] for index in anchors] + [
+            row for index, row in enumerate(ordered) if index not in anchor_set]
+
+    queues = {
+        kind: spread_over_timeline(rows)
+        for kind, rows in sorted(valid_high_value.items())
+    }
+    while (sum(row["category"] == "high_value" for row in selected) < 6
+           and any(queues.values())):
+        progress = False
+        for kind in sorted(queues):
+            while queues[kind]:
+                lead = queues[kind].pop(0)
+                interval = list(map(float, lead["source_interval"]))
+                candidate = window(
+                    sum(interval) / 2.0, category="high_value",
+                    reason=kind, source_ref=lead.get("lead_id"))
+                if overlaps_existing(candidate):
+                    continue
+                selected.append(candidate)
+                progress = True
+                break
+            if sum(row["category"] == "high_value" for row in selected) >= 6:
+                break
+        if not progress:
+            break
     if sum(row["category"] == "high_value" for row in selected) != 6:
         raise ValueError("V8.1 pilot requires at least six distinct high-value leads")
 
