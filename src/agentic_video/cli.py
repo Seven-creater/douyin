@@ -240,6 +240,31 @@ def build_parser() -> argparse.ArgumentParser:
     character_batch_accept.add_argument("--output", required=True)
     character_batch_accept.add_argument("--human-acceptance", required=True)
 
+    target_recall = sub.add_parser(
+        "character-recall-v82",
+        help="run one V8.2 target-centric subject-recall diagnostic phase")
+    target_recall.add_argument(
+        "--phase", required=True,
+        choices=("bootstrap", "prepare", "preflight-input", "preflight", "browse",
+                 "observe", "timeline", "audit-pack", "evaluate"))
+    target_recall.add_argument(
+        "--spec", default="config/experiments/lxh1_v82_target_recall.json")
+    target_recall.add_argument("--video", default=None)
+    target_recall.add_argument("--output", required=True)
+    target_recall.add_argument("--seed-manifest", default=None)
+    target_recall.add_argument("--preflight-ground-truth", default=None,
+                               help="post-freeze human GT; never passed to a model")
+    target_recall.add_argument("--audit-annotations", default=None,
+                               help="completed blind 45-second-block audit JSON")
+    target_recall.add_argument(
+        "--append-audit", action="store_true",
+        help="append the configured per-stratum blind sample without changing the run")
+    target_recall.add_argument(
+        "--gpu-pairs", default=None,
+        help="Omni worker pairs, e.g. '0,1;2,3;4,5;6,7'")
+    target_recall.add_argument("--worker-timeout", type=float, default=3600.0)
+    target_recall.add_argument("--force", action="store_true")
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -1313,6 +1338,434 @@ def _character_batch_accept(args, _cfg) -> dict:
             "final_passed_count": result["final_passed_count"]}
 
 
+def _v82_runtime(args, cfg) -> dict:
+    from src.agentic_video.character_recall import (
+        V82Blocked, _read_json, attach_audit_design, bind_target_and_form,
+        bootstrap_movie_knowledge, build_candidate_scenes,
+        build_neighbor_ranges, build_observation_tasks, build_stratified_audit_pack,
+        build_target_search_card, build_target_timelines, evaluate_v82_recall,
+        interval_coverage_ratio,
+        prepare_multiform_profile, read_v82_spec,
+        run_observe_queue, run_preflight_flashvid_comparison,
+        run_target_recall_browse, run_v82_preflight,
+        verify_target_event_facts,
+    )
+    from src.agentic_video.character_batch import (
+        _read_jsonl, _write_jsonl, build_mention_index,
+    )
+    from src.agentic_video.recipe_v2 import sha256_file
+    from src.agentic_video.target_v7 import collect_flashvid_runtime
+
+    spec_path = _v8_path(args.spec)
+    spec, spec_sha = read_v82_spec(spec_path)
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    source = _v8_path(args.video or spec["source_video"])
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    manifest_path = output / "run_manifest.json"
+    previous = json.loads(manifest_path.read_text(encoding="utf-8")) \
+        if manifest_path.is_file() else {}
+    source_size = source.stat().st_size
+    source_hash = (previous.get("source_sha256")
+                   if previous.get("source_video") == str(source)
+                   and previous.get("source_size_bytes") == source_size
+                   else sha256_file(source))
+    manifest = {
+        "schema_version": "target_recall_run_manifest_v82",
+        "spec": str(spec_path), "spec_sha256": spec_sha,
+        "source_video": str(source), "source_size_bytes": source_size,
+        "source_sha256": source_hash,
+        "perception_objective": spec["perception_objective"],
+        "movie_knowledge_prior": str(_v8_path(spec["movie_knowledge_prior"])),
+        "implemented_harvest_policies": ["subject"],
+        "future_policy_placeholders": ["scene", "object", "interaction", "semantic"],
+        "future_policies_implemented": False,
+        "editing_or_rendering_started": False,
+        "custom_flashvid_port": True,
+        "flashvid_runtime": collect_flashvid_runtime(Path(spec["flashvid_runtime"])),
+        "phases": dict(previous.get("phases") or {}),
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    profile_dir = output / "target_profile"
+    profile_manifest_path = profile_dir / "profiles_manifest.json"
+    knowledge_dir = output / "film_knowledge"
+    knowledge_manifest_path = knowledge_dir / "knowledge_manifest.json"
+    search_card_path = output / "target_search_card.json"
+
+    def require_knowledge() -> dict:
+        if not knowledge_manifest_path.is_file():
+            raise V82Blocked("knowledge", "movie_knowledge_bootstrap_required")
+        knowledge = _read_json(knowledge_manifest_path)
+        if knowledge.get("knowledge_is_prior") is not True:
+            raise V82Blocked("knowledge", "movie_knowledge_prior_contract_missing")
+        return knowledge
+
+    def require_profile() -> dict:
+        if not profile_manifest_path.is_file():
+            raise V82Blocked("prepare", "human_confirmed_profile_required")
+        profile = json.loads(profile_manifest_path.read_text(encoding="utf-8"))
+        if profile.get("status") != "ready":
+            raise V82Blocked("prepare", "three_form_profile_not_ready")
+        return profile
+
+    def album_paths(profile: dict) -> list[Path]:
+        paths = [Path(row["path"]) for row in
+                 (profile.get("browse_album") or {}).get("ordered_inputs") or []]
+        if len(paths) != 4 or any(not path.is_file() for path in paths):
+            raise V82Blocked("prepare", "four_profile_mosaics_required")
+        return paths
+
+    def require_search_card() -> dict:
+        if not search_card_path.is_file():
+            raise V82Blocked("prepare", "target_search_card_required")
+        return _read_json(search_card_path)
+
+    def flash_client(endpoint_key: str):
+        from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
+        row = spec["browse"][endpoint_key]
+        is_vanilla = endpoint_key == "vanilla_endpoint"
+        return FlashVIDClient(FlashVIDEndpoint(
+            arm="D" if is_vanilla else "C", base_url=str(row["base_url"]),
+            model=str(row["model"]), fps=4.0,
+            retention_ratio=1.0 if is_vanilla else .25,
+            backend=str(row["backend"])))
+
+    def omni_pairs() -> str:
+        pairs = args.gpu_pairs or ";".join(spec["observe"].get("gpu_pairs") or [])
+        if not pairs:
+            raise V82Blocked(args.phase, "omni_gpu_pairs_required")
+        return pairs
+
+    if args.phase == "bootstrap":
+        prior_path = _v8_path(spec["movie_knowledge_prior"])
+        knowledge = bootstrap_movie_knowledge(
+            prior_path, knowledge_dir,
+            target_id=spec["perception_objective"]["target_id"])
+        result = {
+            "status": "ready", "knowledge_is_prior": True,
+            "knowledge_manifest_sha256": knowledge["knowledge_manifest_sha256"],
+            "source_count": knowledge["source_count"],
+            "claim_count": knowledge["claim_count"],
+        }
+    elif args.phase == "prepare":
+        knowledge = require_knowledge()
+        seed_manifest = (json.loads(Path(args.seed_manifest).read_text(encoding="utf-8"))
+                         if args.seed_manifest else None)
+        if seed_manifest is None:
+            profile = prepare_multiform_profile(
+                cfg, spec, profile_dir, source_video=source)
+        else:
+            from src.perception.omni_pool import OmniProcessPool
+            with OmniProcessPool(
+                    omni_pairs(), cfg.perception.get("omni") or {},
+                    ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                    response_timeout_s=args.worker_timeout) as runner:
+                profile = prepare_multiform_profile(
+                    cfg, spec, profile_dir, source_video=source,
+                    seed_manifest=seed_manifest, runner=runner)
+        search_card = None
+        if profile.get("status") == "ready":
+            search_card = build_target_search_card(
+                knowledge, profile, search_card_path)
+        transcript = _v8_path(spec["transcript_path"])
+        mention_count = 0
+        if transcript.is_file():
+            raw_transcript = json.loads(transcript.read_text(encoding="utf-8"))
+            rows = ((raw_transcript.get("segments") or raw_transcript.get("utterances") or [])
+                    if isinstance(raw_transcript, dict) else raw_transcript)
+            target = dict((knowledge.get("target_character_prior") or {}))
+            if not target:
+                target = dict(spec["target_profile"])
+            mentions = build_mention_index(rows, [{
+                "character_id": spec["perception_objective"]["target_id"],
+                "display_name": target["display_name"],
+                "aliases": target.get("aliases") or [],
+            }], output / "mention_index.jsonl")
+            mention_count = len(mentions)
+        result = {"status": profile["status"], "mention_count": mention_count,
+                  "identity_truth_claimed": profile["status"] == "ready",
+                  "search_card_sha256": ((search_card or {}).get(
+                      "search_card_sha256"))}
+    elif args.phase == "preflight-input":
+        profile = require_profile()
+        search_card = require_search_card()
+        comparison = run_preflight_flashvid_comparison(
+            cfg, spec, output / "preflight" / "flashvid",
+            source_video=source, album_images=album_paths(profile),
+            r025_client=flash_client("r025_endpoint"),
+            vanilla_client=flash_client("vanilla_endpoint"),
+            search_card=search_card)
+        if not comparison["passed"]:
+            raise V82Blocked("preflight-input", "flashvid_input_audit_failed")
+        result = {
+            "decision": "PASS",
+            "flashvid_input_audit_ready": True,
+            "compared_case_count": comparison["case_count"],
+            "semantic_agreement_is_not_accuracy_proof": True,
+        }
+    elif args.phase == "preflight":
+        profile = require_profile()
+        require_search_card()
+        comparison_path = (output / "preflight" / "flashvid" /
+                           "comparison_manifest.json")
+        if not comparison_path.is_file():
+            raise V82Blocked("preflight", "preflight_input_audit_required")
+        comparison = _read_json(comparison_path)
+        if not comparison.get("passed"):
+            raise V82Blocked("preflight", "flashvid_input_audit_failed")
+        gt = (json.loads(Path(args.preflight_ground_truth).read_text(encoding="utf-8"))
+              if args.preflight_ground_truth else None)
+        from src.perception.omni_pool import OmniProcessPool
+        with OmniProcessPool(
+                omni_pairs(), cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            preflight = run_v82_preflight(
+                cfg, spec, output / "preflight", source_video=source,
+                runner=runner, profiles_manifest=profile, ground_truth=gt)
+        result = {"decision": preflight["decision"],
+                  "passed_case_count": preflight["passed_case_count"],
+                  "full_movie_observe_allowed": preflight["full_movie_observe_allowed"]}
+    elif args.phase == "browse":
+        profile = require_profile()
+        search_card = require_search_card()
+        browse = run_target_recall_browse(
+            cfg, spec, output / "browse", source_video=source,
+            album_images=album_paths(profile),
+            r025_client=flash_client("r025_endpoint"),
+            vanilla_client=flash_client("vanilla_endpoint"),
+            source_sha256=source_hash, reuse_completed=not args.force,
+            search_card=search_card)
+        result = {key: browse[key] for key in (
+            "block_count", "covered_count", "failed_count", "unreliable_count",
+            "candidate_count", "complete")}
+    elif args.phase == "observe":
+        preflight_path = output / "preflight" / "preflight_manifest.json"
+        if not preflight_path.is_file() or json.loads(
+                preflight_path.read_text(encoding="utf-8")).get("decision") != "PASS":
+            raise V82Blocked("observe", "preflight_pass_required")
+        browse_manifest = _read_json(output / "browse" / "browse_manifest.json")
+        if not browse_manifest.get("complete"):
+            raise V82Blocked("observe", "full_browse_incomplete")
+        profile = require_profile()
+        visual = _read_jsonl(output / "browse" / "visual_candidates.jsonl")
+        mentions = (_read_jsonl(output / "mention_index.jsonl")
+                    if (output / "mention_index.jsonl").is_file() else [])
+        duration = common.video_duration_s(
+            cfg.perception.get("ffprobe_bin", "ffprobe"), source)
+        shots = []
+        if spec.get("shot_intervals_path"):
+            shot_path = _v8_path(spec["shot_intervals_path"])
+            if shot_path.is_file():
+                shot_raw = json.loads(shot_path.read_text(encoding="utf-8"))
+                shots = [row.get("source_interval") or row.get("interval")
+                         for row in (shot_raw.get("shots") or shot_raw)]
+        scenes = build_candidate_scenes(
+            visual, mentions, spec.get("prior_ranges") or [], duration_s=duration,
+            shot_intervals=shots, output_path=output / "candidate_scenes.jsonl")
+        tasks = build_observation_tasks(
+            scenes, fps=4.0, max_frames=80, overlap_s=4.0,
+            shot_intervals=shots, output_path=output / "observation_tasks.jsonl")
+        from src.perception.omni_pool import OmniProcessPool
+        with OmniProcessPool(
+                omni_pairs(), cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            all_tasks = list(tasks)
+
+            def drain_queue() -> dict:
+                prior_signature = None
+                current = {}
+                for _ in range(12):
+                    current = run_observe_queue(
+                        cfg, spec, output / "observe", source_video=source,
+                        runner=runner, tasks=all_tasks, reuse_completed=not args.force,
+                        source_duration_s=duration)
+                    persisted = _read_jsonl(output / "observe" / "observe_queue.jsonl")
+                    known = {row["task_id"] for row in all_tasks}
+                    new_rows = [row for row in persisted if row["task_id"] not in known]
+                    if new_rows:
+                        all_tasks.extend(new_rows)
+                    signature = (tuple((row["task_id"], row["state"])
+                                       for row in persisted), len(all_tasks))
+                    if current["queue_closed"] or signature == prior_signature:
+                        return current
+                    prior_signature = signature
+                return current
+
+            observe = drain_queue()
+            occurrences = _read_jsonl(output / "observe" / "occurrence_bank.jsonl")
+            bindings = bind_target_and_form(
+                cfg, occurrences, profile, output / "identity",
+                source_video=source, runner=runner,
+                target_id=spec["perception_objective"]["target_id"],
+                reuse_completed=not args.force)
+            expanded_path = output / "observe" / "neighbor_expanded_occurrences.json"
+            expanded = set(json.loads(expanded_path.read_text(encoding="utf-8"))
+                           if expanded_path.is_file() and not args.force else [])
+            max_rounds = int(spec["observe"].get("max_neighbor_rounds", 8))
+            neighbor_scenes = []
+            for _round in range(max_rounds):
+                supported_rows = [row for row in bindings["bindings"]
+                                  if row["character_status"] == "supported"]
+                by_occurrence = {row["occurrence_id"]: row for row in occurrences}
+                fresh = [by_occurrence[row["occurrence_id"]] for row in supported_rows
+                         if row["occurrence_id"] not in expanded and
+                         row["occurrence_id"] in by_occurrence]
+                if not fresh:
+                    break
+                neighbor_ranges = build_neighbor_ranges(
+                    fresh, source_duration_s=duration,
+                    step_s=float(spec["observe"].get("neighbor_padding_s", 20.0)),
+                    clear_intervals_to_stop=2)
+                round_scenes = build_candidate_scenes(
+                    [], neighbor_ranges=neighbor_ranges, duration_s=duration,
+                    shot_intervals=shots)
+                round_tasks = build_observation_tasks(
+                    round_scenes, fps=4.0, max_frames=80, overlap_s=4.0,
+                    shot_intervals=shots)
+                existing_intervals = [row["source_interval"] for row in all_tasks]
+                new_tasks = []
+                for task in round_tasks:
+                    start, end = task["source_interval"]
+                    if interval_coverage_ratio(
+                            [start, end], existing_intervals) < .8:
+                        new_tasks.append(task)
+                        existing_intervals.append(task["source_interval"])
+                expanded.update(row["occurrence_id"] for row in fresh)
+                expanded_path.write_text(json.dumps(sorted(expanded), indent=2),
+                                         encoding="utf-8")
+                if not new_tasks:
+                    continue
+                neighbor_scenes.extend(round_scenes)
+                all_tasks.extend(new_tasks)
+                observe = drain_queue()
+                occurrences = _read_jsonl(
+                    output / "observe" / "occurrence_bank.jsonl")
+                bindings = bind_target_and_form(
+                    cfg, occurrences, profile, output / "identity",
+                    source_video=source, runner=runner,
+                    target_id=spec["perception_objective"]["target_id"],
+                    reuse_completed=not args.force)
+            if neighbor_scenes:
+                _write_jsonl(output / "neighbor_candidate_scenes.jsonl", neighbor_scenes)
+            supported = {row["occurrence_id"] for row in bindings["bindings"]
+                         if row["character_status"] == "supported"}
+            event_candidates = _read_jsonl(
+                output / "observe" / "neutral_event_candidates.jsonl")
+            verified = verify_target_event_facts(
+                cfg, event_candidates, occurrences, source_video=source,
+                runner=runner, target_occurrence_ids=supported,
+                output_dir=output / "events", source_duration_s=duration)
+        _write_jsonl(output / "event_facts.jsonl", verified["event_facts"])
+        result = {"scene_count": len(scenes) + len(neighbor_scenes),
+                  "task_count": len(all_tasks),
+                  "queue_closed": observe["queue_closed"],
+                  "processing_complete": observe["processing_complete"],
+                  "occurrence_count": len(occurrences),
+                  "identity_supported_count": bindings["metrics"]["supported"],
+                  "verified_event_count": verified["verified_count"],
+                  "incomplete_ranges": observe["incomplete_ranges"]}
+    elif args.phase == "timeline":
+        required = [output / "browse" / "visual_candidates.jsonl",
+                    output / "observe" / "occurrence_bank.jsonl",
+                    output / "identity" / "identity_bindings.jsonl",
+                    output / "event_facts.jsonl"]
+        if any(not path.is_file() for path in required):
+            raise V82Blocked("timeline", "observe_artifacts_missing")
+        candidates = _read_jsonl(required[0])
+        if (output / "mention_index.jsonl").is_file():
+            candidates.extend(_read_jsonl(output / "mention_index.jsonl"))
+        for path in (output / "candidate_scenes.jsonl",
+                     output / "neighbor_candidate_scenes.jsonl",
+                     output / "observe" / "observe_queue.jsonl"):
+            if path.is_file():
+                candidates.extend(_read_jsonl(path))
+        timeline = build_target_timelines(
+            candidates, _read_jsonl(required[1]), _read_jsonl(required[2]),
+            _read_jsonl(required[3]), output / "timelines")
+        result = timeline
+    elif args.phase == "audit-pack":
+        browse = _read_json(output / "browse" / "browse_manifest.json")
+        final_hit_ids = set(browse.get("final_candidate_block_ids") or [])
+        blocks = [{**row, "candidate_hit": str(row["block_id"]) in final_hit_ids}
+                  for row in browse["blocks"]]
+        eligible = [browse["blocks"][0]["source_interval"][0],
+                    browse["blocks"][-1]["source_interval"][1]]
+        audit = build_stratified_audit_pack(
+            blocks, eligible_interval=eligible, output_dir=output / "audit",
+            per_stratum=int(spec["audit"]["initial_per_stratum"]),
+            random_seed=int(spec["audit"]["random_seed"]),
+            source_video=source,
+            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+            append_per_stratum=(int(spec["audit"]["append_per_stratum"])
+                                if args.append_audit else 0),
+            max_total=int(spec["audit"]["max_blocks"]))
+        result = {"sample_count": audit["sample_count"],
+                  "appended_count": audit["appended_count"],
+                  "frozen_sha256": audit["frozen_sha256"]}
+    else:
+        if not args.audit_annotations:
+            raise V82Blocked("evaluate", "blind_audit_annotations_required")
+        annotations = json.loads(Path(args.audit_annotations).read_text(encoding="utf-8"))
+        rows = annotations.get("rows") or annotations
+        if not isinstance(rows, list):
+            raise ValueError("audit annotations must contain a rows array")
+        audit_dir = output / "audit"
+        rows = attach_audit_design(
+            rows, private_key=_read_json(audit_dir / "private_sample_key.json"),
+            sampling_design=_read_json(audit_dir / "sampling_design.json"))
+        observe_manifest_path = output / "observe" / "observe_queue_manifest.json"
+        operational = {}
+        if observe_manifest_path.is_file():
+            observe_manifest = _read_json(observe_manifest_path)
+            incomplete = list(observe_manifest.get("incomplete_ranges") or [])
+            operational = {
+                "incomplete_ranges": incomplete,
+                "incomplete_range_count": len(incomplete),
+                "queue_closed": bool(observe_manifest.get("queue_closed")),
+            }
+        operational_gate = bool(operational.get("queue_closed")) and not bool(
+            operational.get("incomplete_range_count"))
+        evaluation = evaluate_v82_recall(
+            rows, thresholds=spec["audit"]["thresholds"],
+            regression_hard_gate_passed=bool(
+                annotations.get("regression_hard_gate_passed", False)) and
+                operational_gate,
+            max_blocks_reached=len(rows) >= int(spec["audit"]["max_blocks"]),
+            bootstrap_replicates=int(spec["audit"]["bootstrap_replicates"]),
+            random_seed=int(spec["audit"]["random_seed"]),
+            output_path=output / "evaluation.json", auxiliary=operational)
+        result = {"decision": evaluation["decision"],
+                  "next_action": evaluation["next_action"]}
+    manifest["phases"][args.phase] = result
+    manifest["last_phase"] = args.phase
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+    return {"output": str(output), "phase": args.phase, **result}
+
+
+def _target_recall_v82(args, cfg) -> dict:
+    from src.agentic_video.character_recall import V82Blocked
+    try:
+        return _v82_runtime(args, cfg)
+    except V82Blocked as exc:
+        output = Path(args.output).resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        failure = {
+            "schema_version": "target_recall_phase_failure_v82",
+            "decision": "FAIL", "failure_class": (
+                "infrastructure" if exc.stage == "infrastructure" else "verification"),
+            "failure_stage": exc.stage, "reason_code": exc.reason_code,
+            "detail": exc.detail or str(exc),
+        }
+        (output / f"{args.phase}_failure.json").write_text(
+            json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"output": str(output), "phase": args.phase, **failure}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -1377,6 +1830,7 @@ def main(argv: list[str] | None = None) -> int:
                 "evidence-v7-accept": _evidence_v7_accept,
                 "character-batch": _character_batch,
                 "character-batch-accept": _character_batch_accept,
+                "character-recall-v82": _target_recall_v82,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \

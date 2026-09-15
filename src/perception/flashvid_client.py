@@ -77,16 +77,18 @@ class OpenAICompatibleClient:
         self.timeout_s = float(timeout_s)
         self.local_file_urls_as_paths = local_file_urls_as_paths
 
-    def chat(self, payload: dict[str, Any]) -> tuple[dict[str, Any], float, str]:
+    def chat(self, payload: dict[str, Any], *,
+             extra_headers: dict[str, str] | None = None) \
+            -> tuple[dict[str, Any], float, str]:
         wire_payload = copy.deepcopy(payload)
         if self.local_file_urls_as_paths:
             wire_payload["messages"] = _local_media_paths(wire_payload["messages"])
         body = json.dumps(wire_payload, ensure_ascii=False,
                           separators=(",", ":")).encode("utf-8")
-        request = urllib.request.Request(
-            self.endpoint, data=body,
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"})
+        headers = {"Content-Type": "application/json",
+                   "Authorization": f"Bearer {self.api_key}"}
+        headers.update(extra_headers or {})
+        request = urllib.request.Request(self.endpoint, data=body, headers=headers)
         started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
@@ -116,7 +118,8 @@ class FlashVIDClient:
     def watch(self, video_path: Path, prompt: str, *, duration_s: float,
               image_paths: list[Path] | None = None,
               max_tokens: int = 768,
-              response_format: dict[str, Any] | None = None) -> FlashVIDAnswer:
+              response_format: dict[str, Any] | None = None,
+              source_time_origin_s: float = 0.0) -> FlashVIDAnswer:
         images = [Path(path).resolve() for path in (image_paths or [])]
         if len(images) > 4:
             raise ValueError("V7 services accept at most four images")
@@ -149,10 +152,30 @@ class FlashVIDClient:
             "max_tokens": int(max_tokens),
             "mm_processor_kwargs": {"do_sample_frames": False},
             "media_io_kwargs": {"video": {"num_frames": frames, "fps": -1}},
+            # vLLM 0.25 returns the fully expanded prompt IDs for exact Qwen
+            # image/video pad-token accounting. V8.2 refuses estimated usage.
+            "return_token_ids": True,
         }
         if response_format is not None:
             payload["response_format"] = copy.deepcopy(response_format)
-        raw, latency_s, request_sha = self.transport.chat(payload)
+        audit_headers = {
+            "X-FlashVID-Audit": "v82",
+            "X-FlashVID-Source-Origin-S": f"{float(source_time_origin_s):.6f}",
+            "X-FlashVID-Requested-FPS": f"{float(self.endpoint.fps):.6f}",
+            "X-FlashVID-Requested-Retention": (
+                f"{float(self.endpoint.retention_ratio):.6f}"),
+        }
+        try:
+            raw, latency_s, request_sha = self.transport.chat(
+                payload, extra_headers=audit_headers)
+        except TypeError as exc:
+            # Backward-compatible test/custom transports may implement the
+            # older one-argument contract. The official transport above always
+            # accepts headers; V8.2 still fails closed when the response lacks
+            # the corresponding server audit.
+            if "extra_headers" not in str(exc):
+                raise
+            raw, latency_s, request_sha = self.transport.chat(payload)
         choices = raw.get("choices") or []
         if not choices:
             raise RuntimeError("FlashVID response has no choices")
@@ -172,9 +195,12 @@ class FlashVIDClient:
             "requested_frames": frames,
             "do_sample_frames": False,
             "image_count": len(images),
+            "identity_album_sha256": [
+                hashlib.sha256(path.read_bytes()).hexdigest() for path in images],
             "video_count": 1,
             "media_order": ["source_video", "identity_album", "prompt"],
             "candidate_time_owner": "source_video_only",
+            "source_time_origin_s": float(source_time_origin_s),
             "transport_clip": str(video),
             "transport_clip_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
             "request_sha256": request_sha,

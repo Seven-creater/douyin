@@ -1,0 +1,100 @@
+{
+  "spec_version": "target_recall_v82",
+  "source": "luoxiaohei1",
+  "source_video": "/data02/usr/wangqihao/Demo/research/data/raw/luoxiaohei/罗小黑1 2019.4K.H265.60fps.10bit.Dolby.5.1.chs.mkv",
+  "transcript_path": "data/library/sources/luoxiaohei1/narrative_transcript.json",
+  "movie_knowledge_prior": "config/knowledge/luoxiaohei1_movie_prior.json",
+  "perception_objective": {
+    "center_type": "subject",
+    "continuity_key": "character_identity",
+    "target_id": "char:xiaohei",
+    "harvest_goal": "target_related_scenes",
+    "harvest_policy": "subject"
+  },
+  "target_profile": {
+    "display_name": "小黑",
+    "aliases": ["小黑", "罗小黑", "Xiaohei"],
+    "invalid_source_times_s": [5391.5],
+    "forms": [
+      {
+        "form_id": "form_black_cat",
+        "proposal_times_s": [850.0, 925.0, 1040.0]
+      },
+      {
+        "form_id": "form_black_hair_child",
+        "proposal_times_s": [1878.0, 2968.0, 3650.0]
+      },
+      {
+        "form_id": "form_white_hair_child",
+        "proposal_times_s": [5412.65, 5412.75, 5412.85]
+      }
+    ]
+  },
+  "preflight": {
+    "ground_truth_template": "config/oracles/lxh1_v82_preflight_gt.template.json",
+    "cases": [
+      {"id": "direction_5412", "source_interval": [5410.65, 5424.65], "kind": "known_direction", "flashvid_compare": true},
+      {"id": "single_person_action", "source_interval": [5397.5, 5403.5], "kind": "single_person_action", "flashvid_compare": false},
+      {"id": "multi_person_interaction", "source_interval": [1428.0, 1448.0], "kind": "multi_person_interaction", "flashvid_compare": true},
+      {"id": "dialogue_only", "source_interval": [2970.0, 2990.0], "kind": "dialogue_only", "flashvid_compare": false},
+      {"id": "static_target", "source_interval": [845.0, 860.0], "kind": "static_target", "flashvid_compare": true},
+      {"id": "occluded_subject", "source_interval": [5385.0, 5391.0], "kind": "occlusion", "flashvid_compare": true},
+      {"id": "dissolve_5391", "source_interval": [5391.2, 5391.8], "kind": "dissolve", "flashvid_compare": true},
+      {"id": "mention_only", "source_interval": [1875.0, 1895.0], "kind": "mention_without_visual_identity", "flashvid_compare": false},
+      {"id": "form_black_cat", "source_interval": [845.0, 860.0], "kind": "target_form", "flashvid_compare": false},
+      {"id": "form_black_hair_child", "source_interval": [2958.0, 2978.0], "kind": "target_form", "flashvid_compare": false},
+      {"id": "form_white_hair_child", "source_interval": [5408.0, 5415.0], "kind": "target_form", "flashvid_compare": false},
+      {"id": "cross_shot_offscreen_result", "source_interval": [5410.65, 5424.65], "kind": "cross_shot_relation", "flashvid_compare": true}
+    ]
+  },
+  "browse": {
+    "block_s": 45.0,
+    "head_s": 90.0,
+    "tail_s": 360.0,
+    "min_movie_s": 1800.0,
+    "fps": 4.0,
+    "retention_ratio": 0.25,
+    "max_regions_per_block": 12,
+    "workers": 4,
+    "vanilla_audit_seed": 20260915,
+    "media_root": "/dev/shm/flashvid_perception",
+    "r025_endpoint": {
+      "model": "Qwen3.5-4B-FlashVID-r025",
+      "base_url": "http://127.0.0.1:8102/v1",
+      "backend": "flashvid"
+    },
+    "vanilla_endpoint": {
+      "model": "Qwen3.5-4B-FlashVID-r100",
+      "base_url": "http://127.0.0.1:8104/v1",
+      "backend": "native_bypass"
+    }
+  },
+  "prior_ranges": [],
+  "shot_intervals_path": null,
+  "observe": {
+    "fps": 4.0,
+    "max_frames": 80,
+    "task_overlap_s": 4.0,
+    "oom_durations_s": [20.0, 16.0, 12.0],
+    "max_context_s": 40.0,
+    "neighbor_padding_s": 20.0,
+    "max_neighbor_rounds": 8,
+    "deep_watch_soft_ratio": 0.30,
+    "gpu_pairs": ["0,1", "2,3", "4,5", "6,7"]
+  },
+  "audit": {
+    "block_s": 45.0,
+    "initial_per_stratum": 5,
+    "append_per_stratum": 2,
+    "max_blocks": 120,
+    "random_seed": 20260915,
+    "bootstrap_replicates": 2000,
+    "thresholds": {
+      "candidate_interval_recall": 0.90,
+      "identity_timeline_recall": 0.90,
+      "event_fact_coverage": 0.85,
+      "actor_affected_accuracy": 0.95
+    }
+  },
+  "flashvid_runtime": "/data02/usr/wangqihao/Demo/test/flashvid_v82_audit"
+}

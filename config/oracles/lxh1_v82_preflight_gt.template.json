@@ -1,0 +1,8 @@
+{
+  "schema_version": "v82_preflight_ground_truth_template_v1",
+  "source": "luoxiaohei1",
+  "human_review_confirmed": false,
+  "prompt_isolation": "Fill only after automatic preflight outputs are frozen. This file must never enter a model prompt.",
+  "cases": [],
+  "instructions": "For all 12 fixed cases, add id, expected_status, minimum_occurrences, requires_event, identity judgment, initiator/affected judgment, and a human review note. Set human_review_confirmed=true only after watching the anonymous source clips."
+}

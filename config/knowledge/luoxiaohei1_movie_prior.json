@@ -1,0 +1,155 @@
+{
+  "schema_version": "movie_knowledge_prior_v1",
+  "movie_identity": {
+    "source_id": "luoxiaohei1",
+    "title_zh": "罗小黑战记",
+    "release_year": 2019,
+    "medium": "animated_feature",
+    "identity_status": "external_prior_to_verify_against_source_file"
+  },
+  "character_roster": [
+    {"character_id": "char:xiaohei", "display_name": "小黑"},
+    {"character_id": "char:wuxian", "display_name": "无限"},
+    {"character_id": "char:fengxi", "display_name": "风息"}
+  ],
+  "character_priors": [
+    {
+      "character_id": "char:xiaohei",
+      "display_name": "小黑",
+      "aliases": ["小黑", "罗小黑", "Xiaohei"],
+      "known_form_hypotheses": [
+        {"form_id": "form_black_cat", "visual_description": "黑色小猫形态"},
+        {"form_id": "form_black_hair_child", "visual_description": "黑发、猫耳、小个儿童人形"},
+        {"form_id": "form_white_hair_child", "visual_description": "白发、小个儿童人形；只能作为待核验候选"}
+      ],
+      "source_ids": ["src_1905_movie", "src_wikipedia_series", "src_official_xiaohei_design"],
+      "status": "prior_to_verify"
+    },
+    {
+      "character_id": "char:wuxian",
+      "display_name": "无限",
+      "aliases": ["无限"],
+      "known_form_hypotheses": [],
+      "source_ids": ["src_official_wuxian_design", "src_1905_movie"],
+      "status": "prior_to_verify"
+    },
+    {
+      "character_id": "char:fengxi",
+      "display_name": "风息",
+      "aliases": ["风息"],
+      "known_form_hypotheses": [],
+      "source_ids": ["src_wikipedia_movie"],
+      "status": "prior_to_verify"
+    }
+  ],
+  "relationship_priors": [
+    {
+      "left_character_id": "char:xiaohei",
+      "right_character_id": "char:wuxian",
+      "relation_hypothesis": "important_recurring_interaction",
+      "search_use": "neighbor_lead_only",
+      "source_ids": ["src_1905_movie", "src_wikipedia_movie"],
+      "status": "prior_to_verify"
+    },
+    {
+      "left_character_id": "char:xiaohei",
+      "right_character_id": "char:fengxi",
+      "relation_hypothesis": "important_recurring_interaction",
+      "search_use": "neighbor_lead_only",
+      "source_ids": ["src_wikipedia_movie"],
+      "status": "prior_to_verify"
+    }
+  ],
+  "form_transition_hypotheses": [
+    {
+      "character_id": "char:xiaohei",
+      "from_form": "form_black_cat",
+      "to_form": "form_black_hair_child",
+      "status": "prior_to_verify",
+      "source_ids": ["src_1905_movie"]
+    },
+    {
+      "character_id": "char:xiaohei",
+      "from_form": "form_black_hair_child",
+      "to_form": "form_white_hair_child",
+      "status": "prior_to_verify",
+      "source_ids": ["src_wikipedia_series"]
+    }
+  ],
+  "claims": [
+    {
+      "claim_id": "claim_xiaohei_black_cat_or_human",
+      "subject": "char:xiaohei",
+      "predicate": "may_have_form",
+      "object": ["form_black_cat", "form_black_hair_child"],
+      "status": "prior_to_verify",
+      "source_ids": ["src_1905_movie"]
+    },
+    {
+      "claim_id": "claim_xiaohei_white_hair_candidate",
+      "subject": "char:xiaohei",
+      "predicate": "may_have_form",
+      "object": "form_white_hair_child",
+      "status": "prior_to_verify",
+      "source_ids": ["src_wikipedia_series"]
+    },
+    {
+      "claim_id": "claim_xiaohei_wuxian_interaction",
+      "subject": "char:xiaohei",
+      "predicate": "may_interact_with",
+      "object": "char:wuxian",
+      "status": "prior_to_verify",
+      "source_ids": ["src_1905_movie", "src_wikipedia_movie"]
+    },
+    {
+      "claim_id": "claim_xiaohei_fengxi_interaction",
+      "subject": "char:xiaohei",
+      "predicate": "may_interact_with",
+      "object": "char:fengxi",
+      "status": "prior_to_verify",
+      "source_ids": ["src_wikipedia_movie"]
+    }
+  ],
+  "sources": [
+    {
+      "source_id": "src_1905_movie",
+      "title": "罗小黑战记 The Legend of Luoxiaohei (2019)",
+      "publisher": "1905电影网",
+      "url": "https://www.1905.com/mdb/film/2242929/",
+      "evidence_grade": "industry_database",
+      "accessed_date": "2026-09-15"
+    },
+    {
+      "source_id": "src_official_xiaohei_design",
+      "title": "大家好，我叫小黑——罗小黑战记2设计稿",
+      "publisher": "电影罗小黑战记官方微博",
+      "url": "https://www.weibo.com/3175924975/PCHsHxXw1",
+      "evidence_grade": "official_supplemental_later_work",
+      "accessed_date": "2026-09-15"
+    },
+    {
+      "source_id": "src_official_wuxian_design",
+      "title": "罗小黑战记设计手稿：无限",
+      "publisher": "电影罗小黑战记官方微博",
+      "url": "https://www.weibo.com/3175924975/I6ugEDT8x",
+      "evidence_grade": "official",
+      "accessed_date": "2026-09-15"
+    },
+    {
+      "source_id": "src_wikipedia_movie",
+      "title": "罗小黑战记（电影）",
+      "publisher": "Wikipedia",
+      "url": "https://zh.wikipedia.org/wiki/罗小黑战记_(电影)",
+      "evidence_grade": "secondary",
+      "accessed_date": "2026-09-15"
+    },
+    {
+      "source_id": "src_wikipedia_series",
+      "title": "罗小黑战记",
+      "publisher": "Wikipedia",
+      "url": "https://zh.wikipedia.org/wiki/罗小黑战记",
+      "evidence_grade": "secondary",
+      "accessed_date": "2026-09-15"
+    }
+  ]
+}
