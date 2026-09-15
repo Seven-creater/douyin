@@ -790,6 +790,8 @@ def test_neutral_validator_distinguishes_empty_and_unreliable() -> None:
     unreliable = {**empty, "status": "unreliable",
                   "boundary_reason": "the image is a dissolve between two shots"}
     assert v8.validate_neutral_observation(unreliable, duration_s=2) == "unreliable"
+    assert "static group illustrations" in v8.NEUTRAL_OCCURRENCE_PROMPT
+    assert "Do not\ntranscribe on-screen text" in v8.NEUTRAL_OCCURRENCE_PROMPT
 
 
 def test_neutral_validator_rejects_out_of_bounds_event() -> None:

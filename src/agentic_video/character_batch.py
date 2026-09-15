@@ -855,6 +855,9 @@ event_candidates, left_context_complete, right_context_complete, and boundary_re
 status must be observed, observed_empty, or unreliable. Use observed_empty only when the
 clip is clear and has no concrete subject or event worth recording. Use unreliable for
 dissolves, black/corrupted frames, severe motion blur, or insufficient visual evidence.
+Title cards, credits, logos, captions, and static group illustrations without a concrete
+visible action or state change are observed_empty; do not create occurrences for their
+text, logos, or decorative figures.
 
 Each occurrence needs local_id, visible_interval, a concrete visible appearance in
 local_description, a concrete current action/state in visual_state, and roi (null or four
@@ -865,7 +868,11 @@ Every event actor and non-null patient must reference an occurrence in this resp
 Do not use placeholder phrases, generic statements, canonical names, or causal claims not
 shown by the clip. If the input starts after an action has already begun, set
 left_context_complete=false. If it ends before the visible action/result finishes, set
-right_context_complete=false and briefly explain boundary_reason."""
+right_context_complete=false and briefly explain boundary_reason.
+
+Be concise enough to finish the JSON: use at most six occurrences and six events; keep
+each description, state, action, result, and boundary reason to at most 16 words. Do not
+transcribe on-screen text or repeat the same fact in multiple fields."""
 
 
 NEUTRAL_OBSERVATION_STATES = {"observed", "observed_empty", "unreliable"}
