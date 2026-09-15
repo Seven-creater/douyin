@@ -778,6 +778,18 @@ def test_neutral_validator_rejects_placeholders_and_repeated_output() -> None:
         v8.validate_neutral_observation(payload, duration_s=2)
     with pytest.raises(v8.V8Blocked, match="trailing_or_repeated"):
         v8._single_json_object('{"status":"observed_empty"}\nAssistant: again')
+    assert v8._single_json_object(
+        '```json\n{"status":"observed_empty"}') == {
+            "status": "observed_empty"}
+
+
+def test_balanced_json_generation_stop_ignores_braces_inside_strings() -> None:
+    from src.perception.omni_runner import _contains_complete_json_object
+
+    assert not _contains_complete_json_object('```json\n{"text":"}"')
+    assert _contains_complete_json_object(
+        '```json\n{"text":"}","nested":{"x":1}}')
+    assert not _contains_complete_json_object("no object yet")
 
 
 def test_neutral_validator_distinguishes_empty_and_unreliable() -> None:
@@ -851,6 +863,7 @@ def test_context_watch_expands_left_boundary_and_keeps_cross_shot_occurrences(
 
         def watch(self, _video, _prompt, **kwargs):
             assert kwargs["fps"] == 4.0
+            assert kwargs["stop_after_json_object"] is True
             self.calls.append((kwargs["start_s"], kwargs["end_s"]))
             left_complete = len(self.calls) > 1
             payload = {

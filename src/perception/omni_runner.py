@@ -21,6 +21,37 @@ from src.perception import common
 logger = logging.getLogger(__name__)
 
 
+def _contains_complete_json_object(text: str) -> bool:
+    """Return true once the first top-level JSON object is balanced."""
+    started = False
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in str(text or ""):
+        if not started:
+            if char == "{":
+                started = True
+                depth = 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return True
+    return False
+
+
 @dataclass
 class OmniAnswer:
     text: str
@@ -305,7 +336,8 @@ class OmniRunner:
               clip_dir: Path | None = None, max_new_tokens: int | None = None,
               duration_s: float | None = None,
               fps: float | None = None,
-              use_audio_in_video: bool = True) -> OmniAnswer:
+              use_audio_in_video: bool = True,
+              stop_after_json_object: bool = False) -> OmniAnswer:
         self.load()
         clip_path = None
         t_pre0 = time.time()
@@ -336,7 +368,8 @@ class OmniRunner:
         return self._generate(inputs, max_new_tokens=max_new_tokens,
                               use_audio_in_video=use_audio_in_video,
                               frames_estimate=frames_est,
-                              clip_path=clip_path, input_build_s=input_build_s)
+                              clip_path=clip_path, input_build_s=input_build_s,
+                              stop_after_json_object=stop_after_json_object)
 
     def inspect_media(self, image_paths: list[Path], prompt: str, *,
                       video_path: Path | None = None,
@@ -380,7 +413,8 @@ class OmniRunner:
     # ---------- 共享生成尾部 ----------
     def _generate(self, inputs, *, max_new_tokens: int | None = None,
                   use_audio_in_video: bool | None = None, frames_estimate: int | None = None,
-                  clip_path: Path | None = None, input_build_s: float = 0.0) -> OmniAnswer:
+                  clip_path: Path | None = None, input_build_s: float = 0.0,
+                  stop_after_json_object: bool = False) -> OmniAnswer:
         import torch
 
         input_len = inputs["input_ids"].shape[1]
@@ -388,6 +422,23 @@ class OmniRunner:
         max_new = int(max_new_tokens or self.cfg.get("max_new_tokens", 2048))
         gen_kwargs = dict(max_new_tokens=max_new,
                           repetition_penalty=float(self.cfg.get("repetition_penalty", 1.05)))
+        if stop_after_json_object:
+            from transformers import StoppingCriteria, StoppingCriteriaList
+
+            processor = self._processor
+
+            class StopAfterJsonObject(StoppingCriteria):
+                def __call__(self, input_ids, _scores, **_kwargs):
+                    decoded = processor.batch_decode(
+                        input_ids[:, input_len:], skip_special_tokens=True,
+                        clean_up_tokenization_spaces=False)
+                    return torch.tensor(
+                        [_contains_complete_json_object(text) for text in decoded],
+                        dtype=torch.bool, device=input_ids.device)
+
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList([
+                StopAfterJsonObject(),
+            ])
         if use_audio_in_video is not None:
             gen_kwargs["use_audio_in_video"] = use_audio_in_video
         t0 = time.time()

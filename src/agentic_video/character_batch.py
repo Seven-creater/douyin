@@ -890,6 +890,11 @@ def _single_json_object(text: str) -> dict[str, Any]:
     fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", candidate, re.S | re.I)
     if fenced:
         candidate = fenced.group(1).strip()
+    elif re.match(r"^```(?:json)?\s*", candidate, re.I):
+        # Generation-time balanced-JSON stopping can fire before a decorative
+        # closing fence. The object must still consume all remaining text.
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate,
+                           count=1, flags=re.I).strip()
     decoder = json.JSONDecoder()
     try:
         value, offset = decoder.raw_decode(candidate)
@@ -1469,7 +1474,7 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     clip_dir=context_dir / f"attempt_{attempt_index:02d}" / "source_clip",
                     fps=float(context_fps), duration_s=end_s - start_s,
                     max_new_tokens=768,
-                    use_audio_in_video=False)
+                    use_audio_in_video=False, stop_after_json_object=True)
                 raw_text = str(answer.text)
                 attempt_dir = context_dir / f"attempt_{attempt_index:02d}"
                 raw_path = attempt_dir / "raw_response.txt"
