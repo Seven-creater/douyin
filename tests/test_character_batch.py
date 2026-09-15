@@ -912,6 +912,63 @@ def test_browse_arm_diagnosis_separates_sampling_and_compression() -> None:
     assert result["diagnosis"] == "temporal_sampling_bottleneck"
 
 
+def test_v81_pilot_retries_fixed_bin_contract_violation(
+        tmp_path: Path, monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 45.0)
+    monkeypatch.setattr(v8.common, "run_ffprobe_json", lambda *_: {
+        "streams": [{"codec_type": "video", "avg_frame_rate": "24/1"}],
+    })
+    monkeypatch.setattr(v8, "sha256_file", lambda *_: "source")
+    monkeypatch.setattr(
+        v8, "_build_coverage_transport",
+        lambda *_args, **_kwargs: (source, {
+            "requested_frame_count": 90, "actual_frame_count": 90,
+            "effective_fps": 2.0, "sampling_verified": True,
+        }))
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def watch(self, _video, prompt, **_kwargs):
+            self.calls += 1
+            interval = [0, 10] if self.calls % 2 else [1, 4]
+            payload = {"regions": [{
+                "interval": interval, "activity": "one figure raises an arm",
+                "worth_rewatch": True, "temporal_refinement_needed": False,
+                "occurrences": [{"local_id": "A",
+                    "local_description": "small pale figure",
+                    "visual_state": "raises one arm", "roi": None}],
+                "event_candidates": [],
+            }]}
+            return SimpleNamespace(
+                text=json.dumps(payload), request_audit={}, usage={}, latency_s=0)
+
+    clients = {arm: Client() for arm in ("A", "B", "C")}
+    arms = {arm: {"fps": 2, "retention_ratio": .1,
+                  "backend": "flashvid", "media_root": ""}
+            for arm in ("A", "B", "C")}
+    spec = _spec()
+    spec["diagnostic"] = {
+        "browse_arms": [{"id": arm, **contract}
+                        for arm, contract in arms.items()],
+    }
+    windows = [{"pilot_id": f"pilot_{index:02d}", "category": "known_hard",
+                "source_interval": [0, 45]} for index in range(20)]
+    result = v8.run_v81_diagnostic(
+        cfg, spec, tmp_path / "pilot", source_video=source,
+        pilot_windows=windows, clients=clients, source_sha256="source")
+    assert result["complete"] is True
+    assert all(client.calls == 40 for client in clients.values())
+    row = json.loads((tmp_path / "pilot" / "arms" / "A" / "pilot_00" /
+                      "result.json").read_text(encoding="utf-8"))
+    assert row["attempt_audits"][0]["validation_error"]
+    assert row["attempt_audits"][1]["validation_error"] is None
+
+
 def test_v81_character_plan_uses_reference_soft_range_and_density() -> None:
     task = {"task_id": "t", "character_id": "char:xiaohei",
             "family": "custom", "core_expression": "visible action",

@@ -1797,28 +1797,57 @@ def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path
             pilot_id = str(window["pilot_id"])
             start_s, end_s = map(float, window["source_interval"])
             window_dir = arm_dir / pilot_id
+            window_dir.mkdir(parents=True, exist_ok=True)
             try:
                 clip, sampling = _build_coverage_transport(
                     ffmpeg, ffprobe, source_video, window_dir / "transport",
                     start_s=start_s, end_s=end_s,
                     requested_fps=float(arm["fps"]), source_fps=source_fps)
-                request_clip = stage(clip, arm, f"{arm_id}_{pilot_id}")
-                try:
-                    answer = client.watch(
-                        request_clip, NEUTRAL_COVERAGE_PROMPT,
-                        duration_s=end_s - start_s, image_paths=None,
-                        max_tokens=1024, response_format=COVERAGE_RESPONSE_FORMAT)
-                finally:
-                    if request_clip != clip:
-                        request_clip.unlink(missing_ok=True)
+                attempt_audits = []
+                for attempt in range(1, 3):
+                    request_clip = stage(
+                        clip, arm, f"{arm_id}_{pilot_id}_attempt_{attempt:02d}")
+                    retry_suffix = ("" if attempt == 1 else
+                        "\nCONTRACT RETRY: Do not return fixed 10- or 15-second bins. "
+                        "Return at most three tight 2-6 second excerpts, or an empty "
+                        "regions array. ROI values, when present, are normalized image "
+                        "coordinates in [0,1], never timestamps.")
+                    try:
+                        answer = client.watch(
+                            request_clip, NEUTRAL_COVERAGE_PROMPT + retry_suffix,
+                            duration_s=end_s - start_s, image_paths=None,
+                            max_tokens=1024, response_format=COVERAGE_RESPONSE_FORMAT)
+                    finally:
+                        if request_clip != clip:
+                            request_clip.unlink(missing_ok=True)
+                    attempt_raw = window_dir / f"raw_response_attempt_{attempt:02d}.txt"
+                    attempt_raw.write_text(str(answer.text), encoding="utf-8")
+                    attempt_audit = {
+                        "attempt": attempt,
+                        "raw_response_path": str(attempt_raw),
+                        "request_audit": dict(
+                            getattr(answer, "request_audit", {}) or {}),
+                    }
+                    try:
+                        payload, response_shape = _parse_coverage_payload(str(answer.text))
+                        if response_shape != "object":
+                            raise V8Blocked("pilot", "browse_response_not_object")
+                        normalized_occurrences, normalized_events = (
+                            _normalize_coverage_response(
+                                payload, block_id=f"{arm_id}_{pilot_id}",
+                                start_s=start_s, end_s=end_s))
+                    except Exception as exc:
+                        attempt_audit["validation_error"] = (
+                            f"{type(exc).__name__}: {exc}")
+                        attempt_audits.append(attempt_audit)
+                        if attempt == 2:
+                            raise
+                        continue
+                    attempt_audit["validation_error"] = None
+                    attempt_audits.append(attempt_audit)
+                    break
                 raw_path = window_dir / "raw_response.txt"
                 raw_path.write_text(str(answer.text), encoding="utf-8")
-                payload, response_shape = _parse_coverage_payload(str(answer.text))
-                if response_shape != "object":
-                    raise V8Blocked("pilot", "browse_response_not_object")
-                normalized_occurrences, normalized_events = _normalize_coverage_response(
-                    payload, block_id=f"{arm_id}_{pilot_id}",
-                    start_s=start_s, end_s=end_s)
                 window_candidates = []
                 for index, region in enumerate(payload.get("regions") or []):
                     rel = list(map(float, region.get("interval") or []))
@@ -1849,6 +1878,7 @@ def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path
                     "source_interval": [start_s, end_s], "status": "observed",
                     "response_shape": response_shape, "sampling_audit": sampling,
                     "request_audit": dict(getattr(answer, "request_audit", {}) or {}),
+                    "attempt_audits": attempt_audits,
                     "raw_response_path": str(raw_path),
                     "occurrence_candidate_count": len(normalized_occurrences),
                     "event_candidate_count": len(normalized_events),
