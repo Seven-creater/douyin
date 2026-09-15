@@ -15,10 +15,32 @@ cd "$repo_dir"
 mkdir -p "$output_dir"
 echo "[$(date -Is)] queued git=$(git rev-parse --short HEAD)"
 
-while nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits \
-    | grep -Eq '[0-9]'; do
-  echo "[$(date -Is)] waiting: GPU compute processes are still active"
-  sleep 60
+gpu_memory_busy() {
+  local snapshot value count
+  snapshot="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits \
+    2>/dev/null || true)"
+  count="$(printf '%s\n' "$snapshot" | sed '/^[[:space:]]*$/d' | wc -l)"
+  [[ "$count" -eq 8 ]] || return 0
+  while IFS= read -r value; do
+    value="${value//[[:space:]]/}"
+    [[ "$value" =~ ^[0-9]+$ ]] || return 0
+    (( value >= 2000 )) && return 0
+  done <<< "$snapshot"
+  return 1
+}
+
+# Require three consecutive idle snapshots.  A single empty compute-process
+# query has produced a false-free result on this shared server before.
+idle_checks=0
+while (( idle_checks < 3 )); do
+  if gpu_memory_busy; then
+    idle_checks=0
+    echo "[$(date -Is)] waiting: one or more GPUs use at least 2 GiB"
+  else
+    ((idle_checks += 1))
+    echo "[$(date -Is)] idle confirmation $idle_checks/3"
+  fi
+  (( idle_checks < 3 )) && sleep 30
 done
 
 echo "[$(date -Is)] GPUs free; starting Omni editorial trial"
