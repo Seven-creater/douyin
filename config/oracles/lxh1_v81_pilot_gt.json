@@ -1,0 +1,38 @@
+{
+  "schema_version": "v81_pilot_ground_truth_v1",
+  "source": "luoxiaohei1",
+  "annotation_method": "Identity-free temporal anchors from prior native-video inspection, rechecked against the 2026-09-15 8fps contact sheet around 5412s",
+  "prompt_isolation": "This file was created after A/B/C browse finished and was never passed to a browse or Context Watch prompt",
+  "ground_truth": [
+    {
+      "id": "debris_impact",
+      "source_interval": [5395.17, 5395.58],
+      "goal": "salient_visual",
+      "description": "debris impact and dust burst"
+    },
+    {
+      "id": "dark_subject_down",
+      "source_interval": [5398.33, 5399.25],
+      "goal": "adversity",
+      "description": "dark local subject lies down and braces to rise"
+    },
+    {
+      "id": "hand_transformation",
+      "source_interval": [5400.75, 5402.0],
+      "goal": "transformation",
+      "description": "a hand changes into a large clawed form"
+    },
+    {
+      "id": "dark_subject_launches",
+      "source_interval": [5406.42, 5407.42],
+      "goal": "action",
+      "description": "dark local subject launches forward"
+    },
+    {
+      "id": "white_small_subject_initiates_contact",
+      "source_interval": [5412.5, 5412.9],
+      "goal": "initiating_action",
+      "description": "white small local subject raises an arm immediately before the dark subject is displaced"
+    }
+  ]
+}

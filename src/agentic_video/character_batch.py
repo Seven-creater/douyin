@@ -1880,9 +1880,12 @@ def select_v81_pilot_windows(spec: Mapping[str, Any], *, duration_s: float,
 
 
 def evaluate_browse_arms(arms: Mapping[str, Mapping[str, Any]],
-                         ground_truth: Iterable[Mapping[str, Any]] | None = None) \
+                         ground_truth: Iterable[Mapping[str, Any]] | None = None,
+                         *, sufficient_recall: float = 0.8) \
         -> dict[str, Any]:
     """Compare candidate recall post hoc; ground truth never enters prompts."""
+    if not 0.0 <= sufficient_recall <= 1.0:
+        raise ValueError("sufficient_recall must be within [0,1]")
     gt = [dict(row) for row in (ground_truth or [])]
     result = {"schema_version": "v81_browse_arm_comparison_v1", "arms": {}}
     for arm_id in ("A", "B", "C"):
@@ -1921,11 +1924,16 @@ def evaluate_browse_arms(arms: Mapping[str, Mapping[str, Any]],
     if gt:
         recalls = {arm: row["candidate_temporal_recall"]
                    for arm, row in result["arms"].items()}
-        result["diagnosis"] = (
-            "temporal_sampling_bottleneck" if recalls["B"] > recalls["A"] else
-            "compression_bottleneck" if recalls["C"] > recalls["B"] else
-            "lowest_cost_arm_sufficient" if len(set(recalls.values())) == 1 else
-            "mixed_or_prompt_bottleneck")
+        if len(set(recalls.values())) == 1:
+            result["diagnosis"] = (
+                "lowest_cost_arm_sufficient"
+                if recalls["A"] >= sufficient_recall
+                else "shared_browse_or_prompt_bottleneck")
+        else:
+            result["diagnosis"] = (
+                "temporal_sampling_bottleneck" if recalls["B"] > recalls["A"] else
+                "compression_bottleneck" if recalls["C"] > recalls["B"] else
+                "mixed_or_prompt_bottleneck")
     else:
         result["diagnosis"] = "pending_human_ground_truth"
     return result

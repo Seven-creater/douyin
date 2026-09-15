@@ -1043,6 +1043,29 @@ def test_browse_arm_diagnosis_separates_sampling_and_compression() -> None:
     assert result["diagnosis"] == "temporal_sampling_bottleneck"
 
 
+def test_browse_arm_diagnosis_does_not_call_equal_low_recall_sufficient() -> None:
+    gt = [
+        {"source_interval": [10, 11], "goal": "first"},
+        {"source_interval": [20, 21], "goal": "second"},
+    ]
+    arms = {
+        arm: {"candidates": [{"source_interval": [10, 11]}]}
+        for arm in ("A", "B", "C")
+    }
+    result = v8.evaluate_browse_arms(arms, gt)
+    assert result["diagnosis"] == "shared_browse_or_prompt_bottleneck"
+
+
+def test_browse_arm_diagnosis_chooses_low_cost_when_equal_and_sufficient() -> None:
+    gt = [{"source_interval": [10, 11], "goal": "action"}]
+    arms = {
+        arm: {"candidates": [{"source_interval": [10, 11]}]}
+        for arm in ("A", "B", "C")
+    }
+    result = v8.evaluate_browse_arms(arms, gt)
+    assert result["diagnosis"] == "lowest_cost_arm_sufficient"
+
+
 def test_v81_pilot_retries_fixed_bin_contract_violation(
         tmp_path: Path, monkeypatch) -> None:
     cfg = load_config()
