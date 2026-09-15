@@ -1430,10 +1430,8 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                       + list(character.get("aliases") or []))
         if str(value or "").strip()
     }
-    results: list[dict[str, Any]] = []
-    all_occurrences: list[dict[str, Any]] = []
-    verified_events: list[dict[str, Any]] = []
-    partial_events: list[dict[str, Any]] = []
+    result_by_context: dict[str, dict[str, Any]] = {}
+    pending: list[dict[str, Any]] = []
     for context in merged:
         context_id = str(context["context_id"])
         context_dir = output_dir / context_id
@@ -1444,20 +1442,59 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     cached.get("candidate_interval") == context["source_interval"] and
                     cached.get("status") in {"observed", "observed_empty"} and
                     cached.get("context_status") == "complete"):
-                results.append(cached)
-                all_occurrences.extend(cached.get("occurrences") or [])
-                verified_events.extend(cached.get("event_candidates") or [])
+                result_by_context[context_id] = cached
                 continue
-        current = expand_boundary_context(
-            context["source_interval"], duration_s=duration_s,
-            initial_context_s=initial_context_s, max_context_s=max_context_s)
-        attempts: list[dict[str, Any]] = []
-        validation_retries: dict[tuple[float, float], int] = {}
-        final: dict[str, Any] | None = None
-        for attempt_index in range(1, 16):
+        pending.append({
+            "context": context,
+            "context_id": context_id,
+            "context_dir": context_dir,
+            "result_path": result_path,
+            "current": expand_boundary_context(
+                context["source_interval"], duration_s=duration_s,
+                initial_context_s=initial_context_s,
+                max_context_s=max_context_s),
+            "attempts": [],
+            "validation_retries": {},
+            "attempt_index": 1,
+        })
+
+    # Submit one request per active context in each round.  The process pool then
+    # distributes independent contexts over all GPU pairs, while boundary
+    # expansion and contract retries remain ordered within each context.
+    while pending:
+        active = [state for state in pending if state["attempt_index"] <= 15]
+        exhausted = [state for state in pending if state["attempt_index"] > 15]
+        for state in exhausted:
+            context = state["context"]
+            final = {
+                "schema_version": "context_watch_result_v1",
+                "contract_sha256": contract_sha,
+                "context_id": state["context_id"],
+                "candidate_interval": context["source_interval"],
+                "source_interval": state["current"]["source_interval"],
+                "lead_refs": context["lead_refs"],
+                "status": "failed",
+                "context_status": "failed",
+                "failure_class": "verification",
+                "failure_stage": "context",
+                "reason_code": "context_watch_attempts_exhausted",
+                "detail": "context watch exhausted 15 attempts",
+                "attempts": state["attempts"],
+            }
+            _write_json(state["result_path"], final)
+            result_by_context[state["context_id"]] = final
+        if not active:
+            break
+
+        requests: list[dict[str, Any]] = []
+        request_meta: list[dict[str, Any]] = []
+        for state in active:
+            context = state["context"]
+            current = state["current"]
+            attempt_index = state["attempt_index"]
             start_s, end_s = current["source_interval"]
             interval_key = (float(start_s), float(end_s))
-            retry_suffix = ("" if not validation_retries.get(interval_key) else
+            retry_suffix = ("" if not state["validation_retries"].get(interval_key) else
                 "\nCONTRACT RETRY: The prior answer violated the output contract. "
                 "Return exactly one JSON object with no Markdown fence, no assistant "
                 "label, no repetition, and no text after the closing brace.")
@@ -1466,17 +1503,87 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                 + f"\nThe exact input duration is {end_s - start_s:.6f} seconds."
                 + retry_suffix
             )
-            answer = None
+            requests.append({
+                "video_path": source_video,
+                "prompt": prompt,
+                "kwargs": {
+                    "start_s": start_s,
+                    "end_s": end_s,
+                    "clip_dir": (state["context_dir"] /
+                                 f"attempt_{attempt_index:02d}" / "source_clip"),
+                    "fps": float(context_fps),
+                    "duration_s": end_s - start_s,
+                    "max_new_tokens": 768,
+                    "use_audio_in_video": False,
+                    "stop_after_json_object": True,
+                },
+            })
+            request_meta.append({
+                "state": state,
+                "context": context,
+                "attempt_index": attempt_index,
+                "start_s": start_s,
+                "end_s": end_s,
+                "interval_key": interval_key,
+            })
+
+        try:
+            if hasattr(runner, "watch_many"):
+                answers = runner.watch_many(requests)
+            else:
+                answers = [runner.watch(row["video_path"], row["prompt"],
+                                        **row["kwargs"])
+                           for row in requests]
+        except Exception as exc:
+            for meta in request_meta:
+                state = meta["state"]
+                context = meta["context"]
+                failed_attempt = {
+                    "attempt": meta["attempt_index"],
+                    "source_interval": [meta["start_s"], meta["end_s"]],
+                    "duration_s": round(meta["end_s"] - meta["start_s"], 6),
+                    "status": "failed_infrastructure",
+                    "validation_error": f"{type(exc).__name__}: {exc}",
+                    "raw_response_path": None,
+                    "sampling": None,
+                    "gpu_pair": None,
+                }
+                state["attempts"].append(failed_attempt)
+                final = {
+                    "schema_version": "context_watch_result_v1",
+                    "contract_sha256": contract_sha,
+                    "context_id": state["context_id"],
+                    "candidate_interval": context["source_interval"],
+                    "source_interval": state["current"]["source_interval"],
+                    "lead_refs": context["lead_refs"],
+                    "status": "failed",
+                    "context_status": "failed",
+                    "failure_class": "infrastructure",
+                    "failure_stage": "context",
+                    "reason_code": "context_watch_runner_failed",
+                    "detail": str(exc),
+                    "attempts": state["attempts"],
+                }
+                _write_json(state["result_path"], final)
+                result_by_context[state["context_id"]] = final
+            pending = []
+            break
+
+        if len(answers) != len(request_meta):
+            raise AssertionError("context watch answer count does not match requests")
+        next_pending: list[dict[str, Any]] = []
+        for meta, answer in zip(request_meta, answers, strict=True):
+            state = meta["state"]
+            context = meta["context"]
+            attempt_index = meta["attempt_index"]
+            start_s = meta["start_s"]
+            end_s = meta["end_s"]
+            interval_key = meta["interval_key"]
             raw_path = None
             try:
-                answer = runner.watch(
-                    source_video, prompt, start_s=start_s, end_s=end_s,
-                    clip_dir=context_dir / f"attempt_{attempt_index:02d}" / "source_clip",
-                    fps=float(context_fps), duration_s=end_s - start_s,
-                    max_new_tokens=768,
-                    use_audio_in_video=False, stop_after_json_object=True)
                 raw_text = str(answer.text)
-                attempt_dir = context_dir / f"attempt_{attempt_index:02d}"
+                attempt_dir = (state["context_dir"] /
+                               f"attempt_{attempt_index:02d}")
                 raw_path = attempt_dir / "raw_response.txt"
                 raw_path.parent.mkdir(parents=True, exist_ok=True)
                 raw_path.write_text(raw_text, encoding="utf-8")
@@ -1510,20 +1617,22 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     "sampling": getattr(answer, "sampling", None),
                     "gpu_pair": getattr(answer, "gpu_pair", None),
                 }
-                attempts.append(attempt)
+                state["attempts"].append(attempt)
                 incomplete = observation_status == "observed" and not (
                     left_complete and right_complete)
                 if incomplete:
                     expanded = expand_boundary_context(
                         context["source_interval"], duration_s=duration_s,
-                        current_interval=current["source_interval"],
+                        current_interval=state["current"]["source_interval"],
                         left_context_complete=left_complete,
                         right_context_complete=right_complete,
                         initial_context_s=initial_context_s,
                         expansion_step_s=expansion_step_s,
                         max_context_s=max_context_s)
-                    if expanded["source_interval"] != current["source_interval"]:
-                        current = expanded
+                    if expanded["source_interval"] != state["current"]["source_interval"]:
+                        state["current"] = expanded
+                        state["attempt_index"] += 1
+                        next_pending.append(state)
                         continue
                     context_status = "partial"
                 elif observation_status == "unreliable":
@@ -1544,9 +1653,8 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     "boundary_reason": str(payload.get("boundary_reason") or "").strip(),
                     "occurrences": occurrences,
                     "event_candidates": events,
-                    "attempts": attempts,
+                    "attempts": state["attempts"],
                 }
-                break
             except Exception as exc:
                 failed_attempt = {
                     "attempt": attempt_index,
@@ -1558,17 +1666,19 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     "sampling": getattr(answer, "sampling", None),
                     "gpu_pair": getattr(answer, "gpu_pair", None),
                 }
-                attempts.append(failed_attempt)
+                state["attempts"].append(failed_attempt)
                 if (isinstance(exc, V8Blocked) and
-                        validation_retries.get(interval_key, 0) < 1):
-                    validation_retries[interval_key] = 1
+                        state["validation_retries"].get(interval_key, 0) < 1):
+                    state["validation_retries"][interval_key] = 1
+                    state["attempt_index"] += 1
+                    next_pending.append(state)
                     continue
                 final = {
                     "schema_version": "context_watch_result_v1",
                     "contract_sha256": contract_sha,
-                    "context_id": context_id,
+                    "context_id": state["context_id"],
                     "candidate_interval": context["source_interval"],
-                    "source_interval": current["source_interval"],
+                    "source_interval": state["current"]["source_interval"],
                     "lead_refs": context["lead_refs"],
                     "status": "failed",
                     "context_status": "failed",
@@ -1577,19 +1687,26 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     "reason_code": getattr(exc, "reason_code",
                                                "context_watch_failed"),
                     "detail": str(exc),
-                    "attempts": attempts,
+                    "attempts": state["attempts"],
                 }
-                break
-        if final is None:
-            raise AssertionError("context watch exhausted without result")
-        _write_json(result_path, final)
-        results.append(final)
-        if final.get("status") == "observed":
-            all_occurrences.extend(final.get("occurrences") or [])
-            if final.get("context_status") == "complete":
-                verified_events.extend(final.get("event_candidates") or [])
-            else:
-                partial_events.extend(final.get("event_candidates") or [])
+            _write_json(state["result_path"], final)
+            result_by_context[state["context_id"]] = final
+        pending = next_pending
+
+    results = [result_by_context[str(context["context_id"])] for context in merged]
+    all_occurrences = [
+        occurrence for result in results if result.get("status") == "observed"
+        for occurrence in result.get("occurrences") or []]
+    verified_events = [
+        event for result in results
+        if (result.get("status") == "observed" and
+            result.get("context_status") == "complete")
+        for event in result.get("event_candidates") or []]
+    partial_events = [
+        event for result in results
+        if (result.get("status") == "observed" and
+            result.get("context_status") == "partial")
+        for event in result.get("event_candidates") or []]
     build_occurrence_bank([], all_occurrences, output_dir / "occurrence_bank.jsonl")
     _write_jsonl(output_dir / "event_candidates.jsonl", verified_events)
     _write_jsonl(output_dir / "partial_event_candidates.jsonl", partial_events)

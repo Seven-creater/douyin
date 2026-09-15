@@ -937,6 +937,41 @@ def test_context_watch_retries_repeated_model_output_without_accepting_prefix(
     assert result["results"][0]["attempts"][1]["status"] == "observed_empty"
 
 
+def test_context_watch_batches_independent_contexts(tmp_path: Path, monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 100.0)
+
+    class Runner:
+        batch_sizes = []
+
+        def watch_many(self, requests):
+            self.batch_sizes.append(len(requests))
+            payload = {
+                "status": "observed_empty",
+                "occurrences": [],
+                "event_candidates": [],
+                "left_context_complete": True,
+                "right_context_complete": True,
+                "boundary_reason": "",
+            }
+            return [SimpleNamespace(
+                text=json.dumps(payload), sampling={"ok": True}, gpu_pair="0,1")
+                for _ in requests]
+
+    runner = Runner()
+    result = v8.build_context_watch_bank(
+        cfg, _spec(), [
+            {"source_interval": [10, 12], "lead_id": "first"},
+            {"source_interval": [50, 52], "lead_id": "second"},
+        ], tmp_path / "context", source_video=source, runner=runner,
+        source_sha256="source", merge_gap_s=1.0)
+    assert runner.batch_sizes == [2]
+    assert result["complete"] is True
+    assert result["observed_empty_count"] == 2
+
+
 def test_pilot_selection_has_fixed_category_mix() -> None:
     spec = _spec()
     spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
