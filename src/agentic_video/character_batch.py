@@ -2416,26 +2416,55 @@ def build_character_profiles(cfg: AppConfig, spec: Mapping[str, Any],
             positive_ids = ["seed"] + [f"positive_{index:02d}"
                                          for index in range(len(positives))]
             negative_ids = [f"negative_{index:02d}" for index in range(len(negatives))]
-            comparisons: list[dict[str, Any]] = []
+            comparison_specs: list[dict[str, Any]] = []
             for left_id, right_id in itertools.permutations(positive_ids, 2):
                 left, left_roi, _ = exported[left_id]
                 right, right_roi, _ = exported[right_id]
-                comparison = _directed_identity_compare(
-                    runner, left, right, left_roi=left_roi, right_roi=right_roi)
-                comparison.update({"left_id": left_id, "right_id": right_id,
-                                   "expected": "same"})
-                comparisons.append(comparison)
+                comparison_specs.append({
+                    "left_id": left_id, "right_id": right_id, "expected": "same",
+                    "left": left, "right": right,
+                    "left_roi": left_roi, "right_roi": right_roi,
+                })
             for positive_id in positive_ids:
                 for negative_id in negative_ids:
                     for left_id, right_id in ((positive_id, negative_id),
                                               (negative_id, positive_id)):
                         left, left_roi, _ = exported[left_id]
                         right, right_roi, _ = exported[right_id]
-                        comparison = _directed_identity_compare(
-                            runner, left, right, left_roi=left_roi, right_roi=right_roi)
-                        comparison.update({"left_id": left_id, "right_id": right_id,
-                                           "expected": "different"})
-                        comparisons.append(comparison)
+                        comparison_specs.append({
+                            "left_id": left_id, "right_id": right_id,
+                            "expected": "different", "left": left, "right": right,
+                            "left_roi": left_roi, "right_roi": right_roi,
+                        })
+            requests = []
+            for row in comparison_specs:
+                images = [row["left"], row["right"]]
+                images.extend(path for path in (row["left_roi"], row["right_roi"])
+                              if path is not None)
+                row["input_images"] = images
+                requests.append({
+                    "image_paths": images, "prompt": IDENTITY_COMPARE_PROMPT,
+                    "kwargs": {"max_new_tokens": 256},
+                })
+            answers = (runner.inspect_media_many(requests)
+                       if hasattr(runner, "inspect_media_many") else [
+                           runner.inspect_media(row["image_paths"], row["prompt"],
+                                                **row["kwargs"])
+                           for row in requests])
+            if len(answers) != len(comparison_specs):
+                raise V8Blocked("identity", "identity_response_count_mismatch", form_id)
+            comparisons: list[dict[str, Any]] = []
+            for row, answer in zip(comparison_specs, answers, strict=True):
+                result, parsed = _identity_result(str(answer.text))
+                comparisons.append({
+                    "left": str(row["left"]), "right": str(row["right"]),
+                    "input_images": [str(path) for path in row["input_images"]],
+                    "full_frames_present": True,
+                    "result": result, "parsed": parsed,
+                    "raw_response": str(answer.text),
+                    "left_id": row["left_id"], "right_id": row["right_id"],
+                    "expected": row["expected"],
+                })
             passed = all(row["result"] == row["expected"] for row in comparisons)
             profile = {
                 "schema_version": "character_form_profile_v1",

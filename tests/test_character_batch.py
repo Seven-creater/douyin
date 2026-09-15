@@ -513,6 +513,9 @@ def test_profile_uses_all_directed_pairs_and_no_confidence(tmp_path: Path,
     monkeypatch.setattr(v8, "_export_identity_example", fake_export)
 
     class Runner:
+        def __init__(self):
+            self.batch_sizes = []
+
         def inspect_media(self, paths, _prompt, **_kwargs):
             is_negative = any("negative" in str(path) for path in paths[:2])
             return SimpleNamespace(text=json.dumps({
@@ -520,18 +523,26 @@ def test_profile_uses_all_directed_pairs_and_no_confidence(tmp_path: Path,
                 "confidence": .99,
             }))
 
+        def inspect_media_many(self, requests):
+            self.batch_sizes.append(len(requests))
+            return [self.inspect_media(
+                row["image_paths"], row["prompt"], **row["kwargs"])
+                    for row in requests]
+
     manifest = {"characters": [{"character_id": "char:xiaohei", "forms": [{
         "form_id": "char:xiaohei/form_white_small",
         "trusted_seed": {"source_time_s": 5412.7, "confirmed_by": "human"},
         "positive_examples": [{"source_time_s": 1}, {"source_time_s": 2}],
         "hard_negatives": [{"source_time_s": 3}],
     }]}]}
+    runner = Runner()
     result = v8.build_character_profiles(
         cfg, _spec(), manifest, tmp_path / "profiles",
-        source_video=source, runner=Runner())
+        source_video=source, runner=runner)
     profile = result["profiles"][0]
     assert profile["status"] == "usable"
     assert len(profile["comparisons"]) == 12
+    assert runner.batch_sizes == [12]
     assert all("confidence" not in row["parsed"] for row in profile["comparisons"])
 
 
