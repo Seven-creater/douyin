@@ -278,6 +278,25 @@ def build_parser() -> argparse.ArgumentParser:
     omni_edit.add_argument("--worker-timeout", type=float, default=3600.0)
     omni_edit.add_argument("--force", action="store_true")
 
+    reference_v9 = sub.add_parser(
+        "reference-program-v9",
+        help="induce evidence-bound Content/Edit/Material programs from one reference")
+    reference_v9.add_argument(
+        "--reference",
+        default="data/videos/7682719919410072847/video.mp4")
+    reference_v9.add_argument("--output", required=True)
+    reference_v9.add_argument(
+        "--gpu-pairs", required=True,
+        help="Omni worker pairs, e.g. '0,1;2,3;4,5;6,7'")
+    reference_v9.add_argument("--worker-timeout", type=float, default=3600.0)
+    reference_v9.add_argument("--force", action="store_true")
+
+    reference_v9_accept = sub.add_parser(
+        "reference-program-v9-accept",
+        help="freeze V9 reference programs after section and transfer review")
+    reference_v9_accept.add_argument("--output", required=True)
+    reference_v9_accept.add_argument("--human-review", required=True)
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -1808,6 +1827,26 @@ def _omni_edit_trial(args, cfg) -> dict:
         return {"output": str(output), **acceptance}
 
 
+def _reference_program_v9(args, cfg) -> dict:
+    from src.agentic_video.reference_program_v9 import run_reference_program_v9
+    from src.perception.omni_pool import OmniProcessPool
+
+    reference = _v8_path(args.reference)
+    output = Path(args.output).resolve()
+    with OmniProcessPool(
+            args.gpu_pairs, cfg.perception.get("omni") or {},
+            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+            response_timeout_s=args.worker_timeout) as runner:
+        return run_reference_program_v9(
+            cfg, reference, output, runner=runner, force=args.force)
+
+
+def _reference_program_v9_accept(args, _cfg) -> dict:
+    from src.agentic_video.reference_program_v9 import accept_reference_programs
+
+    return accept_reference_programs(Path(args.output), Path(args.human_review))
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -1874,6 +1913,8 @@ def main(argv: list[str] | None = None) -> int:
                 "character-batch-accept": _character_batch_accept,
                 "character-recall-v82": _target_recall_v82,
                 "omni-edit-trial": _omni_edit_trial,
+                "reference-program-v9": _reference_program_v9,
+                "reference-program-v9-accept": _reference_program_v9_accept,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
