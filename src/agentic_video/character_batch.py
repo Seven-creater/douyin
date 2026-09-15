@@ -1440,13 +1440,22 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
             context["source_interval"], duration_s=duration_s,
             initial_context_s=initial_context_s, max_context_s=max_context_s)
         attempts: list[dict[str, Any]] = []
+        validation_retries: dict[tuple[float, float], int] = {}
         final: dict[str, Any] | None = None
         for attempt_index in range(1, 16):
             start_s, end_s = current["source_interval"]
+            interval_key = (float(start_s), float(end_s))
+            retry_suffix = ("" if not validation_retries.get(interval_key) else
+                "\nCONTRACT RETRY: The prior answer violated the output contract. "
+                "Return exactly one JSON object with no Markdown fence, no assistant "
+                "label, no repetition, and no text after the closing brace.")
             prompt = (
                 NEUTRAL_OCCURRENCE_PROMPT
                 + f"\nThe exact input duration is {end_s - start_s:.6f} seconds."
+                + retry_suffix
             )
+            answer = None
+            raw_path = None
             try:
                 answer = runner.watch(
                     source_video, prompt, start_s=start_s, end_s=end_s,
@@ -1527,6 +1536,21 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                 }
                 break
             except Exception as exc:
+                failed_attempt = {
+                    "attempt": attempt_index,
+                    "source_interval": [start_s, end_s],
+                    "duration_s": round(end_s - start_s, 6),
+                    "status": "failed_validation",
+                    "validation_error": f"{type(exc).__name__}: {exc}",
+                    "raw_response_path": str(raw_path) if raw_path else None,
+                    "sampling": getattr(answer, "sampling", None),
+                    "gpu_pair": getattr(answer, "gpu_pair", None),
+                }
+                attempts.append(failed_attempt)
+                if (isinstance(exc, V8Blocked) and
+                        validation_retries.get(interval_key, 0) < 1):
+                    validation_retries[interval_key] = 1
+                    continue
                 final = {
                     "schema_version": "context_watch_result_v1",
                     "contract_sha256": contract_sha,

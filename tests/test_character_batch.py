@@ -886,6 +886,42 @@ def test_context_watch_expands_left_boundary_and_keeps_cross_shot_occurrences(
         "context_understanding_not_final_boundary")
 
 
+def test_context_watch_retries_repeated_model_output_without_accepting_prefix(
+        tmp_path: Path, monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 100.0)
+    payload = {
+        "status": "observed_empty", "occurrences": [], "event_candidates": [],
+        "left_context_complete": True, "right_context_complete": True,
+        "boundary_reason": "",
+    }
+
+    class Runner:
+        calls = 0
+
+        def watch(self, _video, prompt, **_kwargs):
+            self.calls += 1
+            text = json.dumps(payload)
+            if self.calls == 1:
+                text = f"{text}\nassistant\n{text}"
+            else:
+                assert "CONTRACT RETRY" in prompt
+            return SimpleNamespace(text=text, sampling={"ok": True}, gpu_pair="0,1")
+
+    runner = Runner()
+    result = v8.build_context_watch_bank(
+        cfg, _spec(), [{"source_interval": [50, 52], "lead_id": "edge"}],
+        tmp_path / "context", source_video=source, runner=runner,
+        source_sha256="source")
+    assert runner.calls == 2
+    assert result["complete"] is True
+    assert result["observed_empty_count"] == 1
+    assert result["results"][0]["attempts"][0]["status"] == "failed_validation"
+    assert result["results"][0]["attempts"][1]["status"] == "observed_empty"
+
+
 def test_pilot_selection_has_fixed_category_mix() -> None:
     spec = _spec()
     spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
