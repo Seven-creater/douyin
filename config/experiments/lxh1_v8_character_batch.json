@@ -123,6 +123,41 @@
       {"id": "D", "model": "Qwen3.5-4B-FlashVID-r100", "fps": 4.0, "retention_ratio": 1.0, "backend": "native_bypass", "base_url": "http://127.0.0.1:8104/v1"}
     ]
   },
+  "diagnostic": {
+    "pilot": {
+      "browse_window_s": 45.0,
+      "random_seed": 20260915,
+      "known_hard": [
+        {"id": "action_boundary_5412", "source_interval": [5412.3, 5419.0], "reason": "action begins immediately before the old context window"},
+        {"id": "dissolve_seed_5391", "source_interval": [5391.2, 5391.8], "reason": "known dissolve frame must be unreliable rather than identity evidence"},
+        {"id": "w15_dialogue", "source_interval": [2965.0, 3005.0], "reason": "dialogue-heavy scene with limited visible action"},
+        {"id": "transformed_subject", "source_interval": [5385.0, 5405.0], "reason": "transformed subject and high motion"},
+        {"id": "multi_subject_early", "source_interval": [1425.0, 1470.0], "reason": "multiple visually similar local subjects"},
+        {"id": "quiet_identity_context", "source_interval": [1875.0, 1920.0], "reason": "quiet but potentially meaningful interaction"},
+        {"id": "black_cat_form", "source_interval": [195.0, 240.0], "reason": "small dark animal form and static shots"},
+        {"id": "late_battle_transition", "source_interval": [5320.0, 5365.0], "reason": "cuts, motion and pre-climax state changes"}
+      ]
+    },
+    "browse_arms": [
+      {"id": "A", "model": "Qwen3.5-4B-FlashVID-r010", "fps": 2.0, "retention_ratio": 0.10, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1", "media_root": "/dev/shm/flashvid_perception"},
+      {"id": "B", "model": "Qwen3.5-4B-FlashVID-r010", "fps": 4.0, "retention_ratio": 0.10, "backend": "flashvid", "base_url": "http://127.0.0.1:8101/v1", "media_root": "/dev/shm/flashvid_perception"},
+      {"id": "C", "model": "Qwen3.5-4B-FlashVID-r025", "fps": 4.0, "retention_ratio": 0.25, "backend": "flashvid", "base_url": "http://127.0.0.1:8102/v1", "media_root": "/dev/shm/flashvid_perception"}
+    ],
+    "context_watch": {
+      "initial_context_s": 10.0,
+      "expansion_step_s": 4.0,
+      "max_context_s": 40.0,
+      "merge_gap_s": 1.0,
+      "forced_candidates": [
+        {"lead_id": "action_boundary_5412", "lead_kind": "known_hard_regression", "source_interval": [5412.3, 5419.0]}
+      ]
+    },
+    "gate": {
+      "human_specific_fact_ratio_min": 0.90,
+      "placeholder_count_max": 0,
+      "out_of_bounds_count_max": 0
+    }
+  },
   "flashvid_runtime": "/data02/usr/wangqihao/Demo/test/flashvid",
   "perception": {
     "gpu_pairs": ["0,1", "2,3", "4,5", "6,7"],

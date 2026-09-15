@@ -174,12 +174,17 @@ def test_uniform_coverage_drops_regions_not_worth_rewatch() -> None:
     payload = {"regions": [
         {"interval": [0.0, 2.0], "activity": "standing",
          "worth_rewatch": False,
-         "occurrences": [{"local_id": "A", "visual_state": "standing"}],
-         "event_candidates": [{"actor_local_id": "A", "action": "standing"}]},
+         "occurrences": [{"local_id": "A", "local_description": "small figure",
+                           "visual_state": "standing", "roi": None}],
+         "event_candidates": [{"actor_local_id": "A", "action": "standing",
+                               "patient_local_id": None, "visible_result": ""}]},
         {"interval": [5.0, 8.0], "activity": "one subject strikes another",
          "worth_rewatch": True,
-         "occurrences": [{"local_id": "A", "visual_state": "arm moves"}],
-         "event_candidates": [{"actor_local_id": "A", "action": "strikes"}]},
+         "occurrences": [{"local_id": "A", "local_description": "small pale figure",
+                           "visual_state": "arm moves", "roi": None}],
+         "event_candidates": [{"actor_local_id": "A", "action": "strikes",
+                               "patient_local_id": None,
+                               "visible_result": "arm reaches forward"}]},
     ]}
     occurrences, events = v8._normalize_coverage_response(
         payload, block_id="b0000", start_s=90.0, end_s=135.0)
@@ -195,6 +200,7 @@ def test_coverage_parser_wraps_bare_array_but_keeps_interval_contract() -> None:
     with pytest.raises(v8.V8Blocked, match="candidate_interval_outside"):
         v8._normalize_coverage_response({"regions": [{
             "interval": [0, 10], "worth_rewatch": True,
+            "activity": "one figure crosses the road",
             "occurrences": [], "event_candidates": [],
         }]}, block_id="b", start_s=0, end_s=45)
 
@@ -231,9 +237,12 @@ def test_coverage_event_cannot_reference_missing_occurrence() -> None:
     with pytest.raises(v8.V8Blocked, match="event_patient_missing_occurrence"):
         v8._normalize_coverage_response({"regions": [{
             "interval": [0, 3], "worth_rewatch": True,
-            "occurrences": [{"local_id": "A", "visual_state": "raises arm"}],
+            "activity": "one figure raises an arm toward another",
+            "occurrences": [{"local_id": "A", "local_description": "small figure",
+                             "visual_state": "raises arm", "roi": None}],
             "event_candidates": [{"actor_local_id": "A", "action": "strikes",
-                                  "patient_local_id": "B"}],
+                                  "patient_local_id": "B",
+                                  "visible_result": "the other figure moves"}],
         }]}, block_id="b", start_s=0, end_s=45)
 
 
@@ -746,3 +755,173 @@ def test_batch_acceptance_requires_zero_selected_identity_and_direction_errors(
                           "core_expression_understood": True}}})
     assert result["final_passed_count"] == 0
     assert not called
+
+
+def test_v81_cli_exposes_diagnostic_phases() -> None:
+    parser = build_parser()
+    for phase in ("coverage-audit", "pilot", "context"):
+        args = parser.parse_args(["character-batch", "--phase", phase,
+                                  "--output", "run"])
+        assert args.phase == phase
+
+
+def test_neutral_validator_rejects_placeholders_and_repeated_output() -> None:
+    payload = {
+        "status": "observed",
+        "occurrences": [{"local_id": "A", "visible_interval": [0, 1],
+                         "local_description": "small pale figure",
+                         "visual_state": "visible state", "roi": None}],
+        "event_candidates": [], "left_context_complete": True,
+        "right_context_complete": True, "boundary_reason": "",
+    }
+    with pytest.raises(v8.V8Blocked, match="non_concrete_visual_state"):
+        v8.validate_neutral_observation(payload, duration_s=2)
+    with pytest.raises(v8.V8Blocked, match="trailing_or_repeated"):
+        v8._single_json_object('{"status":"observed_empty"}\nAssistant: again')
+
+
+def test_neutral_validator_distinguishes_empty_and_unreliable() -> None:
+    empty = {
+        "status": "observed_empty", "occurrences": [], "event_candidates": [],
+        "left_context_complete": True, "right_context_complete": True,
+        "boundary_reason": "",
+    }
+    assert v8.validate_neutral_observation(empty, duration_s=2) == "observed_empty"
+    unreliable = {**empty, "status": "unreliable",
+                  "boundary_reason": "the image is a dissolve between two shots"}
+    assert v8.validate_neutral_observation(unreliable, duration_s=2) == "unreliable"
+
+
+def test_neutral_validator_rejects_out_of_bounds_event() -> None:
+    payload = {
+        "status": "observed",
+        "occurrences": [{"local_id": "A", "visible_interval": [0, 2],
+                         "local_description": "small pale figure",
+                         "visual_state": "raises one arm", "roi": None}],
+        "event_candidates": [{"interval": [1, 7], "actor_local_id": "A",
+                              "action": "raises an arm", "patient_local_id": None,
+                              "visible_result": "the hand reaches shoulder height"}],
+        "left_context_complete": True, "right_context_complete": True,
+        "boundary_reason": "",
+    }
+    with pytest.raises(v8.V8Blocked, match="out_of_bounds_event_0_interval"):
+        v8.validate_neutral_observation(payload, duration_s=6)
+
+
+def test_temporal_coverage_uses_interval_union() -> None:
+    audit = v8.compute_temporal_coverage(
+        [[0, 10], [5, 15], [30, 40]], eligible_interval=[0, 50])
+    assert audit["input_interval_count"] == 3
+    assert audit["covered_duration_s"] == 25
+    assert audit["coverage_ratio"] == .5
+    assert audit["uncovered_intervals"] == [[15.0, 30.0], [40.0, 50.0]]
+
+
+def test_candidate_merge_and_context_expansion_are_not_six_second_units() -> None:
+    merged = v8.merge_candidate_regions([
+        {"source_interval": [5410, 5413], "lead_id": "a"},
+        {"source_interval": [5412, 5415], "lead_id": "b"},
+        {"source_interval": [5416, 5417], "lead_id": "c"},
+    ], max_gap_s=1)
+    assert len(merged) == 1
+    assert merged[0]["source_interval"] == [5410.0, 5417.0]
+    initial = v8.expand_boundary_context(
+        [5412.3, 5419], duration_s=6000, initial_context_s=10, max_context_s=40)
+    assert initial["duration_s"] == 10
+    expanded = v8.expand_boundary_context(
+        [5412.3, 5419], duration_s=6000,
+        current_interval=initial["source_interval"],
+        left_context_complete=False, right_context_complete=True,
+        initial_context_s=10, expansion_step_s=4, max_context_s=40)
+    assert expanded["duration_s"] == 14
+    assert expanded["source_interval"][0] < initial["source_interval"][0]
+
+
+def test_context_watch_expands_left_boundary_and_keeps_cross_shot_occurrences(
+        tmp_path: Path, monkeypatch) -> None:
+    cfg = load_config()
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    monkeypatch.setattr(v8.common, "video_duration_s", lambda *_: 100.0)
+
+    class Runner:
+        calls = []
+
+        def watch(self, _video, _prompt, **kwargs):
+            self.calls.append((kwargs["start_s"], kwargs["end_s"]))
+            left_complete = len(self.calls) > 1
+            payload = {
+                "status": "observed",
+                "occurrences": [
+                    {"local_id": "A", "visible_interval": [0, 2],
+                     "local_description": "small pale figure in a wide shot",
+                     "visual_state": "extends one arm", "roi": None},
+                    {"local_id": "B", "visible_interval": [2, 4],
+                     "local_description": "small pale figure in a close shot",
+                     "visual_state": "looks upward", "roi": None},
+                ],
+                "event_candidates": [{"interval": [0.5, 2],
+                    "actor_local_id": "A", "action": "extends one arm",
+                    "patient_local_id": None,
+                    "visible_result": "the arm becomes fully extended"}],
+                "left_context_complete": left_complete,
+                "right_context_complete": True,
+                "boundary_reason": ("input begins after motion starts"
+                                    if not left_complete else "event is contained"),
+            }
+            return SimpleNamespace(text=json.dumps(payload), sampling={"ok": True},
+                                   gpu_pair="0,1")
+
+    result = v8.build_context_watch_bank(
+        cfg, _spec(), [{"source_interval": [50, 52], "lead_id": "edge"}],
+        tmp_path / "context", source_video=source, runner=Runner(),
+        source_sha256="source", initial_context_s=10, max_context_s=40)
+    assert len(Runner.calls) == 2
+    assert Runner.calls[1][0] < Runner.calls[0][0]
+    assert result["complete"] is True
+    assert result["occurrence_count"] == 2
+
+
+def test_pilot_selection_has_fixed_category_mix() -> None:
+    spec = _spec()
+    spec["coverage"].update({"head_s": 0, "tail_s": 0, "min_movie_s": 100})
+    spec["diagnostic"] = {"pilot": {
+        "browse_window_s": 10, "random_seed": 7,
+        "known_hard": [{"id": f"k{i}", "source_interval": [i * 50, i * 50 + 2],
+                         "reason": "hard"} for i in range(8)],
+    }}
+    leads = [{"source_interval": [450 + i * 30, 452 + i * 30],
+              "lead_kind": "high", "lead_id": f"h{i}"} for i in range(6)]
+    windows = v8.select_v81_pilot_windows(
+        spec, duration_s=1000, high_value_leads=leads)
+    assert len(windows) == 20
+    assert [sum(row["category"] == category for row in windows)
+            for category in ("known_hard", "random", "high_value")] == [8, 6, 6]
+
+
+def test_browse_arm_diagnosis_separates_sampling_and_compression() -> None:
+    gt = [{"source_interval": [10, 11], "goal": "action"},
+          {"source_interval": [20, 21], "goal": "subject"}]
+    result = v8.evaluate_browse_arms({
+        "A": {"candidates": [{"source_interval": [10, 11]}]},
+        "B": {"candidates": [{"source_interval": [10, 11]},
+                              {"source_interval": [20, 21]}]},
+        "C": {"candidates": [{"source_interval": [10, 11]},
+                              {"source_interval": [20, 21]}]},
+    }, gt)
+    assert result["diagnosis"] == "temporal_sampling_bottleneck"
+
+
+def test_v81_character_plan_uses_reference_soft_range_and_density() -> None:
+    task = {"task_id": "t", "character_id": "char:xiaohei",
+            "family": "custom", "core_expression": "visible action",
+            "view_ids": ["v"]}
+    view = {"view_id": "v", "event_id": "e", "source_video": "source.mp4",
+            "renderable_interval": [1, 3], "core_interval": [1.2, 2.8],
+            "binding_sha256": "b", "event_fact_sha256": "e"}
+    plan = v8.build_reference_driven_character_plan({"measured_style": {
+        "reference_duration_s": 20, "meaningful_unit_count": 8,
+        "shot_duration_p90_s": 2}}, task, [view])
+    assert plan["style"]["soft_range_s"] == [17.0, 23.0]
+    assert plan["style"]["reference_meaningful_unit_count"] == 8
+    assert plan["filler_added"] is False

@@ -215,7 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="run one phase of the V8 occurrence-first shared character experiment")
     character_batch.add_argument(
         "--phase", required=True,
-        choices=("bootstrap", "coverage", "identity", "events", "plan", "render"))
+        choices=("bootstrap", "coverage", "coverage-audit", "pilot", "context",
+                 "identity", "events", "plan", "render"))
     character_batch.add_argument(
         "--spec", default="config/experiments/lxh1_v8_character_batch.json")
     character_batch.add_argument("--video", default=None)
@@ -226,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--gpu-pairs", default=None,
         help="Omni worker pairs, e.g. '0,1;2,3;4,5;6,7'")
     character_batch.add_argument("--worker-timeout", type=float, default=3600.0)
+    character_batch.add_argument(
+        "--context-scope", choices=("pilot", "full"), default="pilot",
+        help="context phase input: diagnostic pilot union or full coverage leads")
+    character_batch.add_argument(
+        "--pilot-ground-truth", default=None,
+        help="optional post-hoc GT JSON; never enters browse prompts")
     character_batch.add_argument("--force", action="store_true")
 
     character_batch_accept = sub.add_parser(
@@ -942,13 +949,14 @@ def _v8_omni_pairs(spec: dict, args) -> str:
 
 def _character_batch_impl(args, cfg) -> dict:
     from src.agentic_video.character_batch import (
-        V8Blocked, bind_occurrence_identities,
+        V8Blocked, _read_jsonl, bind_occurrence_identities,
+        build_context_watch_bank, build_coverage_audit,
         build_character_creation_queue, build_character_profiles,
         build_external_character_prior, build_mention_index,
         build_investigation_leads, build_occurrence_bank_from_leads,
         build_seed_review_sheet, build_uniform_coverage_map,
         derive_character_evidence_views, read_v8_spec, run_character_batch,
-        verify_shared_event_facts,
+        run_v81_diagnostic, select_v81_pilot_windows, verify_shared_event_facts,
     )
     from src.agentic_video.recipe_v2 import sha256_file
     from src.agentic_video.target_v7 import collect_flashvid_runtime
@@ -1041,32 +1049,150 @@ def _character_batch_impl(args, cfg) -> dict:
             "failed_count": coverage["failed_count"],
             "occurrence_count": coverage["occurrence_count"],
         }
-    elif args.phase in {"identity", "events", "render"}:
+    elif args.phase == "coverage-audit":
+        coverage_path = output / "coverage" / "coverage_manifest.json"
+        coverage_manifest = (json.loads(coverage_path.read_text(encoding="utf-8"))
+                             if coverage_path.is_file() else {"blocks": []})
+        global_intervals = [row["source_interval"]
+                            for row in coverage_manifest.get("blocks") or []
+                            if row.get("status") == "covered"]
+        dense_intervals = []
+        for context_path in (
+                output / "diagnostic" / "context_watch" / "context_watch_manifest.json",
+                output / "context_watch" / "context_watch_manifest.json"):
+            if context_path.is_file():
+                context_manifest = json.loads(context_path.read_text(encoding="utf-8"))
+                dense_intervals.extend(
+                    row["source_interval"] for row in context_manifest.get("results") or []
+                    if row.get("status") in {"observed", "observed_empty"})
+        legacy_intervals = []
+        legacy_root = output / "occurrence_observation"
+        if legacy_root.is_dir():
+            for result_path in legacy_root.glob("*/result.json"):
+                try:
+                    row = json.loads(result_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if row.get("source_interval"):
+                    legacy_intervals.append(row["source_interval"])
+        duration_s = common.video_duration_s(
+            cfg.perception.get("ffprobe_bin", "ffprobe"), source)
+        audit = build_coverage_audit(
+            spec, duration_s=duration_s, global_intervals=global_intervals,
+            dense_intervals=dense_intervals, legacy_intervals=legacy_intervals,
+            output_path=output / "coverage_audit.json")
+        result = {
+            "global_coverage_ratio": audit["global_browse"]["coverage_ratio"],
+            "dense_coverage_ratio": audit["dense_context_watch"]["coverage_ratio"],
+            "legacy_coverage_ratio": audit["legacy_targeted_windows"]["coverage_ratio"],
+        }
+    elif args.phase == "pilot":
+        from src.perception.flashvid_client import FlashVIDClient, FlashVIDEndpoint
+
+        mentions = _read_jsonl(output / "mention_index.jsonl")
+        coverage_candidates_path = output / "coverage" / "event_candidates.jsonl"
+        coverage_candidates = (_read_jsonl(coverage_candidates_path)
+                               if coverage_candidates_path.is_file() else [])
+        leads = build_investigation_leads(mentions, coverage_candidates)
+        duration_s = common.video_duration_s(
+            cfg.perception.get("ffprobe_bin", "ffprobe"), source)
+        pilot_windows = select_v81_pilot_windows(
+            spec, duration_s=duration_s, high_value_leads=leads)
+        clients = {}
+        for row in (spec.get("diagnostic") or {}).get("browse_arms") or []:
+            arm_id = str(row["id"])
+            clients[arm_id] = FlashVIDClient(FlashVIDEndpoint(
+                arm=arm_id, base_url=str(row["base_url"]), model=str(row["model"]),
+                fps=float(row["fps"]), retention_ratio=float(row["retention_ratio"]),
+                backend=str(row["backend"])))
+        ground_truth = None
+        if args.pilot_ground_truth:
+            raw_gt = json.loads(Path(args.pilot_ground_truth).read_text(encoding="utf-8"))
+            ground_truth = (raw_gt.get("ground_truth") or []
+                            if isinstance(raw_gt, dict) else raw_gt)
+        diagnostic = run_v81_diagnostic(
+            cfg, spec, output / "diagnostic" / "pilot", clients=clients,
+            source_video=source, pilot_windows=pilot_windows,
+            source_sha256=source_hash, ground_truth=ground_truth)
+        result = {
+            "pilot_window_count": diagnostic["pilot_window_count"],
+            "selected_candidate_count": diagnostic["selected_candidate_count"],
+            "complete": diagnostic["complete"],
+            "diagnosis": diagnostic["arm_comparison"]["diagnosis"],
+        }
+    elif args.phase in {"context", "identity", "events", "render"}:
         from src.perception.omni_pool import OmniProcessPool
-        from src.agentic_video.character_batch import _read_jsonl
 
         with OmniProcessPool(
                 _v8_omni_pairs(spec, args), cfg.perception.get("omni") or {},
                 ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
                 response_timeout_s=args.worker_timeout) as runner:
-            if args.phase == "identity":
+            if args.phase == "context":
+                context_cfg = (spec.get("diagnostic") or {}).get("context_watch") or {}
+                if args.context_scope == "pilot":
+                    candidate_path = (output / "diagnostic" / "pilot" /
+                                      "selected_candidates.jsonl")
+                    context_output = output / "diagnostic" / "context_watch"
+                    if not candidate_path.is_file():
+                        raise V8Blocked("context", "context_candidates_missing")
+                    candidates = _read_jsonl(candidate_path)
+                else:
+                    candidate_path = output / "coverage" / "event_candidates.jsonl"
+                    context_output = output / "context_watch"
+                    if not candidate_path.is_file():
+                        raise V8Blocked("context", "context_candidates_missing")
+                    coverage_candidates = _read_jsonl(candidate_path)
+                    mentions = _read_jsonl(output / "mention_index.jsonl")
+                    candidates = build_investigation_leads(
+                        mentions, coverage_candidates)
+                candidates.extend(context_cfg.get("forced_candidates") or [])
+                context_manifest = build_context_watch_bank(
+                    cfg, spec, candidates, context_output, source_video=source,
+                    runner=runner, source_sha256=source_hash,
+                    initial_context_s=float(context_cfg.get("initial_context_s", 10.0)),
+                    max_context_s=float(context_cfg.get("max_context_s", 40.0)),
+                    expansion_step_s=float(context_cfg.get("expansion_step_s", 4.0)),
+                    merge_gap_s=float(context_cfg.get("merge_gap_s", 1.0)),
+                    reuse_completed=not args.force)
+                result = {
+                    "context_scope": args.context_scope,
+                    "candidate_count": context_manifest["candidate_count"],
+                    "observed_count": context_manifest["observed_count"],
+                    "partial_count": context_manifest["partial_count"],
+                    "unreliable_count": context_manifest["unreliable_count"],
+                    "failed_count": context_manifest["failed_count"],
+                    "complete": context_manifest["complete"],
+                }
+            elif args.phase == "identity":
                 coverage_manifest = json.loads((output / "coverage" /
                     "coverage_manifest.json").read_text(encoding="utf-8"))
                 if not coverage_manifest.get("complete"):
                     raise V8Blocked("coverage", "uniform_coverage_incomplete")
-                coverage_candidates_path = output / "coverage" / "event_candidates.jsonl"
-                if not coverage_candidates_path.is_file():
-                    coverage_candidates_path = output / "event_candidates.jsonl"
-                mentions = _read_jsonl(output / "mention_index.jsonl")
-                coverage_candidates = _read_jsonl(coverage_candidates_path)
-                leads = build_investigation_leads(mentions, coverage_candidates)
-                occurrence_manifest = build_occurrence_bank_from_leads(
-                    cfg, spec, leads, output / "occurrence_observation",
-                    source_video=source, runner=runner,
-                    source_sha256=source_hash, reuse_completed=not args.force)
-                if not occurrence_manifest.get("complete"):
-                    raise V8Blocked(
-                        "occurrence", "neutral_occurrence_observation_incomplete")
+                context_manifest_path = (output / "context_watch" /
+                                         "context_watch_manifest.json")
+                if context_manifest_path.is_file():
+                    occurrence_manifest = json.loads(
+                        context_manifest_path.read_text(encoding="utf-8"))
+                    if not occurrence_manifest.get("complete"):
+                        raise V8Blocked("context", "full_context_watch_incomplete")
+                    shutil.copy2(output / "context_watch" / "occurrence_bank.jsonl",
+                                 output / "occurrence_bank.jsonl")
+                    shutil.copy2(output / "context_watch" / "event_candidates.jsonl",
+                                 output / "event_candidates.jsonl")
+                else:
+                    coverage_candidates_path = output / "coverage" / "event_candidates.jsonl"
+                    if not coverage_candidates_path.is_file():
+                        coverage_candidates_path = output / "event_candidates.jsonl"
+                    mentions = _read_jsonl(output / "mention_index.jsonl")
+                    coverage_candidates = _read_jsonl(coverage_candidates_path)
+                    leads = build_investigation_leads(mentions, coverage_candidates)
+                    occurrence_manifest = build_occurrence_bank_from_leads(
+                        cfg, spec, leads, output / "occurrence_observation",
+                        source_video=source, runner=runner,
+                        source_sha256=source_hash, reuse_completed=not args.force)
+                    if not occurrence_manifest.get("complete"):
+                        raise V8Blocked(
+                            "occurrence", "neutral_occurrence_observation_incomplete")
                 if not args.seed_manifest:
                     raise V8Blocked("identity", "human_seed_manifest_required")
                 seed_manifest = json.loads(
@@ -1080,9 +1206,10 @@ def _character_batch_impl(args, cfg) -> dict:
                     source_video=source, runner=runner)
                 result = {
                     "usable_forms": profiles["usable_form_count"],
-                    "neutral_observations": occurrence_manifest["observation_count"],
-                    "neutral_observation_failures": occurrence_manifest[
-                        "failed_observation_count"],
+                    "neutral_observations": occurrence_manifest.get(
+                        "observation_count", occurrence_manifest.get("candidate_count", 0)),
+                    "neutral_observation_failures": occurrence_manifest.get(
+                        "failed_observation_count", occurrence_manifest.get("failed_count", 0)),
                     **bindings["metrics"],
                 }
             elif args.phase == "events":

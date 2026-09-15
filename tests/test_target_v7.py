@@ -594,6 +594,9 @@ def test_native_frame_export_uses_all_source_frames_and_stable_ids(tmp_path: Pat
     assert 47 <= len(manifest["frames"]) <= 49
     assert manifest["frames"][0]["frame_id"] == "f000"
     assert Path(manifest["frames"][0]["labeled_path"]).is_file()
+    assert manifest["source_timing"]["time_base"] is not None
+    assert manifest["source_timing"]["boundary_basis"] == (
+        "decoded_native_frames_and_showinfo_pts")
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg unavailable")

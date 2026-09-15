@@ -284,9 +284,14 @@ def prepare_reference_task(cfg: AppConfig, experiment_spec: dict[str, Any],
             "reference_duration_s": round(duration, 6),
             "reference_fps": round(reference_fps, 6) if reference_fps else None,
             "reference_frame_count": reference_frames,
+            "meaningful_unit_count": len(shots),
             "shot_intervals": [[row["start_s"], row["end_s"]] for row in shots],
+            "shot_duration_distribution": [round(value, 6) for value in durations],
             "shot_duration_p50_s": round(statistics.median(durations), 6),
             "shot_duration_p90_s": round(_percentile(durations, 0.9), 6),
+            "section_duration_distribution": [round(
+                row["source_interval"][1] - row["source_interval"][0], 6)
+                for row in sections],
             "section_proportions": [round((row["source_interval"][1] -
                                                    row["source_interval"][0]) / duration, 6)
                                     for row in sections],
@@ -965,7 +970,8 @@ def run_browse_escalation(arms: Mapping[str, dict[str, Any]], *,
 
 def extract_native_frames(ffmpeg_bin: str, source_video: Path,
                           source_interval: Iterable[float], output_dir: Path,
-                          *, max_frames: int = 60) -> dict[str, Any]:
+                          *, max_frames: int = 60,
+                          ffprobe_bin: str = "ffprobe") -> dict[str, Any]:
     """Decode every source frame in a narrow range and retain true showinfo PTS."""
     start, end = map(float, source_interval)
     if not 0 < end - start <= 1.0 + 1e-6:
@@ -1008,9 +1014,28 @@ def extract_native_frames(ffmpeg_bin: str, source_video: Path,
         frames.append({"frame_id": frame_id, "pts_s": round(pts, 6),
                        "path": str(path), "labeled_path": str(labeled),
                        "sha256": sha256_file(path)})
-    manifest = {"source_interval": [start, end], "source_fps": round(
-        len(frames) / (end - start), 6), "frames": frames, "selected": None,
-        "command": command}
+    probe = subprocess.run([
+        ffprobe_bin, "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=avg_frame_rate,r_frame_rate,time_base",
+        "-of", "json", str(source_video),
+    ], capture_output=True, text=True, timeout=120)
+    stream = {}
+    if probe.returncode == 0:
+        try:
+            stream = (json.loads(probe.stdout).get("streams") or [{}])[0]
+        except (json.JSONDecodeError, IndexError, TypeError):
+            stream = {}
+    manifest = {
+        "source_interval": [start, end],
+        "source_fps": round(len(frames) / (end - start), 6),
+        "source_timing": {
+            "avg_frame_rate": stream.get("avg_frame_rate"),
+            "r_frame_rate": stream.get("r_frame_rate"),
+            "time_base": stream.get("time_base"),
+            "boundary_basis": "decoded_native_frames_and_showinfo_pts",
+        },
+        "frames": frames, "selected": None, "command": command,
+    }
     _write_json(output_dir / "native_frames_manifest.json", manifest)
     return manifest
 

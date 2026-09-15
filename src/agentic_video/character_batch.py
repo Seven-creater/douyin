@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import random
 import re
 import shutil
 import subprocess
@@ -295,17 +296,15 @@ def coverage_blocks(duration_s: float, *, block_s: float = 45.0,
 NEUTRAL_COVERAGE_PROMPT = """Watch this source-movie block as a neutral observer.
 Do not identify any character, use names, infer canonical identity, discuss story templates,
 or assign editorial functions. Give local subjects temporary labels A/B/C within each region.
-Inspect the entire block before selecting regions. Report only visible state changes,
-interactions, entrances/exits, or other concrete activity that genuinely merits a closer
-original-video rewatch; never report routine static presence merely to fill the list.
-Return strict JSON with one top-level object (never a bare array):
-{"regions":[{"interval":[0.0,2.0],"activity":"visible coarse activity",
-"worth_rewatch":true,"temporal_refinement_needed":false,
-"occurrences":[{"local_id":"A","local_description":"visible
-appearance only","visual_state":"visible state/activity","roi":null}],
-"event_candidates":[{"actor_local_id":"A","action":"visible action",
-"patient_local_id":null,"visible_result":"visible change or empty"}]}]}
-Times are seconds relative to this block. First inspect the full 45-second input, then
+Inspect the entire block before selecting regions. Report only concrete visible state changes,
+interactions, entrances/exits, or other activity that merits a closer original-video rewatch;
+never report routine static presence or generic placeholder descriptions to fill the list.
+Return exactly one JSON object with a regions array. Each region must contain interval,
+activity, worth_rewatch, temporal_refinement_needed, occurrences, and event_candidates.
+Each occurrence must contain local_id, a concrete local_description, a concrete visual_state,
+and roi. Each event candidate must contain actor_local_id, a concrete action,
+patient_local_id, and the visible_result. Times are seconds relative to this block.
+First inspect the full 45-second input, then
 evaluate its early [0,15), middle [15,30), and late [30,45] thirds independently.
 Select at most one strongest qualifying region per third. Every interval must be 2-6
 seconds; do not split the timeline into fixed bins. For a longer action, return the tightest 6-second
@@ -417,6 +416,7 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
             continue
         if region.get("worth_rewatch") is not True:
             continue
+        _concrete_text(region.get("activity"), field="coverage_activity")
         interval = region.get("interval") or []
         if not isinstance(interval, list) or len(interval) != 2:
             continue
@@ -436,8 +436,10 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
             row = {
                 "occurrence_id": occurrence_id,
                 "source_interval": absolute,
-                "local_description": str(raw.get("local_description") or "").strip(),
-                "visual_state": str(raw.get("visual_state") or "").strip(),
+                "local_description": _concrete_text(
+                    raw.get("local_description"), field="coverage_local_description"),
+                "visual_state": _concrete_text(
+                    raw.get("visual_state"), field="coverage_visual_state"),
                 "roi": raw.get("roi"),
                 "coverage_block_id": block_id,
                 "observation_status": "coarse_candidate",
@@ -458,9 +460,12 @@ def _normalize_coverage_response(payload: dict[str, Any], *, block_id: str,
                 "event_candidate_id": f"candidate_{block_id}_{region_index:02d}_{event_index:02d}",
                 "source_interval": absolute,
                 "actor_occurrence_id": actor,
-                "action": str(raw.get("action") or "").strip(),
+                "action": _concrete_text(raw.get("action"),
+                                         field="coverage_action"),
                 "patient_occurrence_id": patient,
-                "visible_result": str(raw.get("visible_result") or "").strip(),
+                "visible_result": _concrete_text(
+                    raw.get("visible_result"), field="coverage_visible_result",
+                    allow_empty=True),
                 "activity": str(region.get("activity") or "").strip(),
                 "worth_rewatch": bool(region.get("worth_rewatch")),
                 "status": "candidate",
@@ -839,19 +844,139 @@ def build_investigation_leads(mention_rows: Iterable[Mapping[str, Any]],
         row["source_interval"][0], row["source_interval"][1], row["lead_kind"]))
 
 
-NEUTRAL_OCCURRENCE_PROMPT = """Observe only this short source-movie clip.
-Do not identify characters, use any canonical or personal names, infer story roles, or
-decide how the clip should be edited. Create a separate local occurrence A/B/C for every
-visually distinct subject. Report only visible appearance, action direction, and state
-change. Every event actor and non-null patient must reference an occurrence in this same
-response. Times are relative to this clip. Return one JSON object only:
-{"occurrences":[{"local_id":"A","visible_interval":[0.0,2.0],
-"local_description":"neutral visible appearance","visual_state":"visible state",
-"roi":null}],"event_candidates":[{"interval":[0.0,2.0],
-"actor_local_id":"A","action":"visible verb","patient_local_id":null,
-"visible_result":"visible result or empty"}],"passed":true}
-Do not merge a group into one occurrence. If no subject/action is legible, return
-{"occurrences":[],"event_candidates":[],"passed":false}."""
+NEUTRAL_OCCURRENCE_PROMPT = """Observe this source-movie context without identifying
+characters or assigning story/editing roles. Work in this order: first list local visual
+subjects using temporary labels A/B/C; then describe actions using only labels already
+listed. A new shot may create a new local occurrence even when it may depict the same
+person. Within one continuous shot, do not fragment one subject without visible reason.
+
+Return exactly one JSON object and nothing else. Required keys are status, occurrences,
+event_candidates, left_context_complete, right_context_complete, and boundary_reason.
+status must be observed, observed_empty, or unreliable. Use observed_empty only when the
+clip is clear and has no concrete subject or event worth recording. Use unreliable for
+dissolves, black/corrupted frames, severe motion blur, or insufficient visual evidence.
+
+Each occurrence needs local_id, visible_interval, a concrete visible appearance in
+local_description, a concrete current action/state in visual_state, and roi (null or four
+normalized coordinates). Each event needs interval, actor_local_id, a concrete visible
+action, patient_local_id (or null), and the visible result (empty only when no result is
+shown). Times are seconds relative to this input and must stay inside its exact duration.
+Every event actor and non-null patient must reference an occurrence in this response.
+Do not use placeholder phrases, generic statements, canonical names, or causal claims not
+shown by the clip. If the input starts after an action has already begun, set
+left_context_complete=false. If it ends before the visible action/result finishes, set
+right_context_complete=false and briefly explain boundary_reason."""
+
+
+NEUTRAL_OBSERVATION_STATES = {"observed", "observed_empty", "unreliable"}
+_PLACEHOLDER_TEXT = {
+    "visible state", "visible state/activity", "visible verb", "visible action",
+    "visible result", "visible result or empty", "visible change or empty",
+    "neutral visible appearance", "visible appearance only",
+    "visible coarse activity", "人物发生动作", "某个角色在活动", "发生了某种动作",
+}
+
+
+def _single_json_object(text: str) -> dict[str, Any]:
+    """Parse one object while rejecting repeated JSON or model commentary."""
+    candidate = str(text or "").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", candidate, re.S | re.I)
+    if fenced:
+        candidate = fenced.group(1).strip()
+    decoder = json.JSONDecoder()
+    try:
+        value, offset = decoder.raw_decode(candidate)
+    except json.JSONDecodeError as exc:
+        raise V8Blocked("model", "invalid_json_response", str(exc)) from exc
+    if candidate[offset:].strip():
+        raise V8Blocked("model", "trailing_or_repeated_model_output")
+    if not isinstance(value, dict):
+        raise V8Blocked("model", "json_response_not_object")
+    return value
+
+
+def _concrete_text(value: Any, *, field: str, allow_empty: bool = False) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text and allow_empty:
+        return ""
+    normalized = text.lower().strip(" .,:;!?，。！？：；\"'")
+    if (not normalized or normalized in _PLACEHOLDER_TEXT or
+            normalized.startswith("visible ") or
+            normalized in {"unknown", "n/a", "none", "something happens"}):
+        raise V8Blocked("occurrence", f"non_concrete_{field}")
+    if not re.search(r"[A-Za-z0-9\u3400-\u9fff]", normalized):
+        raise V8Blocked("occurrence", f"non_concrete_{field}")
+    return text
+
+
+def validate_neutral_observation(payload: Mapping[str, Any], *, duration_s: float) \
+        -> str:
+    """Validate observable content, not merely JSON shape or string length."""
+    if duration_s <= 0:
+        raise ValueError("duration_s must be positive")
+    if _contains_forbidden_key(payload):
+        raise V8Blocked("occurrence", "neutral_observation_contaminated")
+    legacy_passed = payload.get("passed")
+    status = str(payload.get("status") or (
+        "observed" if legacy_passed is True else "observed_empty"
+    ))
+    if status not in NEUTRAL_OBSERVATION_STATES:
+        raise V8Blocked("occurrence", "invalid_observation_status")
+    occurrences = payload.get("occurrences") or []
+    events = payload.get("event_candidates") or []
+    if status != "observed" and (occurrences or events):
+        raise V8Blocked("occurrence", "non_observed_status_contains_claims")
+    if status == "observed" and not occurrences:
+        raise V8Blocked("occurrence", "observed_without_occurrences")
+    if status == "unreliable":
+        reason = _concrete_text(payload.get("boundary_reason"), field="unreliable_reason")
+        if not reason:
+            raise V8Blocked("occurrence", "unreliable_without_reason")
+        return status
+
+    local_ids: set[str] = set()
+    concrete_values: list[str] = []
+    for index, occurrence in enumerate(occurrences):
+        if not isinstance(occurrence, Mapping):
+            raise V8Blocked("occurrence", "invalid_occurrence")
+        local_id = str(occurrence.get("local_id") or "").strip()
+        if not local_id or local_id in local_ids:
+            raise V8Blocked("occurrence", "duplicate_or_missing_local_occurrence_id")
+        local_ids.add(local_id)
+        _normalize_relative_interval(
+            occurrence.get("visible_interval"), start_s=0.0, end_s=duration_s,
+            field=f"occurrence_{index}_visible_interval")
+        concrete_values.extend([
+            _concrete_text(occurrence.get("local_description"),
+                           field="local_description"),
+            _concrete_text(occurrence.get("visual_state"), field="visual_state"),
+        ])
+    for index, event in enumerate(events):
+        if not isinstance(event, Mapping):
+            raise V8Blocked("occurrence", "invalid_event_candidate")
+        actor = str(event.get("actor_local_id") or "").strip()
+        patient = str(event.get("patient_local_id") or "").strip()
+        if actor not in local_ids:
+            raise V8Blocked("occurrence", "event_actor_missing_occurrence")
+        if patient and patient not in local_ids:
+            raise V8Blocked("occurrence", "event_patient_missing_occurrence")
+        _normalize_relative_interval(
+            event.get("interval"), start_s=0.0, end_s=duration_s,
+            field=f"event_{index}_interval")
+        concrete_values.append(_concrete_text(event.get("action"), field="action"))
+        result = _concrete_text(event.get("visible_result"), field="visible_result",
+                                allow_empty=True)
+        if result:
+            concrete_values.append(result)
+    duplicates = [value for value in set(concrete_values)
+                  if concrete_values.count(value) > 2]
+    if duplicates:
+        raise V8Blocked("occurrence", "repeated_semantic_fields")
+    for key in ("left_context_complete", "right_context_complete"):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, bool):
+            raise V8Blocked("occurrence", f"invalid_{key}")
+    return status
 
 
 def investigation_windows(leads: Iterable[Mapping[str, Any]], *, duration_s: float,
@@ -890,6 +1015,129 @@ def investigation_windows(leads: Iterable[Mapping[str, Any]], *, duration_s: flo
     for index, row in enumerate(merged):
         row["observation_id"] = f"observation_{index:05d}"
     return merged
+
+
+def compute_temporal_coverage(intervals: Iterable[Iterable[float]], *,
+                              eligible_interval: Iterable[float]) -> dict[str, Any]:
+    """Measure time-union coverage instead of treating window count as coverage."""
+    eligible = list(map(float, eligible_interval))
+    if len(eligible) != 2 or eligible[1] <= eligible[0]:
+        raise ValueError("eligible_interval must have increasing endpoints")
+    eligible_start, eligible_end = eligible
+    clipped: list[list[float]] = []
+    for raw in intervals:
+        row = list(map(float, raw))
+        if len(row) != 2 or row[1] <= row[0]:
+            continue
+        start = max(eligible_start, row[0])
+        end = min(eligible_end, row[1])
+        if end > start:
+            clipped.append([start, end])
+    union: list[list[float]] = []
+    for start, end in sorted(clipped):
+        if union and start <= union[-1][1] + 1e-6:
+            union[-1][1] = max(union[-1][1], end)
+        else:
+            union.append([start, end])
+    uncovered: list[list[float]] = []
+    cursor = eligible_start
+    for start, end in union:
+        if start > cursor + 1e-6:
+            uncovered.append([cursor, start])
+        cursor = max(cursor, end)
+    if cursor < eligible_end - 1e-6:
+        uncovered.append([cursor, eligible_end])
+    covered_s = sum(end - start for start, end in union)
+    eligible_s = eligible_end - eligible_start
+    return {
+        "eligible_interval": [eligible_start, eligible_end],
+        "eligible_duration_s": round(eligible_s, 6),
+        "input_interval_count": len(clipped),
+        "union_intervals": [[round(a, 6), round(b, 6)] for a, b in union],
+        "covered_duration_s": round(covered_s, 6),
+        "coverage_ratio": round(covered_s / eligible_s, 6),
+        "uncovered_intervals": [[round(a, 6), round(b, 6)]
+                                for a, b in uncovered],
+    }
+
+
+def merge_candidate_regions(candidates: Iterable[Mapping[str, Any]], *,
+                            max_gap_s: float = 1.0) -> list[dict[str, Any]]:
+    """Merge overlapping leads before Omni context viewing."""
+    if max_gap_s < 0:
+        raise ValueError("max_gap_s cannot be negative")
+    normalized = []
+    for index, candidate in enumerate(candidates):
+        interval = list(map(float, candidate.get("source_interval") or []))
+        if len(interval) != 2 or interval[1] <= interval[0]:
+            continue
+        refs = list(candidate.get("lead_refs") or [])
+        if not refs:
+            refs = [{"lead_kind": candidate.get("lead_kind"),
+                     "lead_id": candidate.get("lead_id", f"lead_{index:04d}")}]
+        normalized.append({"source_interval": interval, "lead_refs": refs})
+    merged: list[dict[str, Any]] = []
+    for row in sorted(normalized, key=lambda item: item["source_interval"]):
+        if merged and row["source_interval"][0] <= (
+                merged[-1]["source_interval"][1] + max_gap_s):
+            merged[-1]["source_interval"][1] = max(
+                merged[-1]["source_interval"][1], row["source_interval"][1])
+            merged[-1]["lead_refs"].extend(row["lead_refs"])
+        else:
+            merged.append({"source_interval": list(row["source_interval"]),
+                           "lead_refs": list(row["lead_refs"])})
+    for index, row in enumerate(merged):
+        row["context_id"] = f"context_{index:05d}"
+        row["source_interval"] = [round(value, 6)
+                                  for value in row["source_interval"]]
+    return merged
+
+
+def expand_boundary_context(candidate_interval: Iterable[float], *, duration_s: float,
+                            current_interval: Iterable[float] | None = None,
+                            left_context_complete: bool = True,
+                            right_context_complete: bool = True,
+                            initial_context_s: float = 10.0,
+                            expansion_step_s: float = 4.0,
+                            max_context_s: float = 40.0) -> dict[str, Any]:
+    """Expand transport context without redefining the underlying event boundary."""
+    candidate = list(map(float, candidate_interval))
+    if (len(candidate) != 2 or candidate[1] <= candidate[0] or duration_s <= 0 or
+            initial_context_s <= 0 or max_context_s < initial_context_s):
+        raise ValueError("invalid context expansion arguments")
+    if current_interval is None:
+        center = sum(candidate) / 2.0
+        width = min(max_context_s, max(initial_context_s, candidate[1] - candidate[0]))
+        start = max(0.0, center - width / 2.0)
+        end = min(duration_s, start + width)
+        start = max(0.0, end - width)
+    else:
+        current = list(map(float, current_interval))
+        if len(current) != 2 or current[1] <= current[0]:
+            raise ValueError("current_interval must have increasing endpoints")
+        start, end = current
+        room = max(0.0, max_context_s - (end - start))
+        left_add = min(expansion_step_s if not left_context_complete else 0.0, room)
+        room -= left_add
+        right_add = min(expansion_step_s if not right_context_complete else 0.0, room)
+        start = max(0.0, start - left_add)
+        end = min(duration_s, end + right_add)
+        # Use unused room at a source boundary on the opposite side.
+        target_width = min(max_context_s, (current[1] - current[0]) +
+                           left_add + right_add)
+        if end - start < target_width:
+            if start <= 1e-6:
+                end = min(duration_s, target_width)
+            elif end >= duration_s - 1e-6:
+                start = max(0.0, duration_s - target_width)
+    interval = [round(start, 6), round(end, 6)]
+    return {
+        "source_interval": interval,
+        "duration_s": round(end - start, 6),
+        "at_safety_limit": end - start >= max_context_s - 1e-6,
+        "left_source_boundary": start <= 1e-6,
+        "right_source_boundary": end >= duration_s - 1e-6,
+    }
 
 
 def _normalize_neutral_observation(payload: Mapping[str, Any], *,
@@ -974,7 +1222,7 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
     if batch_size < 1:
         raise ValueError("occurrence observation batch_size must be positive")
     contract = {
-        "schema_version": "neutral_occurrence_contract_v1",
+        "schema_version": "neutral_occurrence_contract_v2",
         "source_video": str(source_video),
         "source_sha256": source_sha256 or sha256_file(source_video),
         "prompt_sha256": hashlib.sha256(
@@ -1033,7 +1281,7 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
                 "clip_dir": output_dir / row["observation_id"] / "source_clip",
                 "fps": 12.0,
                 "duration_s": row["source_interval"][1] - row["source_interval"][0],
-                "max_new_tokens": 1536,
+                "max_new_tokens": 768,
                 "use_audio_in_video": False,
             },
         } for row in batch]
@@ -1052,16 +1300,14 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
                 "raw_response": str(answer.text),
             })
             try:
-                payload = _parse_object(str(answer.text))
+                payload = _single_json_object(str(answer.text))
                 serialized = json.dumps(payload, ensure_ascii=False).lower()
                 if any(term in serialized for term in forbidden_terms):
                     raise V8Blocked("occurrence", "neutral_observation_named_character")
-                passed = payload.get("passed") is True
-                if not passed and (payload.get("occurrences") or
-                                   payload.get("event_candidates")):
-                    raise V8Blocked(
-                        "occurrence", "unsupported_observation_contains_claims")
-                if passed:
+                observation_status = validate_neutral_observation(
+                    payload, duration_s=(window["source_interval"][1] -
+                                         window["source_interval"][0]))
+                if observation_status == "observed":
                     new_occurrences, new_events = _normalize_neutral_observation(
                         payload, observation_id=observation_id,
                         start_s=window["source_interval"][0],
@@ -1070,21 +1316,24 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
                     status = "observed"
                 else:
                     new_occurrences, new_events = [], []
-                    status = "observed_empty"
+                    status = observation_status
                 result = {
-                    "schema_version": "neutral_occurrence_result_v1",
+                    "schema_version": "neutral_occurrence_result_v2",
                     "contract_sha256": contract_sha256,
                     "observation_id": observation_id,
                     "source_interval": window["source_interval"],
                     "lead_refs": window["lead_refs"],
                     "status": status,
+                    "left_context_complete": payload.get("left_context_complete"),
+                    "right_context_complete": payload.get("right_context_complete"),
+                    "boundary_reason": str(payload.get("boundary_reason") or "").strip(),
                     "occurrences": new_occurrences,
                     "event_candidates": new_events,
                     "raw_response_path": str(raw_path),
                 }
             except Exception as exc:
                 result = {
-                    "schema_version": "neutral_occurrence_result_v1",
+                    "schema_version": "neutral_occurrence_result_v2",
                     "contract_sha256": contract_sha256,
                     "observation_id": observation_id,
                     "source_interval": window["source_interval"],
@@ -1104,19 +1353,22 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
     events = [item for result in ordered
               for item in result.get("event_candidates") or []]
     failures = [result for result in ordered if result.get("status") == "failed"]
+    unreliable = [result for result in ordered if result.get("status") == "unreliable"]
     build_occurrence_bank([], occurrences, output_dir.parent / "occurrence_bank.jsonl")
     events.sort(key=lambda row: (
         float((row.get("source_interval") or [float("inf")])[0]),
         str(row.get("event_candidate_id") or "")))
     _write_jsonl(output_dir.parent / "event_candidates.jsonl", events)
     result = {
-        "schema_version": "occurrence_observation_manifest_v1",
+        "schema_version": "occurrence_observation_manifest_v2",
         "contract": contract, "contract_sha256": contract_sha256,
         "lead_count": sum(len(row["lead_refs"]) for row in windows),
         "observation_count": len(windows),
-        "passed_observation_count": len(windows) - len(failures),
+        "passed_observation_count": sum(
+            row.get("status") in {"observed", "observed_empty"} for row in ordered),
         "observed_empty_count": sum(
             row.get("status") == "observed_empty" for row in ordered),
+        "unreliable_count": len(unreliable),
         "failed_observation_count": len(failures),
         "complete": not failures,
         "reused_observation_count": len(windows) - len(pending),
@@ -1126,6 +1378,538 @@ def build_occurrence_bank_from_leads(cfg: AppConfig, spec: Mapping[str, Any],
         "failures": failures,
     }
     _write_json(output_dir / "occurrence_observation_manifest.json", result)
+    return result
+
+
+def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
+                             candidates: Iterable[Mapping[str, Any]],
+                             output_dir: Path, *, source_video: Path, runner: Any,
+                             source_sha256: str | None = None,
+                             initial_context_s: float = 10.0,
+                             max_context_s: float = 40.0,
+                             expansion_step_s: float = 4.0,
+                             merge_gap_s: float = 1.0,
+                             reuse_completed: bool = True) -> dict[str, Any]:
+    """Understand merged candidate regions with iterative native-video context."""
+    output_dir = Path(output_dir)
+    duration_s = common.video_duration_s(
+        cfg.perception.get("ffprobe_bin", "ffprobe"), source_video)
+    merged = merge_candidate_regions(candidates, max_gap_s=merge_gap_s)
+    contract = {
+        "schema_version": "context_watch_contract_v1",
+        "source_sha256": source_sha256 or sha256_file(source_video),
+        "prompt_sha256": hashlib.sha256(
+            NEUTRAL_OCCURRENCE_PROMPT.encode("utf-8")).hexdigest(),
+        "fps": 12.0,
+        "initial_context_s": float(initial_context_s),
+        "max_context_s": float(max_context_s),
+        "expansion_step_s": float(expansion_step_s),
+        "merge_gap_s": float(merge_gap_s),
+        "use_audio_in_video": False,
+    }
+    contract_sha = _stable_sha(contract)
+    forbidden_terms = {
+        str(value).strip().lower()
+        for character in spec.get("characters") or []
+        for value in ([character.get("display_name")]
+                      + list(character.get("aliases") or []))
+        if str(value or "").strip()
+    }
+    results: list[dict[str, Any]] = []
+    all_occurrences: list[dict[str, Any]] = []
+    verified_events: list[dict[str, Any]] = []
+    partial_events: list[dict[str, Any]] = []
+    for context in merged:
+        context_id = str(context["context_id"])
+        context_dir = output_dir / context_id
+        result_path = context_dir / "result.json"
+        if reuse_completed and result_path.is_file():
+            cached = _read_json(result_path)
+            if (cached.get("contract_sha256") == contract_sha and
+                    cached.get("candidate_interval") == context["source_interval"] and
+                    cached.get("status") in {"observed", "observed_empty"} and
+                    cached.get("context_status") == "complete"):
+                results.append(cached)
+                all_occurrences.extend(cached.get("occurrences") or [])
+                verified_events.extend(cached.get("event_candidates") or [])
+                continue
+        current = expand_boundary_context(
+            context["source_interval"], duration_s=duration_s,
+            initial_context_s=initial_context_s, max_context_s=max_context_s)
+        attempts: list[dict[str, Any]] = []
+        final: dict[str, Any] | None = None
+        for attempt_index in range(1, 16):
+            start_s, end_s = current["source_interval"]
+            prompt = (
+                NEUTRAL_OCCURRENCE_PROMPT
+                + f"\nThe exact input duration is {end_s - start_s:.6f} seconds."
+            )
+            try:
+                answer = runner.watch(
+                    source_video, prompt, start_s=start_s, end_s=end_s,
+                    clip_dir=context_dir / f"attempt_{attempt_index:02d}" / "source_clip",
+                    fps=12.0, duration_s=end_s - start_s, max_new_tokens=768,
+                    use_audio_in_video=False)
+                raw_text = str(answer.text)
+                attempt_dir = context_dir / f"attempt_{attempt_index:02d}"
+                raw_path = attempt_dir / "raw_response.txt"
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_path.write_text(raw_text, encoding="utf-8")
+                payload = _single_json_object(raw_text)
+                serialized = json.dumps(payload, ensure_ascii=False).lower()
+                if any(term in serialized for term in forbidden_terms):
+                    raise V8Blocked("occurrence", "neutral_observation_named_character")
+                observation_status = validate_neutral_observation(
+                    payload, duration_s=end_s - start_s)
+                left_complete = payload.get("left_context_complete")
+                right_complete = payload.get("right_context_complete")
+                if not isinstance(left_complete, bool) or not isinstance(
+                        right_complete, bool):
+                    raise V8Blocked("occurrence", "missing_context_completeness")
+                if observation_status == "observed":
+                    occurrences, events = _normalize_neutral_observation(
+                        payload, observation_id=context_id, start_s=start_s,
+                        end_s=end_s, source_video=source_video,
+                        lead_refs=context["lead_refs"])
+                else:
+                    occurrences, events = [], []
+                attempt = {
+                    "attempt": attempt_index,
+                    "source_interval": [start_s, end_s],
+                    "duration_s": round(end_s - start_s, 6),
+                    "status": observation_status,
+                    "left_context_complete": left_complete,
+                    "right_context_complete": right_complete,
+                    "boundary_reason": str(payload.get("boundary_reason") or "").strip(),
+                    "raw_response_path": str(raw_path),
+                    "sampling": getattr(answer, "sampling", None),
+                    "gpu_pair": getattr(answer, "gpu_pair", None),
+                }
+                attempts.append(attempt)
+                incomplete = observation_status == "observed" and not (
+                    left_complete and right_complete)
+                if incomplete:
+                    expanded = expand_boundary_context(
+                        context["source_interval"], duration_s=duration_s,
+                        current_interval=current["source_interval"],
+                        left_context_complete=left_complete,
+                        right_context_complete=right_complete,
+                        initial_context_s=initial_context_s,
+                        expansion_step_s=expansion_step_s,
+                        max_context_s=max_context_s)
+                    if expanded["source_interval"] != current["source_interval"]:
+                        current = expanded
+                        continue
+                    context_status = "partial"
+                elif observation_status == "unreliable":
+                    context_status = "unreliable"
+                else:
+                    context_status = "complete"
+                final = {
+                    "schema_version": "context_watch_result_v1",
+                    "contract_sha256": contract_sha,
+                    "context_id": context_id,
+                    "candidate_interval": context["source_interval"],
+                    "source_interval": [start_s, end_s],
+                    "lead_refs": context["lead_refs"],
+                    "status": observation_status,
+                    "context_status": context_status,
+                    "left_context_complete": left_complete,
+                    "right_context_complete": right_complete,
+                    "boundary_reason": str(payload.get("boundary_reason") or "").strip(),
+                    "occurrences": occurrences,
+                    "event_candidates": events,
+                    "attempts": attempts,
+                }
+                break
+            except Exception as exc:
+                final = {
+                    "schema_version": "context_watch_result_v1",
+                    "contract_sha256": contract_sha,
+                    "context_id": context_id,
+                    "candidate_interval": context["source_interval"],
+                    "source_interval": current["source_interval"],
+                    "lead_refs": context["lead_refs"],
+                    "status": "failed",
+                    "context_status": "failed",
+                    "failure_class": "verification",
+                    "failure_stage": getattr(exc, "stage", "context"),
+                    "reason_code": getattr(exc, "reason_code",
+                                               "context_watch_failed"),
+                    "detail": str(exc),
+                    "attempts": attempts,
+                }
+                break
+        if final is None:
+            raise AssertionError("context watch exhausted without result")
+        _write_json(result_path, final)
+        results.append(final)
+        if final.get("status") == "observed":
+            all_occurrences.extend(final.get("occurrences") or [])
+            if final.get("context_status") == "complete":
+                verified_events.extend(final.get("event_candidates") or [])
+            else:
+                partial_events.extend(final.get("event_candidates") or [])
+    build_occurrence_bank([], all_occurrences, output_dir / "occurrence_bank.jsonl")
+    _write_jsonl(output_dir / "event_candidates.jsonl", verified_events)
+    _write_jsonl(output_dir / "partial_event_candidates.jsonl", partial_events)
+    failures = [row for row in results if row.get("status") == "failed"]
+    unreliable = [row for row in results if row.get("status") == "unreliable"]
+    partial = [row for row in results if row.get("context_status") == "partial"]
+    manifest = {
+        "schema_version": "context_watch_manifest_v1",
+        "contract": contract,
+        "contract_sha256": contract_sha,
+        "candidate_count": len(merged),
+        "observed_count": sum(row.get("status") == "observed" for row in results),
+        "observed_empty_count": sum(
+            row.get("status") == "observed_empty" for row in results),
+        "unreliable_count": len(unreliable),
+        "partial_count": len(partial),
+        "failed_count": len(failures),
+        "occurrence_count": len(all_occurrences),
+        "event_candidate_count": len(verified_events),
+        "partial_event_candidate_count": len(partial_events),
+        "complete": not failures and not partial,
+        "results": results,
+    }
+    _write_json(output_dir / "context_watch_manifest.json", manifest)
+    return manifest
+
+
+def build_coverage_audit(spec: Mapping[str, Any], *, duration_s: float,
+                         global_intervals: Iterable[Iterable[float]],
+                         dense_intervals: Iterable[Iterable[float]],
+                         legacy_intervals: Iterable[Iterable[float]],
+                         output_path: Path) -> dict[str, Any]:
+    """Persist comparable global, dense, and legacy time-union coverage."""
+    coverage = spec.get("coverage") or {}
+    eligible_start = (float(coverage.get("head_s", 90.0))
+                      if duration_s >= float(coverage.get("min_movie_s", 1800.0))
+                      else 0.0)
+    eligible_end = (duration_s - float(coverage.get("tail_s", 360.0))
+                    if duration_s >= float(coverage.get("min_movie_s", 1800.0))
+                    else duration_s)
+    eligible = [eligible_start, max(eligible_start, eligible_end)]
+    result = {
+        "schema_version": "v81_coverage_audit_v1",
+        "movie_duration_s": round(duration_s, 6),
+        "eligible_interval": eligible,
+        "global_browse": compute_temporal_coverage(
+            global_intervals, eligible_interval=eligible),
+        "dense_context_watch": compute_temporal_coverage(
+            dense_intervals, eligible_interval=eligible),
+        "legacy_targeted_windows": compute_temporal_coverage(
+            legacy_intervals, eligible_interval=eligible),
+        "window_count_is_coverage": False,
+    }
+    _write_json(Path(output_path), result)
+    return result
+
+
+def select_v81_pilot_windows(spec: Mapping[str, Any], *, duration_s: float,
+                             high_value_leads: Iterable[Mapping[str, Any]] = ()) \
+        -> list[dict[str, Any]]:
+    """Choose 8 known-hard, 6 high-value, and 6 reproducible random windows."""
+    pilot = (spec.get("diagnostic") or {}).get("pilot") or {}
+    window_s = float(pilot.get("browse_window_s", 45.0))
+    known = list(pilot.get("known_hard") or [])
+    if len(known) != 8:
+        raise ValueError("V8.1 pilot requires exactly eight known-hard windows")
+
+    def window(center: float, *, category: str, reason: str,
+               source_ref: Any = None) -> dict[str, Any]:
+        start = min(max(0.0, center - window_s / 2.0),
+                    max(0.0, duration_s - window_s))
+        end = min(duration_s, start + window_s)
+        return {
+            "pilot_id": "", "category": category,
+            "source_interval": [round(start, 6), round(end, 6)],
+            "reason": reason, "source_ref": source_ref,
+        }
+
+    selected = []
+    for row in known:
+        interval = list(map(float, row.get("source_interval") or []))
+        if len(interval) != 2 or interval[1] <= interval[0]:
+            raise ValueError("known-hard pilot interval is invalid")
+        selected.append(window(
+            sum(interval) / 2.0, category="known_hard",
+            reason=str(row.get("reason") or "known hard case"),
+            source_ref=row.get("id")))
+
+    def overlaps_existing(candidate: dict[str, Any]) -> bool:
+        start, end = candidate["source_interval"]
+        return any(min(end, old["source_interval"][1]) -
+                   max(start, old["source_interval"][0]) > window_s * 0.5
+                   for old in selected)
+
+    for lead in high_value_leads:
+        if sum(row["category"] == "high_value" for row in selected) >= 6:
+            break
+        interval = list(map(float, lead.get("source_interval") or []))
+        if len(interval) != 2 or interval[1] <= interval[0]:
+            continue
+        candidate = window(
+            sum(interval) / 2.0, category="high_value",
+            reason=str(lead.get("lead_kind") or "high-value investigation lead"),
+            source_ref=lead.get("lead_id"))
+        if not overlaps_existing(candidate):
+            selected.append(candidate)
+    if sum(row["category"] == "high_value" for row in selected) != 6:
+        raise ValueError("V8.1 pilot requires at least six distinct high-value leads")
+
+    coverage = spec.get("coverage") or {}
+    eligible_start = (float(coverage.get("head_s", 90.0))
+                      if duration_s >= float(coverage.get("min_movie_s", 1800.0))
+                      else 0.0)
+    eligible_end = (duration_s - float(coverage.get("tail_s", 360.0))
+                    if duration_s >= float(coverage.get("min_movie_s", 1800.0))
+                    else duration_s)
+    rng = random.Random(int(pilot.get("random_seed", 20260915)))
+    attempts = 0
+    while sum(row["category"] == "random" for row in selected) < 6 and attempts < 1000:
+        attempts += 1
+        center = rng.uniform(eligible_start + window_s / 2.0,
+                             eligible_end - window_s / 2.0)
+        candidate = window(center, category="random",
+                           reason="reproducible_uniform_random_control")
+        if not overlaps_existing(candidate):
+            selected.append(candidate)
+    if sum(row["category"] == "random" for row in selected) != 6:
+        raise ValueError("could not select six distinct random pilot windows")
+    category_order = {"known_hard": 0, "random": 1, "high_value": 2}
+    selected.sort(key=lambda row: (category_order[row["category"]],
+                                   row["source_interval"][0]))
+    for index, row in enumerate(selected):
+        row["pilot_id"] = f"pilot_{index:02d}"
+    return selected
+
+
+def evaluate_browse_arms(arms: Mapping[str, Mapping[str, Any]],
+                         ground_truth: Iterable[Mapping[str, Any]] | None = None) \
+        -> dict[str, Any]:
+    """Compare candidate recall post hoc; ground truth never enters prompts."""
+    gt = [dict(row) for row in (ground_truth or [])]
+    result = {"schema_version": "v81_browse_arm_comparison_v1", "arms": {}}
+    for arm_id in ("A", "B", "C"):
+        arm = dict(arms.get(arm_id) or {})
+        candidates = [dict(row) for row in arm.get("candidates") or []]
+        merged = merge_candidate_regions(candidates, max_gap_s=0.15)
+        metrics = {
+            "window_count": int(arm.get("window_count") or 0),
+            "candidate_count": len(candidates),
+            "unique_candidate_count": len(merged),
+            "duplicate_rate": round(
+                1.0 - len(merged) / len(candidates), 6) if candidates else 0.0,
+            "visual_tokens": int(arm.get("visual_tokens") or 0),
+            "latency_s": round(float(arm.get("latency_s") or 0), 6),
+            "failure_count": int(arm.get("failure_count") or 0),
+        }
+        if gt:
+            hits = 0
+            per_goal: dict[str, list[bool]] = {}
+            for truth in gt:
+                target = list(map(float, truth.get("source_interval") or []))
+                hit = len(target) == 2 and any(
+                    max(target[0], row["source_interval"][0]) <
+                    min(target[1], row["source_interval"][1])
+                    for row in candidates)
+                hits += int(hit)
+                per_goal.setdefault(str(truth.get("goal") or "unspecified"), []).append(hit)
+            metrics["candidate_temporal_recall"] = round(hits / len(gt), 6)
+            metrics["goal_recall"] = {
+                goal: round(sum(values) / len(values), 6)
+                for goal, values in per_goal.items()
+            }
+            metrics["gt_count"] = len(gt)
+        result["arms"][arm_id] = metrics
+    result["ground_truth_status"] = "available" if gt else "awaiting_human_ground_truth"
+    if gt:
+        recalls = {arm: row["candidate_temporal_recall"]
+                   for arm, row in result["arms"].items()}
+        result["diagnosis"] = (
+            "temporal_sampling_bottleneck" if recalls["B"] > recalls["A"] else
+            "compression_bottleneck" if recalls["C"] > recalls["B"] else
+            "lowest_cost_arm_sufficient" if len(set(recalls.values())) == 1 else
+            "mixed_or_prompt_bottleneck")
+    else:
+        result["diagnosis"] = "pending_human_ground_truth"
+    return result
+
+
+def run_v81_diagnostic(cfg: AppConfig, spec: Mapping[str, Any], output_dir: Path, *,
+                       clients: Mapping[str, Any], source_video: Path,
+                       pilot_windows: Iterable[Mapping[str, Any]],
+                       source_sha256: str | None = None,
+                       ground_truth: Iterable[Mapping[str, Any]] | None = None) \
+        -> dict[str, Any]:
+    """Run A/B/C browse recall arms without repeating downstream Omni work."""
+    output_dir = Path(output_dir)
+    windows = [dict(row) for row in pilot_windows]
+    if len(windows) != 20:
+        raise ValueError("V8.1 diagnostic requires exactly twenty pilot windows")
+    arms_spec = {
+        str(row["id"]): dict(row)
+        for row in ((spec.get("diagnostic") or {}).get("browse_arms") or [])
+    }
+    if set(arms_spec) != {"A", "B", "C"} or set(clients) != {"A", "B", "C"}:
+        raise ValueError("V8.1 diagnostic requires A/B/C arms and clients")
+    _write_json(output_dir / "pilot_windows.json", {
+        "schema_version": "v81_pilot_windows_v1", "windows": windows,
+    })
+    ffmpeg = str(cfg.perception.get("ffmpeg_bin", "ffmpeg"))
+    ffprobe = str(cfg.perception.get("ffprobe_bin", "ffprobe"))
+    source_probe = common.run_ffprobe_json(ffprobe, source_video)
+    stream = next((row for row in source_probe.get("streams") or []
+                   if row.get("codec_type") == "video"), {})
+    rate_text = str(stream.get("avg_frame_rate") or "0/1")
+    try:
+        numerator, denominator = rate_text.split("/", 1)
+        source_fps = float(numerator) / float(denominator)
+    except (ValueError, ZeroDivisionError):
+        source_fps = None
+    source_digest = source_sha256 or sha256_file(source_video)
+
+    def stage(clip: Path, arm: Mapping[str, Any], name: str) -> Path:
+        media_root_text = str(arm.get("media_root") or "").strip()
+        if not media_root_text:
+            return clip
+        media_root = Path(media_root_text).resolve()
+        media_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+                prefix=f"v81_{_safe_id(name)}_", suffix=".mp4",
+                dir=media_root, delete=False) as handle:
+            staged = Path(handle.name)
+        shutil.copy2(clip, staged)
+        if sha256_file(staged) != sha256_file(clip):
+            staged.unlink(missing_ok=True)
+            raise V8Blocked("pilot", "media_staging_hash_mismatch")
+        return staged
+
+    def run_arm(arm_id: str) -> tuple[str, dict[str, Any]]:
+        arm = arms_spec[arm_id]
+        client = clients[arm_id]
+        arm_dir = output_dir / "arms" / arm_id
+        rows, candidates, failures = [], [], []
+        total_visual_tokens, total_latency = 0, 0.0
+        for window in windows:
+            pilot_id = str(window["pilot_id"])
+            start_s, end_s = map(float, window["source_interval"])
+            window_dir = arm_dir / pilot_id
+            try:
+                clip, sampling = _build_coverage_transport(
+                    ffmpeg, ffprobe, source_video, window_dir / "transport",
+                    start_s=start_s, end_s=end_s,
+                    requested_fps=float(arm["fps"]), source_fps=source_fps)
+                request_clip = stage(clip, arm, f"{arm_id}_{pilot_id}")
+                try:
+                    answer = client.watch(
+                        request_clip, NEUTRAL_COVERAGE_PROMPT,
+                        duration_s=end_s - start_s, image_paths=None,
+                        max_tokens=1024, response_format=COVERAGE_RESPONSE_FORMAT)
+                finally:
+                    if request_clip != clip:
+                        request_clip.unlink(missing_ok=True)
+                raw_path = window_dir / "raw_response.txt"
+                raw_path.write_text(str(answer.text), encoding="utf-8")
+                payload, response_shape = _parse_coverage_payload(str(answer.text))
+                if response_shape != "object":
+                    raise V8Blocked("pilot", "browse_response_not_object")
+                normalized_occurrences, normalized_events = _normalize_coverage_response(
+                    payload, block_id=f"{arm_id}_{pilot_id}",
+                    start_s=start_s, end_s=end_s)
+                window_candidates = []
+                for index, region in enumerate(payload.get("regions") or []):
+                    rel = list(map(float, region.get("interval") or []))
+                    if len(rel) != 2 or not 0 <= rel[0] < rel[1] <= end_s - start_s:
+                        continue
+                    candidate = {
+                        "candidate_id": f"{arm_id}_{pilot_id}_{index:02d}",
+                        "arm": arm_id, "pilot_id": pilot_id,
+                        "source_interval": [round(start_s + rel[0], 6),
+                                            round(start_s + rel[1], 6)],
+                        "activity": _concrete_text(
+                            region.get("activity"), field="pilot_activity"),
+                        "lead_kind": "pilot_browse",
+                        "lead_id": f"{arm_id}_{pilot_id}_{index:02d}",
+                    }
+                    candidates.append(candidate)
+                    window_candidates.append(candidate)
+                usage = dict(getattr(answer, "usage", {}) or {})
+                visual_tokens = int(
+                    usage.get("visual_tokens") or
+                    (usage.get("prompt_tokens_details") or {}).get("visual_tokens") or 0)
+                latency = float(getattr(answer, "latency_s", 0.0) or 0.0)
+                total_visual_tokens += visual_tokens
+                total_latency += latency
+                result = {
+                    "schema_version": "v81_pilot_browse_result_v1",
+                    "pilot_id": pilot_id, "category": window.get("category"),
+                    "source_interval": [start_s, end_s], "status": "observed",
+                    "response_shape": response_shape, "sampling_audit": sampling,
+                    "request_audit": dict(getattr(answer, "request_audit", {}) or {}),
+                    "raw_response_path": str(raw_path),
+                    "occurrence_candidate_count": len(normalized_occurrences),
+                    "event_candidate_count": len(normalized_events),
+                    "candidates": window_candidates,
+                }
+            except Exception as exc:
+                result = {
+                    "schema_version": "v81_pilot_browse_result_v1",
+                    "pilot_id": pilot_id, "category": window.get("category"),
+                    "source_interval": [start_s, end_s], "status": "failed",
+                    "failure_class": "verification",
+                    "failure_stage": getattr(exc, "stage", "pilot"),
+                    "reason_code": getattr(exc, "reason_code", "pilot_browse_failed"),
+                    "detail": str(exc),
+                }
+                failures.append(result)
+            _write_json(window_dir / "result.json", result)
+            rows.append(result)
+        arm_result = {
+            "schema_version": "v81_pilot_arm_v1", "arm": arm_id,
+            "fps": float(arm["fps"]),
+            "retention_ratio": float(arm["retention_ratio"]),
+            "backend": str(arm["backend"]), "window_count": len(windows),
+            "candidate_count": len(candidates), "candidates": candidates,
+            "visual_tokens": total_visual_tokens,
+            "latency_s": round(total_latency, 6),
+            "failure_count": len(failures), "failures": failures,
+            "complete": not failures, "results": rows,
+        }
+        _write_json(arm_dir / "arm_manifest.json", arm_result)
+        return arm_id, arm_result
+
+    arm_results = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(run_arm, arm_id) for arm_id in ("A", "B", "C")]
+        for future in as_completed(futures):
+            arm_id, result = future.result()
+            arm_results[arm_id] = result
+    comparison = evaluate_browse_arms(arm_results, ground_truth)
+    _write_json(output_dir / "arm_comparison.json", comparison)
+    combined = []
+    for arm_id in ("A", "B", "C"):
+        combined.extend(arm_results[arm_id]["candidates"])
+    selected = merge_candidate_regions(combined, max_gap_s=1.0)
+    for row in selected:
+        row["lead_kind"] = "v81_pilot_browse_union"
+        row["lead_id"] = row["context_id"]
+    _write_jsonl(output_dir / "selected_candidates.jsonl", selected)
+    result = {
+        "schema_version": "v81_diagnostic_manifest_v1",
+        "source_sha256": source_digest,
+        "pilot_window_count": len(windows),
+        "arms": {arm: {key: value for key, value in arm_results[arm].items()
+                         if key not in {"results", "candidates", "failures"}}
+                 for arm in ("A", "B", "C")},
+        "selected_candidate_count": len(selected),
+        "arm_comparison": comparison,
+        "complete": all(arm_results[arm]["complete"] for arm in ("A", "B", "C")),
+        "identity_or_render_started": False,
+    }
+    _write_json(output_dir / "experiment_manifest.json", result)
     return result
 
 
@@ -1738,7 +2522,8 @@ def verify_shared_event_facts(cfg: AppConfig,
                 native_interval = [center - 0.45, center + 0.45]
             native = extract_native_frames(
                 ffmpeg, source_video, native_interval, event_dir / "boundary" / "native",
-                max_frames=int(native_frame_max))
+                max_frames=int(native_frame_max),
+                ffprobe_bin=str(cfg.perception.get("ffprobe_bin", "ffprobe")))
             frame_ids = [row["frame_id"] for row in native["frames"]]
             boundary_answer = runner.inspect_media(
                 [Path(row["labeled_path"]) for row in native["frames"]],
@@ -1997,6 +2782,9 @@ def build_reference_driven_character_plan(reference_task: Mapping[str, Any],
     reference_duration = float(measured.get("reference_duration_s", 21.933))
     p90 = float(measured.get("shot_duration_p90_s") or 0.0)
     duration = round(sum(row["duration_s"] for row in segments), 6)
+    reference_units = int(measured.get("meaningful_unit_count") or
+                          len(measured.get("shot_intervals") or []))
+    soft_min, soft_max = reference_duration * 0.85, reference_duration * 1.15
     plan = {
         "schema_version": "character_edit_plan_v1", "passed": True,
         "task_id": task["task_id"], "target_id": task["character_id"],
@@ -2006,12 +2794,21 @@ def build_reference_driven_character_plan(reference_task: Mapping[str, Any],
         "minimum_cut_count_required": False,
         "style": {
             "preferred_duration_s": reference_duration,
-            "soft_range_s": [round(reference_duration * 0.7, 6),
-                             round(reference_duration * 1.2, 6)],
+            "soft_range_s": [round(soft_min, 6), round(soft_max, 6)],
             "segment_preferred_max_s": p90,
+            "reference_meaningful_unit_count": reference_units,
+            "meaningful_unit_count": len(segments),
+            "reference_information_units_per_s": round(
+                reference_units / reference_duration, 6) if reference_duration else 0.0,
+            "output_information_units_per_s": round(
+                len(segments) / duration, 6) if duration else 0.0,
+            "section_duration_distribution": list(
+                measured.get("section_duration_distribution") or []),
+            "shot_duration_distribution": list(
+                measured.get("shot_duration_distribution") or []),
         },
-        "requires_human_style_review": duration > reference_duration * 1.2,
-        "short_complete_content_allowed": duration < reference_duration * 0.7,
+        "requires_human_style_review": duration > soft_max,
+        "short_complete_content_allowed": duration < soft_min,
     }
     plan["plan_sha256"] = _stable_sha(plan)
     return plan
