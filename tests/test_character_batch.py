@@ -948,17 +948,29 @@ def test_context_watch_batches_independent_contexts(tmp_path: Path, monkeypatch)
 
         def watch_many(self, requests):
             self.batch_sizes.append(len(requests))
-            payload = {
-                "status": "observed_empty",
-                "occurrences": [],
-                "event_candidates": [],
-                "left_context_complete": True,
-                "right_context_complete": True,
-                "boundary_reason": "",
-            }
-            return [SimpleNamespace(
-                text=json.dumps(payload), sampling={"ok": True}, gpu_pair="0,1")
-                for _ in requests]
+            answers = []
+            for request in requests:
+                start_s = request["kwargs"]["start_s"]
+                payload = {
+                    "status": "observed",
+                    "occurrences": [{
+                        "local_id": "A", "visible_interval": [0, 1],
+                        "local_description": f"pale figure near marker {start_s}",
+                        "visual_state": "raises one arm", "roi": None,
+                    }],
+                    "event_candidates": [{
+                        "interval": [0, 1], "actor_local_id": "A",
+                        "action": "raises one arm", "patient_local_id": None,
+                        "result": "the arm reaches shoulder height",
+                    }],
+                    "left_context_complete": True,
+                    "right_context_complete": True,
+                    "boundary_reason": "",
+                }
+                answers.append(SimpleNamespace(
+                    text=json.dumps(payload), sampling={"ok": True},
+                    gpu_pair="0,1"))
+            return answers
 
     runner = Runner()
     result = v8.build_context_watch_bank(
@@ -969,7 +981,12 @@ def test_context_watch_batches_independent_contexts(tmp_path: Path, monkeypatch)
         source_sha256="source", merge_gap_s=1.0)
     assert runner.batch_sizes == [2]
     assert result["complete"] is True
-    assert result["observed_empty_count"] == 2
+    assert result["observed_count"] == 2
+    assert [row["context_id"] for row in result["results"]] == [
+        "context_00000", "context_00001"]
+    assert [row["occurrences"][0]["occurrence_id"]
+            for row in result["results"]] == [
+        "occ_context_00000_A", "occ_context_00001_A"]
 
 
 def test_pilot_selection_has_fixed_category_mix() -> None:

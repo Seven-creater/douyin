@@ -1600,7 +1600,7 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                     raise V8Blocked("occurrence", "missing_context_completeness")
                 if observation_status == "observed":
                     occurrences, events = _normalize_neutral_observation(
-                        payload, observation_id=context_id, start_s=start_s,
+                        payload, observation_id=state["context_id"], start_s=start_s,
                         end_s=end_s, source_video=source_video,
                         lead_refs=context["lead_refs"])
                 else:
@@ -1642,7 +1642,7 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                 final = {
                     "schema_version": "context_watch_result_v1",
                     "contract_sha256": contract_sha,
-                    "context_id": context_id,
+                    "context_id": state["context_id"],
                     "candidate_interval": context["source_interval"],
                     "source_interval": [start_s, end_s],
                     "lead_refs": context["lead_refs"],
