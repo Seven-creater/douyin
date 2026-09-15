@@ -27,6 +27,18 @@ def test_v82_spec_is_target_centric_subject_policy() -> None:
     assert "import ultralytics" not in source
 
 
+def test_v82_profile_regressions_exclude_large_beast_and_wrong_proposals() -> None:
+    spec, _ = v82.read_v82_spec(Path(
+        "config/experiments/lxh1_v82_target_recall.json"))
+    forms = {row["form_id"]: row for row in spec["target_profile"]["forms"]}
+
+    assert 465.0 in forms["form_black_cat"]["invalid_source_times_s"]
+    assert 465.0 not in forms["form_black_cat"]["proposal_times_s"]
+    assert 2968.0 in forms["form_black_hair_child"]["invalid_source_times_s"]
+    assert 5412.65 in forms["form_white_hair_child"]["invalid_source_times_s"]
+    assert spec["preflight"]["cases"][6]["source_interval"] == [5391.2, 5391.8]
+
+
 def test_movie_knowledge_is_prior_and_browse_card_contains_no_relationships(
         tmp_path: Path) -> None:
     manifest = v82.bootstrap_movie_knowledge(

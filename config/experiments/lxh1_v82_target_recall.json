@@ -18,15 +18,18 @@
     "forms": [
       {
         "form_id": "form_black_cat",
-        "proposal_times_s": [850.0, 925.0, 1040.0]
+        "proposal_times_s": [165.0, 195.0, 1275.0, 1365.0, 1710.0],
+        "invalid_source_times_s": [465.0, 850.0, 925.0, 1040.0]
       },
       {
         "form_id": "form_black_hair_child",
-        "proposal_times_s": [1878.0, 2968.0, 3650.0]
+        "proposal_times_s": [1755.0, 1878.0, 3650.0],
+        "invalid_source_times_s": [2968.0]
       },
       {
         "form_id": "form_white_hair_child",
-        "proposal_times_s": [5412.65, 5412.75, 5412.85]
+        "proposal_times_s": [5412.75, 5413.5, 5417.0],
+        "invalid_source_times_s": [5412.65, 5418.0]
       }
     ]
   },
@@ -37,13 +40,13 @@
       {"id": "single_person_action", "source_interval": [5397.5, 5403.5], "kind": "single_person_action", "flashvid_compare": false},
       {"id": "multi_person_interaction", "source_interval": [1428.0, 1448.0], "kind": "multi_person_interaction", "flashvid_compare": true},
       {"id": "dialogue_only", "source_interval": [2970.0, 2990.0], "kind": "dialogue_only", "flashvid_compare": false},
-      {"id": "static_target", "source_interval": [845.0, 860.0], "kind": "static_target", "flashvid_compare": true},
+      {"id": "static_target", "source_interval": [160.0, 180.0], "kind": "static_target", "flashvid_compare": true},
       {"id": "occluded_subject", "source_interval": [5385.0, 5391.0], "kind": "occlusion", "flashvid_compare": true},
       {"id": "dissolve_5391", "source_interval": [5391.2, 5391.8], "kind": "dissolve", "flashvid_compare": true},
-      {"id": "mention_only", "source_interval": [1875.0, 1895.0], "kind": "mention_without_visual_identity", "flashvid_compare": false},
-      {"id": "form_black_cat", "source_interval": [845.0, 860.0], "kind": "target_form", "flashvid_compare": false},
-      {"id": "form_black_hair_child", "source_interval": [2958.0, 2978.0], "kind": "target_form", "flashvid_compare": false},
-      {"id": "form_white_hair_child", "source_interval": [5408.0, 5415.0], "kind": "target_form", "flashvid_compare": false},
+      {"id": "mention_only", "source_interval": [1061.66, 1080.52], "kind": "mention_without_visual_identity", "flashvid_compare": false},
+      {"id": "form_black_cat", "source_interval": [160.0, 180.0], "kind": "target_form", "flashvid_compare": false},
+      {"id": "form_black_hair_child", "source_interval": [1873.0, 1883.0], "kind": "target_form", "flashvid_compare": false},
+      {"id": "form_white_hair_child", "source_interval": [5412.6, 5418.0], "kind": "target_form", "flashvid_compare": false},
       {"id": "cross_shot_offscreen_result", "source_interval": [5410.65, 5424.65], "kind": "cross_shot_relation", "flashvid_compare": true}
     ]
   },
