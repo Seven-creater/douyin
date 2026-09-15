@@ -1152,6 +1152,7 @@ def _character_batch_impl(args, cfg) -> dict:
                     initial_context_s=float(context_cfg.get("initial_context_s", 10.0)),
                     max_context_s=float(context_cfg.get("max_context_s", 40.0)),
                     expansion_step_s=float(context_cfg.get("expansion_step_s", 4.0)),
+                    context_fps=float(context_cfg.get("fps", 4.0)),
                     merge_gap_s=float(context_cfg.get("merge_gap_s", 1.0)),
                     reuse_completed=not args.force)
                 result = {

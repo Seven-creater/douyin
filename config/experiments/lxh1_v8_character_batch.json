@@ -144,6 +144,7 @@
       {"id": "C", "model": "Qwen3.5-4B-FlashVID-r025", "fps": 4.0, "retention_ratio": 0.25, "backend": "flashvid", "base_url": "http://127.0.0.1:8102/v1", "media_root": "/dev/shm/flashvid_perception"}
     ],
     "context_watch": {
+      "fps": 4.0,
       "initial_context_s": 10.0,
       "expansion_step_s": 4.0,
       "max_context_s": 40.0,

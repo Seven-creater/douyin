@@ -848,6 +848,7 @@ def test_context_watch_expands_left_boundary_and_keeps_cross_shot_occurrences(
         calls = []
 
         def watch(self, _video, _prompt, **kwargs):
+            assert kwargs["fps"] == 4.0
             self.calls.append((kwargs["start_s"], kwargs["end_s"]))
             left_complete = len(self.calls) > 1
             payload = {
@@ -880,6 +881,9 @@ def test_context_watch_expands_left_boundary_and_keeps_cross_shot_occurrences(
     assert Runner.calls[1][0] < Runner.calls[0][0]
     assert result["complete"] is True
     assert result["occurrence_count"] == 2
+    assert result["contract"]["fine_boundary_fps"] == 12.0
+    assert result["contract"]["sampling_role"] == (
+        "context_understanding_not_final_boundary")
 
 
 def test_pilot_selection_has_fixed_category_mix() -> None:

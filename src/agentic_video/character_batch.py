@@ -1388,6 +1388,7 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                              initial_context_s: float = 10.0,
                              max_context_s: float = 40.0,
                              expansion_step_s: float = 4.0,
+                             context_fps: float = 4.0,
                              merge_gap_s: float = 1.0,
                              reuse_completed: bool = True) -> dict[str, Any]:
     """Understand merged candidate regions with iterative native-video context."""
@@ -1400,7 +1401,9 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
         "source_sha256": source_sha256 or sha256_file(source_video),
         "prompt_sha256": hashlib.sha256(
             NEUTRAL_OCCURRENCE_PROMPT.encode("utf-8")).hexdigest(),
-        "fps": 12.0,
+        "fps": float(context_fps),
+        "fine_boundary_fps": 12.0,
+        "sampling_role": "context_understanding_not_final_boundary",
         "initial_context_s": float(initial_context_s),
         "max_context_s": float(max_context_s),
         "expansion_step_s": float(expansion_step_s),
@@ -1448,7 +1451,8 @@ def build_context_watch_bank(cfg: AppConfig, spec: Mapping[str, Any],
                 answer = runner.watch(
                     source_video, prompt, start_s=start_s, end_s=end_s,
                     clip_dir=context_dir / f"attempt_{attempt_index:02d}" / "source_clip",
-                    fps=12.0, duration_s=end_s - start_s, max_new_tokens=768,
+                    fps=float(context_fps), duration_s=end_s - start_s,
+                    max_new_tokens=768,
                     use_audio_in_video=False)
                 raw_text = str(answer.text)
                 attempt_dir = context_dir / f"attempt_{attempt_index:02d}"
