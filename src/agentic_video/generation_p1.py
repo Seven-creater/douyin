@@ -58,6 +58,8 @@ def plan_generation_units(requirement: dict[str, Any],
         if continuity[key] == "required"
     }
     for index, action in enumerate(action_plan, 1):
+        if not isinstance(action, dict):
+            raise P1Blocked("generation_unit_incomplete", f"{section_id}/G{index}")
         goal = str(action.get("primary_causal_goal") or "").strip()
         unit_phases = action.get("semantic_phases") or []
         try:
@@ -73,6 +75,11 @@ def plan_generation_units(requirement: dict[str, Any],
             raise P1Blocked("generation_phase_repeated", f"{section_id}/G{index}")
         observed_phases.extend(unit_phases)
         identifiers = action.get("continuity_ids") or {}
+        condition_keys = action.get("condition_keys") or []
+        if (not isinstance(identifiers, dict) or not isinstance(condition_keys, list) or
+                any(not isinstance(key, str) or not key for key in condition_keys) or
+                len(set(condition_keys)) != len(condition_keys)):
+            raise P1Blocked("generation_condition_invalid", f"{section_id}/G{index}")
         for key, values in required_identity.items():
             value = str(identifiers.get(key) or "").strip()
             if not value:
@@ -84,7 +91,7 @@ def plan_generation_units(requirement: dict[str, Any],
             "semantic_phases": list(unit_phases),
             "generated_duration_s": duration,
             "continuity_ids": dict(identifiers),
-            "condition_keys": list(action.get("condition_keys") or []),
+            "condition_keys": list(condition_keys),
             "generation_complexity_note": str(action.get("generation_complexity_note") or ""),
         })
     if observed_phases != phases:
