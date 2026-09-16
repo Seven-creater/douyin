@@ -154,6 +154,26 @@ Narrative Program 负责人物、事件、因果和情绪；Recipe v2 只负责�
 素材不足、人物切换无法解释、对白会被截断或不支持的操作都会显式标记，不能静默拿随机镜头填充。
 首版成片固定为 45–75 秒、1920×1080，保留日语原声并叠加有时间依据的中文字幕。
 
+## V9-G：参考条件生成（实验分支）
+
+V9-G 只接受已经人工通过并冻结哈希的 V9 Reference Programs。执行顺序为：
+
+```bash
+# 两个许可证门默认是 blocked，必须先由人工核查并填写 license_gates/*.json
+python -m src.agentic_video.cli reference-generate-v9g \
+  --phase license --output data/v9g_runs/<run>
+
+python -m src.agentic_video.cli reference-generate-v9g \
+  --phase contract --v9-output data/v9_runs/<accepted_run> \
+  --target-setting config/v9g/target_setting.example.json \
+  --output data/v9g_runs/<run>
+```
+
+H3 capability 不能按文档预填；必须分别启动 `fl2va` 和 `ref2va` 服务并保存十项
+真实小样。服务命令见 `scripts/v9g/README.md`。`generation_contract.json` 是唯一业务真值，
+FilmDSL、H3 请求、状态提交与审查记录都只能引用它，不能反向修改。正式 `rendered.mp4`
+只在 Raw Unit、裁剪 Snippet、Section、最终盲审和人工验收全部通过后生成。
+
 # 服务器资源
 
 详见 `minimax_linux.md`。

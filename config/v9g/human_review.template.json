@@ -1,0 +1,15 @@
+{
+  "schema_version": "v9g_human_review_v1",
+  "passed": false,
+  "sections": [
+    {
+      "section_id": "replace_me",
+      "passed": false,
+      "identity_and_body_stable": false,
+      "initiator_and_affected_correct": false,
+      "action_progression_comprehensible": false,
+      "blind_takeaway_matches_contract": false,
+      "notes": ""
+    }
+  ]
+}

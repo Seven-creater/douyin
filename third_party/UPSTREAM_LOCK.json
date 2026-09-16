@@ -1,0 +1,27 @@
+{
+  "lock_version": "v9g_upstream_lock_v1",
+  "entries": [
+    {
+      "name": "CineCrew",
+      "url": "https://github.com/Ironieser/CineCrew",
+      "commit": "9a00efa7db65ba028c1523907f6cee844776123a",
+      "license": "Apache-2.0",
+      "source_path": "src/utils/agent_trace.py",
+      "source_sha256": "aad41458d37053a172248349555e6592e663f04f3b946be16a8bbaddd8932162",
+      "vendored_path": "third_party/cinecrew/artifact_trace.py",
+      "vendored_sha256": "cbc853c80b75d9381e277d3d39a0875d44d91f3f5cc1cbea307cd9a75fc32505",
+      "modification": "behavior-preserving subset for append-only JSON artifact traces"
+    },
+    {
+      "name": "NEWTON",
+      "url": "https://github.com/CUTEPKQ/NEWTON",
+      "commit": "072bda240a5991bc4da6ff8b6cd5f6f33fcfc058",
+      "license": "MIT",
+      "source_path": "loop/memory.py",
+      "source_sha256": "6d7f80b2f26327eba75e798bfc7f7712c541abb801eb1722e3fb7061d477675f",
+      "vendored_path": "third_party/newton/memory.py",
+      "vendored_sha256": "4bca5d0014fdf9b4639455ad723c0db970bd9a34730b34287255bba412ba0ea2",
+      "modification": "typing-compatible subset; trace JSON boundary retained"
+    }
+  ]
+}

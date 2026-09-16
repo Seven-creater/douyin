@@ -1,0 +1,30 @@
+{
+  "schema_version": "v9g_target_setting_v1",
+  "meta": {
+    "setting_id": "replace_after_v9_human_pass",
+    "visual_style": "replace_with_reviewed_target_setting"
+  },
+  "assets": {
+    "subject": {
+      "asset_id": "C0",
+      "description": "human-reviewed canonical subject asset"
+    },
+    "opponent": {
+      "asset_id": "C1",
+      "description": "human-reviewed canonical opponent asset"
+    },
+    "scene": {
+      "asset_id": "SET0",
+      "description": "human-reviewed canonical scene asset"
+    }
+  },
+  "generation_conditions": {
+    "default": {
+      "references": [],
+      "aspect_ratio": "16:9",
+      "inference_steps": 50
+    },
+    "sections": {},
+    "units": {}
+  }
+}

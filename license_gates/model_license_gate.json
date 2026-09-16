@@ -1,0 +1,14 @@
+{
+  "gate_version": "v9g_model_license_gate_v1",
+  "model": "MiniMaxAI/MiniMax-H3",
+  "model_card_revision": "d21241f0a4b3acbb34c97dae47fa417b7065e438",
+  "license_revision": "MiniMax-H3-Community-License-at-pinned-revision",
+  "deployment_context": "local research server",
+  "intended_output_use": "research pilot only",
+  "distribution_plan": "no model-weight redistribution",
+  "checked_upstream_sha": "d21241f0a4b3acbb34c97dae47fa417b7065e438",
+  "reviewed_by": "",
+  "checked_at": null,
+  "passed": false,
+  "notes": "Human legal/use review required; SGLang licensing does not grant model rights."
+}

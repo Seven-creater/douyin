@@ -1,0 +1,11 @@
+{
+  "gate_version": "v9g_code_license_gate_v1",
+  "checked_upstream_sha": {
+    "cinecrew": "9a00efa7db65ba028c1523907f6cee844776123a",
+    "newton": "072bda240a5991bc4da6ff8b6cd5f6f33fcfc058"
+  },
+  "reviewed_by": "",
+  "checked_at": null,
+  "passed": false,
+  "notes": "Human review required before deployment."
+}

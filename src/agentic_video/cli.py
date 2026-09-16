@@ -297,6 +297,35 @@ def build_parser() -> argparse.ArgumentParser:
     reference_v9_accept.add_argument("--output", required=True)
     reference_v9_accept.add_argument("--human-review", required=True)
 
+    reference_v9g = sub.add_parser(
+        "reference-generate-v9g",
+        help="run one V9-G contract, capability, generation, selection or evaluation phase")
+    reference_v9g.add_argument(
+        "--phase", required=True,
+        choices=("license", "capability", "contract", "pilot", "generate",
+                 "select", "assemble", "evaluate"))
+    reference_v9g.add_argument("--output", required=True)
+    reference_v9g.add_argument("--v9-output", default=None)
+    reference_v9g.add_argument("--target-setting", default=None)
+    reference_v9g.add_argument(
+        "--code-license-gate", default="license_gates/code_license_gate.json")
+    reference_v9g.add_argument(
+        "--model-license-gate", default="license_gates/model_license_gate.json")
+    reference_v9g.add_argument("--fl2va-endpoint", default=None)
+    reference_v9g.add_argument("--ref2va-endpoint", default=None)
+    reference_v9g.add_argument("--fixture-dir", default=None)
+    reference_v9g.add_argument("--input", default=None)
+    reference_v9g.add_argument(
+        "--gpu-pairs", default=None,
+        help="Omni worker pairs used only by pilot/generate")
+    reference_v9g.add_argument("--worker-timeout", type=float, default=3600.0)
+
+    reference_v9g_accept = sub.add_parser(
+        "reference-generate-v9g-accept",
+        help="finalize V9-G only after Section, blind and human review all pass")
+    reference_v9g_accept.add_argument("--output", required=True)
+    reference_v9g_accept.add_argument("--human-review", required=True)
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -1847,6 +1876,151 @@ def _reference_program_v9_accept(args, _cfg) -> dict:
     return accept_reference_programs(Path(args.output), Path(args.human_review))
 
 
+def _v9g_path(value: str | None) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value)
+    return path.resolve() if path.is_absolute() else (repo_root() / path).resolve()
+
+
+def _reference_generate_v9g(args, cfg) -> dict:
+    from src.agentic_video.generation_v9g import (
+        SGLangH3Client, adapt_contract_to_filmdsl,
+        build_asset_and_state_pack, build_generation_jobs,
+        compile_generation_contract, evaluate_v9g_experiment,
+        finalize_unit_snippets, probe_h3_capabilities,
+        render_and_review_sections, run_v9g_generation_jobs,
+        validate_generation_contract,
+        validate_upstream_lock,
+        validate_license_gates,
+    )
+
+    output = Path(args.output).resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    code_gate = _v9g_path(args.code_license_gate)
+    model_gate = _v9g_path(args.model_license_gate)
+    licenses = validate_license_gates(code_gate, model_gate)
+    upstream = validate_upstream_lock(repo_root())
+    if not upstream["passed"]:
+        raise RuntimeError("upstream fixture drift: " + ";".join(upstream["errors"]))
+    if args.phase == "license":
+        result = {"schema_version": "v9g_license_validation_v1",
+                  "licenses": licenses, "upstream": upstream, "passed": True}
+        (output / "license_validation.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
+    contract_path = output / "generation_contract.json"
+    if args.phase == "contract":
+        if not args.v9_output or not args.target_setting:
+            raise ValueError("contract phase requires --v9-output and --target-setting")
+        contract = compile_generation_contract(
+            _v9g_path(args.v9_output), _v9g_path(args.target_setting), contract_path)
+        state = build_asset_and_state_pack(contract)
+        (output / "asset_state_pack.json").write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        filmdsl = adapt_contract_to_filmdsl(contract, state)
+        (output / "filmdsl.json").write_text(
+            json.dumps(filmdsl, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"output": str(output), "contract_hash": contract["contract_hash"],
+                "section_count": len(contract["sections"])}
+
+    if args.phase == "capability":
+        if not args.fl2va_endpoint or not args.ref2va_endpoint or not args.fixture_dir:
+            raise ValueError(
+                "capability phase requires both H3 endpoints and --fixture-dir")
+        fixture_dir = _v9g_path(args.fixture_dir)
+        fixtures = {
+            "first": (fixture_dir / "first.png").as_uri(),
+            "last": (fixture_dir / "last.png").as_uri(),
+            "image": (fixture_dir / "reference.png").as_uri(),
+            "video": (fixture_dir / "reference.mp4").as_uri(),
+            "audio": (fixture_dir / "reference.wav").as_uri(),
+        }
+        missing = [uri for uri in fixtures.values()
+                   if not Path(uri.removeprefix("file:///")).is_file()]
+        if missing:
+            raise FileNotFoundError("capability fixtures missing: " + ",".join(missing))
+        manifest = probe_h3_capabilities({
+            "fl2va": SGLangH3Client(args.fl2va_endpoint),
+            "ref2va": SGLangH3Client(args.ref2va_endpoint),
+        }, fixtures, output / "capability")
+        return {"output": str(output),
+                "passed_count": sum(manifest.get(key) is True for key in manifest
+                                    if key != "evidence")}
+
+    if not contract_path.is_file():
+        raise FileNotFoundError(f"generation contract missing: {contract_path}")
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract_validation = validate_generation_contract(contract)
+    if not contract_validation["passed"]:
+        raise RuntimeError("generation contract invalid: " +
+                           ";".join(contract_validation["errors"]))
+    capability_path = output / "capability" / "capability_manifest.json"
+    if args.phase in {"pilot", "generate"}:
+        if not capability_path.is_file():
+            raise FileNotFoundError(f"capability manifest missing: {capability_path}")
+        if not args.fl2va_endpoint or not args.ref2va_endpoint or not args.gpu_pairs:
+            raise ValueError("pilot/generate requires both H3 endpoints and --gpu-pairs")
+        capabilities = json.loads(capability_path.read_text(encoding="utf-8"))
+        jobs = build_generation_jobs(
+            contract, capabilities, output / "generation_jobs.json")
+        from src.perception.omni_pool import OmniProcessPool
+        with OmniProcessPool(
+                args.gpu_pairs, cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            results = run_v9g_generation_jobs(
+                contract, jobs, output, clients={
+                    "fl2va": SGLangH3Client(args.fl2va_endpoint),
+                    "ref2va": SGLangH3Client(args.ref2va_endpoint),
+                }, runner=runner, capabilities=capabilities,
+                max_units=2 if args.phase == "pilot" else None)
+        return {"output": str(output), "unit_count": len(results),
+                "passed_count": sum(row.get("passed") is True for row in results)}
+
+    if not args.input:
+        raise ValueError(f"{args.phase} phase requires --input")
+    value = json.loads(_v9g_path(args.input).read_text(encoding="utf-8"))
+    if args.phase == "select":
+        if not args.gpu_pairs:
+            raise ValueError("select requires --gpu-pairs for post-crop Omni review")
+        rows = value.get("results") if isinstance(value, dict) else value
+        state_path = output / "asset_state_pack.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        from src.perception.omni_pool import OmniProcessPool
+        with OmniProcessPool(
+                args.gpu_pairs, cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            results = finalize_unit_snippets(
+                cfg, contract, rows or [], state, output, runner=runner)
+        return {"output": str(output), "passed_count": sum(
+            row.get("snippet_review", {}).get("passed") is True for row in results)}
+    if args.phase == "assemble":
+        if not args.gpu_pairs:
+            raise ValueError("assemble requires --gpu-pairs for Section/blind review")
+        rows = value.get("results") if isinstance(value, dict) else value
+        from src.perception.omni_pool import OmniProcessPool
+        with OmniProcessPool(
+                args.gpu_pairs, cfg.perception.get("omni") or {},
+                ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+                response_timeout_s=args.worker_timeout) as runner:
+            assembly = render_and_review_sections(
+                cfg, contract, rows or [], output, runner=runner)
+        return {"output": str(output), "passed": assembly["passed"]}
+    rows = value.get("rows") if isinstance(value, dict) else value
+    metrics = evaluate_v9g_experiment(
+        rows or [], output_path=output / "experiment_metrics.json")
+    return {"output": str(output), **metrics}
+
+
+def _reference_generate_v9g_accept(args, _cfg) -> dict:
+    from src.agentic_video.generation_v9g import accept_v9g
+
+    return accept_v9g(Path(args.output), Path(args.human_review))
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -1915,6 +2089,8 @@ def main(argv: list[str] | None = None) -> int:
                 "omni-edit-trial": _omni_edit_trial,
                 "reference-program-v9": _reference_program_v9,
                 "reference-program-v9-accept": _reference_program_v9_accept,
+                "reference-generate-v9g": _reference_generate_v9g,
+                "reference-generate-v9g-accept": _reference_generate_v9g_accept,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
