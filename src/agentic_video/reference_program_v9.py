@@ -29,6 +29,7 @@ V9_VERSION = "reference_program_v9_p0"
 CONTENT_VERSION = "reference_content_program_v9_p0"
 EDIT_VERSION = "reference_edit_program_v9_p0"
 REQUIREMENTS_VERSION = "material_requirements_v9_p0"
+HUMAN_REVIEW_VERSION = "reference_program_human_review_v9_p01"
 CONTINUITY_LEVELS = {"required", "preferred", "not_required", "unknown"}
 CONTINUITY_DIMENSIONS = (
     "subject", "opponent", "scene", "event", "actor_role", "spatial_orientation",
@@ -716,7 +717,8 @@ def build_section_observations(
         if not value["shots"]:
             raise V9Blocked("section_watch", "section_shots_missing", section_id)
         _attach_intervals(value, ledger, keys=("shots",), stage="section_watch")
-        for shot in value["shots"]:
+        for shot_index, shot in enumerate(value["shots"], 1):
+            shot["shot_id"] = f"{section_id}.shot_{shot_index:03d}"
             if (shot["interval"][0] < interval[0] - 1e-6 or
                     shot["interval"][1] > interval[1] + 1e-6):
                 raise V9Blocked("section_watch", "shot_outside_section", section_id)
@@ -757,6 +759,27 @@ def collect_reference_gaps(draft: dict[str, Any], section_observations: dict[str
             if (known.get("gap_type") == question["gap_type"] and len(prior) == 2 and
                     max(float(prior[0]), float(interval[0])) <
                     min(float(prior[1]), float(interval[1]))):
+                previous_importance = known.get("importance")
+                if question.get("importance") == "required":
+                    known["importance"] = "required"
+                    if previous_importance != "required":
+                        known["selected_probe"] = question.get("selected_probe")
+                known["interval"] = [min(float(prior[0]), float(interval[0])),
+                                     max(float(prior[1]), float(interval[1]))]
+                known["trigger_ids"] = sorted(set(
+                    (known.get("trigger_ids") or []) +
+                    (question.get("trigger_ids") or [])))
+                known["trigger_sources"] = sorted({
+                    str(value) for value in (
+                        known.get("trigger_sources") or []) +
+                    [known.get("gap_source"), question.get("gap_source")]
+                    if value})
+                if question.get("question") and question["question"] not in str(
+                        known.get("question") or ""):
+                    known["question"] = " / ".join(filter(None, (
+                        str(known.get("question") or ""), str(question["question"]))))
+                if question.get("status") == "open":
+                    known["status"] = "open"
                 return
         questions.append(question)
 
@@ -971,6 +994,14 @@ def _run_reference_probe(reference: Path, question: dict[str, Any],
             raise V9Blocked("probe", "probe_evidence_type_invalid")
     if result["status"] == "resolved" and not result.get("evidence"):
         raise V9Blocked("probe", "probe_resolution_without_evidence")
+    observed_types = {
+        "observed_visual", "observed_textual_claim", "observed_audio_claim"}
+    if result["status"] == "resolved" and not any(
+            row.get("evidence_type") in observed_types and
+            str(row.get("description") or "").strip()
+            for row in result.get("evidence") or []):
+        result["status"] = "open"
+        result["resolution_gate"] = "supported_evidence_missing"
     audit = {
         "probe": selected, "question_id": question.get("id"),
         "interval": interval, "raw_response": str(raw_path),
@@ -1095,6 +1126,7 @@ EDIT_PROGRAM_PROMPT = """根据 Content Program、确定性时间线和逐 Secti
   }],
   "editorial_patterns": [{
     "section_id":"section_01",
+    "shot_refs":["section_01.shot_001"],
     "composition_mode":"continuous_clip|micro_montage|event_compression_montage|evidence_montage|dialogue_compression|reaction_result_pair",
     "duration_budget_s":0.0, "source_semantics":"one_long_event|multiple_events|dialogue|continuous_moment|paired_moments",
     "semantic_phases":[], "snippet_count_range":[1,1],
@@ -1242,6 +1274,11 @@ def build_reference_edit_program(
         "schema_version": EDIT_VERSION,
         "input_sha256": input_hash,
         "direct_section_watch_sha256": json_hash(section_observations),
+        "section_rewatch_refs": [
+            {"section_id": row["section_id"],
+             "raw_response_sha256": row["raw_response_sha256"],
+             "shot_ids": [shot["shot_id"] for shot in row["shots"]]}
+            for row in section_observations["sections"]],
         "reference_sha256": ledger["reference"]["sha256"],
         "content_program_sha256": json_hash(content), "provenance": audit,
     })
@@ -1457,10 +1494,31 @@ def _validate_content(content: dict[str, Any], ledger: dict[str, Any],
 
 
 def _validate_edit(edit: dict[str, Any], content: dict[str, Any],
-                   ledger: dict[str, Any], errors: list[str]) -> None:
+                   ledger: dict[str, Any], section_observations: dict[str, Any] | None,
+                   errors: list[str]) -> None:
     if edit.get("schema_version") != EDIT_VERSION:
         errors.append("edit schema_version invalid")
     section_ids = {str(row.get("section_id")) for row in content.get("sections") or []}
+    direct_sections = {str(row.get("section_id")): row for row in
+                       (section_observations or {}).get("sections") or []}
+    direct_refs = {str(row.get("section_id")): row for row in
+                   edit.get("section_rewatch_refs") or []}
+    if (not section_observations or
+            section_observations.get("reference_sha256") !=
+            ledger["reference"]["sha256"] or
+            edit.get("direct_section_watch_sha256") != json_hash(section_observations)):
+        errors.append("edit direct Section watch missing or hash mismatch")
+    if set(direct_sections) != section_ids or set(direct_refs) != section_ids:
+        errors.append("edit direct Section coverage incomplete")
+    for section_id in section_ids & set(direct_sections) & set(direct_refs):
+        observed = direct_sections[section_id]
+        recorded = direct_refs[section_id]
+        shot_ids = {str(shot.get("shot_id")) for shot in observed.get("shots") or []}
+        if (not observed.get("raw_response_sha256") or
+                recorded.get("raw_response_sha256") !=
+                observed.get("raw_response_sha256") or
+                set(recorded.get("shot_ids") or []) != shot_ids):
+            errors.append(f"edit Section {section_id} rewatch reference invalid")
     covered_sections: set[str] = set()
     boundaries = _boundary_map(ledger)
     for index, operation in enumerate(edit.get("operations") or []):
@@ -1487,6 +1545,11 @@ def _validate_edit(edit: dict[str, Any], content: dict[str, Any],
         section_id = str(pattern.get("section_id") or "")
         if section_id not in section_ids:
             errors.append(f"editorial_patterns[{index}] unknown section")
+        observed_shots = {str(shot.get("shot_id")) for shot in
+                          direct_sections.get(section_id, {}).get("shots") or []}
+        if (not pattern.get("shot_refs") or
+                not set(pattern["shot_refs"]).issubset(observed_shots)):
+            errors.append(f"editorial_patterns[{index}] direct shot refs missing")
         covered_sections.add(section_id)
         mode = pattern.get("composition_mode")
         if mode not in COMPOSITION_MODES:
@@ -1585,11 +1648,12 @@ def _validate_requirements(requirements: dict[str, Any], content: dict[str, Any]
 
 def validate_reference_programs(content: dict[str, Any], edit: dict[str, Any],
                                 requirements: dict[str, Any],
-                                ledger: dict[str, Any]) -> dict[str, Any]:
+                                ledger: dict[str, Any],
+                                section_observations: dict[str, Any] | None = None) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
     _validate_content(content, ledger, errors, warnings)
-    _validate_edit(edit, content, ledger, errors)
+    _validate_edit(edit, content, ledger, section_observations, errors)
     _validate_requirements(requirements, content, edit, errors)
     return {
         "schema_version": "reference_program_validation_v9",
@@ -1684,12 +1748,27 @@ def _write_review_pack(output_dir: Path, content: dict[str, Any],
     ])
     Path(output_dir, "review_sheet.md").write_text("\n".join(lines), encoding="utf-8")
     _write_json(Path(output_dir) / "human_review.template.json", {
-        "schema_version": "reference_program_human_review_v9",
+        "schema_version": HUMAN_REVIEW_VERSION,
+        "review_binding": _review_binding(output_dir),
         "reviewer": "", "sections": review_rows,
         "continuity_resolutions": [],
         "requirement_transfer_test": {"passed": None, "notes": ""},
         "overall_notes": "",
     })
+
+
+def _review_binding(output_dir: Path) -> dict[str, Any]:
+    """Bind a human signature to the exact source and Program snapshot."""
+    output_dir = Path(output_dir)
+    ledger = json.loads((output_dir / "reference_evidence.json").read_text(
+        encoding="utf-8"))
+    return {
+        "reference_sha256": ledger["reference"]["sha256"],
+        "evidence_ledger_sha256": sha256_file(output_dir / "reference_evidence.json"),
+        "content_program_sha256": sha256_file(output_dir / "reference_content_program.json"),
+        "edit_program_sha256": sha256_file(output_dir / "reference_edit_program.json"),
+        "material_requirements_sha256": sha256_file(output_dir / "material_requirements.json"),
+    }
 
 
 def _write_acceptance(output_dir: Path, *, automated_passed: bool,
@@ -1723,12 +1802,37 @@ def accept_reference_programs(output_dir: Path, human_review: Path) -> dict[str,
     if not automatic.get("automated_passed"):
         raise V9Blocked("human_acceptance", "automatic_validation_not_passed")
     review = json.loads(Path(human_review).read_text(encoding="utf-8"))
+    current_binding = _review_binding(output_dir)
+    if (review.get("schema_version") != HUMAN_REVIEW_VERSION or
+            review.get("review_binding") != current_binding):
+        return _write_acceptance(
+            output_dir, automated_passed=True, decision="BLOCKED",
+            failure_stage="human", reason_code="stale_human_review",
+            detail="Review schema or signed Program snapshot does not match current files",
+            failure_class="verification", human_passed=False)
     content = json.loads((output_dir / "reference_content_program.json").read_text(
         encoding="utf-8"))
+    edit = json.loads((output_dir / "reference_edit_program.json").read_text(
+        encoding="utf-8"))
+    requirements = json.loads((output_dir / "material_requirements.json").read_text(
+        encoding="utf-8"))
+    ledger = json.loads((output_dir / "reference_evidence.json").read_text(
+        encoding="utf-8"))
+    sections = json.loads((output_dir / "section_observations.json").read_text(
+        encoding="utf-8"))
+    current_validation = validate_reference_programs(
+        content, edit, requirements, ledger, sections)
+    if not current_validation["passed"]:
+        return _write_acceptance(
+            output_dir, automated_passed=False, decision="BLOCKED",
+            failure_stage="validation", reason_code="current_program_validation_failed",
+            detail="; ".join(current_validation["errors"]),
+            validation=current_validation, human_passed=False,
+            failure_class="verification")
     amendments = review.get("continuity_resolutions") or []
     amendment_errors = []
     amended = False
-    updated_validation = automatic.get("validation")
+    updated_validation = current_validation
     if amendments:
         if not str(review.get("reviewer") or "").strip():
             amendment_errors.append("continuity_reviewer_missing")
@@ -1762,19 +1866,21 @@ def accept_reference_programs(output_dir: Path, human_review: Path) -> dict[str,
             "resolutions": amendments,
         }
         if not amendment_errors:
-            edit = json.loads((output_dir / "reference_edit_program.json").read_text(
-                encoding="utf-8"))
             edit["content_program_sha256"] = json_hash(content)
-            ledger = json.loads((output_dir / "reference_evidence.json").read_text(
-                encoding="utf-8"))
             proposed = compile_material_requirements(
                 content, edit, output_dir / "human_review_draft")
-            checked = validate_reference_programs(content, edit, proposed, ledger)
+            checked = validate_reference_programs(content, edit, proposed, ledger,
+                                                  sections)
             if checked["passed"]:
                 _write_json(output_dir / "reference_content_program.json", content)
                 _write_json(output_dir / "reference_edit_program.json", edit)
                 _write_json(output_dir / "material_requirements.json", proposed)
                 _write_json(output_dir / "validation.json", checked)
+                asset_manifest = output_dir / "review_assets" / "manifest.json"
+                assets = (json.loads(asset_manifest.read_text(
+                    encoding="utf-8")).get("sections") or []
+                    if asset_manifest.is_file() else [])
+                _write_review_pack(output_dir, content, edit, proposed, assets)
                 updated_validation = checked
                 amended = True
             else:
@@ -1911,7 +2017,8 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             content, ledger, output_dir, runner=runner,
             section_observations=section_observations, force=force)
         requirements = compile_material_requirements(content, edit, output_dir)
-        validation = validate_reference_programs(content, edit, requirements, ledger)
+        validation = validate_reference_programs(content, edit, requirements, ledger,
+                                                 section_observations)
         _write_json(output_dir / "validation.json", validation)
         manifest["stages"]["programs"] = {
             "status": "complete" if validation["passed"] else "blocked",
