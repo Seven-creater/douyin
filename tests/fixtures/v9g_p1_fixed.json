@@ -1,0 +1,61 @@
+{
+  "requirements": {
+    "schema_version": "material_requirements_v9_p0",
+    "requirements": [
+      {
+        "section_id": "S2",
+        "semantic_requirement": {
+          "meaning_to_prove": "A stable subject acts and causes a visible change",
+          "required_semantic_phases": ["setup", "decisive_action", "visible_result"]
+        },
+        "presentation_requirement": {
+          "target_duration_s": 6.0,
+          "composition_mode": "event_compression_montage",
+          "snippet_count_range": [4, 4]
+        },
+        "continuity_requirement": {
+          "levels": {
+            "subject": "required",
+            "opponent": "required",
+            "scene": "required",
+            "event": "required",
+            "actor_role": "required",
+            "spatial_orientation": "preferred"
+          }
+        },
+        "evidence_requirement": {
+          "minimum_sufficient_evidence_set": ["setup", "decisive_action", "visible_result"]
+        }
+      }
+    ]
+  },
+  "target_setting": {
+    "assets": {"subject": "C0", "opponent": "C1", "scene": "arena"}
+  },
+  "action_plans": {
+    "S2": [
+      {
+        "primary_causal_goal": "Establish the confrontation and begin an attack",
+        "semantic_phases": ["setup"],
+        "generated_duration_s": 6.0,
+        "continuity_ids": {
+          "subject": "C0", "opponent": "C1", "scene": "arena",
+          "event": "E1", "actor_role": "C0_actor"
+        },
+        "condition_keys": ["C0_front", "C1_front", "arena"],
+        "generation_complexity_note": "One primary action target"
+      },
+      {
+        "primary_causal_goal": "Complete the attack and show the opponent's reaction",
+        "semantic_phases": ["decisive_action", "visible_result"],
+        "generated_duration_s": 8.0,
+        "continuity_ids": {
+          "subject": "C0", "opponent": "C1", "scene": "arena",
+          "event": "E1", "actor_role": "C0_actor"
+        },
+        "condition_keys": ["C0_front", "C1_front", "arena"],
+        "generation_complexity_note": "One primary action target"
+      }
+    ]
+  }
+}
