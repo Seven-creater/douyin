@@ -153,6 +153,14 @@ def _verified_v9_inputs(v9_dir: Path) -> tuple[dict[str, Any], ...]:
         if not path.is_file() or expected.get(name) != _file_hash(path):
             raise V9GBlocked("contract", "frozen_v9_program_hash_mismatch", name)
         values.append(_read_json(path))
+    # P0 changes the continuity contract from booleans to four-state levels.
+    # The existing V9-G compiler must not silently interpret that new schema.
+    versions = tuple(str(value.get("schema_version") or "") for value in values)
+    if any(version.endswith("_v9_p0") for version in versions):
+        raise V9GBlocked("contract", "v9_p0_contract_adapter_not_implemented")
+    if versions != ("reference_content_program_v9", "reference_edit_program_v9",
+                    "material_requirements_v9"):
+        raise V9GBlocked("contract", "unsupported_v9_program_schema")
     return (*values, frozen)
 
 

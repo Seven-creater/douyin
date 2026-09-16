@@ -11,9 +11,11 @@ from src.agentic_video.reference_program_v9 import (
     CONTENT_VERSION, EDIT_VERSION, V9Blocked,
     accept_reference_programs, build_reference_content_program,
     build_reference_edit_program, build_reference_understanding_draft,
+    build_section_observations, collect_reference_gaps,
     compile_material_requirements, merge_cut_candidates,
     resolve_reference_questions, run_reference_program_v9,
-    validate_reference_programs, _parse_one_object,
+    validate_reference_programs, _parse_one_object, _read_cached_output,
+    GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT,
 )
 
 
@@ -80,12 +82,31 @@ def _draft(*, questions=None) -> dict:
              "start_boundary_id": "cut_002", "end_boundary_id": "video_end",
              "evidence_ids": ["ev_text"]},
         ],
-        "section_drafts": [],
+        "section_drafts": [
+            {"section_id": "competition", "start_boundary_id": "video_start",
+             "end_boundary_id": "cut_002", "evidence_ids": ["ev_visual"],
+             "unit_ids": ["unit_01", "unit_02"]},
+            {"section_id": "proofs", "start_boundary_id": "cut_002",
+             "end_boundary_id": "video_end", "evidence_ids": ["ev_text"],
+             "unit_ids": ["unit_03"]},
+        ],
         "unresolved_questions": questions or [],
     }
 
 
 def _content() -> dict:
+    continuity = {
+        "subject": "required", "opponent": "not_required", "scene": "preferred",
+        "event": "required", "actor_role": "required",
+        "spatial_orientation": "preferred",
+    }
+    basis = {key: {"reason": "visible section evidence",
+                   "evidence_ids": ["ev_visual"] if level in {"required", "preferred"} else []}
+             for key, level in continuity.items()}
+    proof_continuity = dict(continuity, event="not_required", opponent="not_required")
+    proof_basis = {key: {"reason": "independent visual evidence",
+                         "evidence_ids": ["ev_text"] if level in {"required", "preferred"} else []}
+                   for key, level in proof_continuity.items()}
     return {
         "schema_version": CONTENT_VERSION,
         "core_expression": {
@@ -109,7 +130,8 @@ def _content() -> dict:
              "audience_takeaway": "the subject can act effectively",
              "cognition_change": {"before": "uncertain", "after": "capability is visible"},
              "content_function": "proof", "relation_to_previous": "contrast",
-             "evidence_ids": ["ev_visual"], "unit_ids": ["unit_01", "unit_02"]},
+             "evidence_ids": ["ev_visual"], "unit_ids": ["unit_01", "unit_02"],
+             "continuity": continuity, "continuity_basis": basis},
             {"section_id": "proofs", "start_boundary_id": "cut_002",
              "end_boundary_id": "video_end", "interval": [20.0, 30.0],
              "reference_specific_fact": "specific claims",
@@ -117,7 +139,8 @@ def _content() -> dict:
              "audience_takeaway": "the capability generalizes",
              "cognition_change": {"before": "one example", "after": "multiple proofs"},
              "content_function": "expansion", "relation_to_previous": "broadens proof",
-             "evidence_ids": ["ev_text"], "unit_ids": ["unit_03"]},
+             "evidence_ids": ["ev_text"], "unit_ids": ["unit_03"],
+             "continuity": proof_continuity, "continuity_basis": proof_basis},
         ],
         "unresolved_questions": [], "probe_history": [],
     }
@@ -167,6 +190,32 @@ def _edit() -> dict:
     }
 
 
+def _section_watch(section_id: str, start: str, end: str, cut: str | None = None) -> dict:
+    pairs = [(start, cut), (cut, end)] if cut else [(start, end)]
+    return {
+        "section_id": section_id,
+        "shots": [{"start_boundary_id": left, "end_boundary_id": right,
+                   "information_added": "a visible action changes another subject's state",
+                   "edit_function": "establishes a new stage",
+                   "event_relation": "same_event",
+                   "supporting_deterministic_ids": []}
+                  for left, right in pairs],
+        "cut_assessments": ([{"boundary_id": cut, "status": "real_cut",
+                              "reason": "visible image change"}] if cut else []),
+        "rhythm_claimed": False, "rhythm_evidence_ids": [],
+        "unresolved_questions": [],
+    }
+
+
+def _section_bank() -> dict:
+    return {"sections": [
+        dict(_section_watch("competition", "video_start", "cut_002", "cut_001"),
+             source_interval=[0.0, 20.0]),
+        dict(_section_watch("proofs", "cut_002", "video_end"),
+             source_interval=[20.0, 30.0]),
+    ]}
+
+
 class FakeRunner:
     def __init__(self, *, watch=None, ask=None, inspect=None):
         self.watch_values = list(watch or [])
@@ -174,6 +223,7 @@ class FakeRunner:
         self.inspect_values = list(inspect or [])
         self.watch_calls = []
         self.ask_calls = []
+        self.inspect_calls = []
 
     @staticmethod
     def _answer(value):
@@ -192,6 +242,7 @@ class FakeRunner:
         return self._answer(self.ask_values.pop(0))
 
     def inspect_media(self, images, prompt, **kwargs):
+        self.inspect_calls.append((images, prompt, kwargs))
         return self._answer(self.inspect_values.pop(0))
 
 
@@ -242,6 +293,66 @@ def test_global_watch_uses_four_fps_without_flashvid_or_native_frame_batch(tmp_p
     assert result["observations"][1]["evidence_type"] == "observed_textual_claim"
 
 
+def test_production_watch_prompts_do_not_spoil_reference_answer() -> None:
+    for prompt in (GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT):
+        for spoiler in ("没有双手", "跆拳道", "比赛", "能力展示", "全国冠军"):
+            assert spoiler not in prompt
+
+
+def test_legacy_cache_without_source_and_tool_hash_is_unavailable(tmp_path: Path) -> None:
+    cache = tmp_path / "ocr.json"
+    cache.write_text(json.dumps({"output": {"text_events": [{"text": "stale"}]}}),
+                     encoding="utf-8")
+    output, audit = _read_cached_output(
+        cache, reference_sha256="a" * 64, tool_version="tool-v2")
+    assert output is None
+    assert audit["status"] == "unverified_source"
+
+
+def test_section_edit_rewatches_source_video_and_keeps_cut_evidence(tmp_path: Path) -> None:
+    ledger = _ledger()
+    draft = _draft()
+    draft["section_drafts"][0]["interval"] = [0.0, 20.0]
+    draft["section_drafts"][1]["interval"] = [20.0, 30.0]
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    runner = FakeRunner(watch=[
+        _section_watch("competition", "video_start", "cut_002", "cut_001"),
+        _section_watch("proofs", "cut_002", "video_end"),
+    ])
+    bank = build_section_observations(video, draft, ledger, tmp_path,
+                                      runner=runner)
+    assert len(runner.watch_calls) == 2
+    assert runner.watch_calls[0][2]["start_s"] == 0.0
+    assert runner.watch_calls[0][2]["end_s"] == 20.0
+    assert '"cut_001"' in runner.watch_calls[0][1]
+    assert bank["sections"][0]["shots"][0]["interval"] == [0.0, 10.0]
+    assert (tmp_path / "raw_responses" / "section_competition.txt").is_file()
+
+
+def test_signal_gap_only_when_current_explanation_is_incomplete() -> None:
+    ledger = _ledger()
+    complete = {"sections": [{
+        "section_id": "whole", "source_interval": [0.0, 30.0],
+        "shots": [{"start_boundary_id": "video_start", "end_boundary_id": "cut_001",
+                   "information_added": "specific change"},
+                  {"start_boundary_id": "cut_001", "end_boundary_id": "cut_002",
+                   "information_added": "another specific change"},
+                  {"start_boundary_id": "cut_002", "end_boundary_id": "video_end",
+                   "information_added": "final specific change"}],
+        "cut_assessments": [
+            {"boundary_id": "cut_001", "status": "real_cut"},
+            {"boundary_id": "cut_002", "status": "not_cut"}],
+        "rhythm_claimed": False,
+    }]}
+    assert collect_reference_gaps(_draft(), complete, ledger) == []
+    complete["sections"][0]["cut_assessments"].pop()
+    gaps = collect_reference_gaps(_draft(), complete, ledger)
+    assert len(gaps) == 1
+    assert gaps[0]["gap_source"] == "signal_audit"
+    assert gaps[0]["trigger_ids"] == ["cut_002"]
+
+
 def test_required_question_probe_budget_remains_blocked(tmp_path: Path) -> None:
     question = {"id": "q1", "question": "what changes", "importance": "required",
                 "gap_type": "event_structure", "selected_probe": "dense_video",
@@ -272,6 +383,56 @@ def test_probe_selection_must_match_the_unresolved_gap(tmp_path: Path) -> None:
             tmp_path, runner=FakeRunner(), max_rounds=1)
 
 
+def test_ocr_probe_carries_verified_text_events_and_source_interval(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.agentic_video.reference_program_v9 as module
+
+    ledger = _ledger()
+    ledger["ocr"]["normalized_claim_events"] = [{
+        "claim_id": "ocr_001", "text": "a displayed claim",
+        "interval": [1.0, 2.0],
+    }]
+    ledger["ocr_provenance"] = {"status": "reused_verified_artifact",
+                                 "source_sha256": ledger["reference"]["sha256"]}
+    question = {"id": "q_ocr", "question": "what does text convey?",
+                "importance": "required", "gap_type": "text_claim",
+                "selected_probe": "ocr_context", "interval": [0.0, 10.0],
+                "status": "open"}
+    frame = tmp_path / "ocr_frame.jpg"
+    frame.write_bytes(b"frame")
+    monkeypatch.setattr(module, "_ocr_probe_frames", lambda *args, **kwargs: (
+        [frame], [{"claim_id": "ocr_001", "frame_id": "f000030",
+                   "pts_s": 1.0, "path": str(frame), "sha256": "frame_hash"}]))
+    monkeypatch.setattr(module, "cut_clip", lambda *args, **kwargs: tmp_path / "clip.mp4")
+    runner = FakeRunner(inspect=[{
+        "question_id": "q_ocr", "status": "resolved", "answer": "text makes a claim",
+        "evidence": [{"evidence_type": "observed_textual_claim",
+                      "description": "words appear on screen"}],
+    }])
+    result = resolve_reference_questions(
+        tmp_path / "reference.mp4", _draft(questions=[question]), ledger,
+        tmp_path, runner=runner)
+    assert not result["required_unresolved_ids"]
+    assert "ocr_001" in runner.inspect_calls[0][1]
+    assert runner.inspect_calls[0][0] == [frame]
+    assert runner.inspect_calls[0][2]["video_path"] == tmp_path / "clip.mp4"
+    audit = result["probe_history"][0]
+    assert "ocr_text_events" in audit["evidence_fields"]
+    assert audit["evidence_provenance"]["source_sha256"] == "a" * 64
+    assert Path(audit["input_path"]).is_file()
+
+
+def test_ocr_probe_refuses_unverified_cache(tmp_path: Path) -> None:
+    question = {"id": "q_ocr", "question": "what does text convey?",
+                "importance": "required", "gap_type": "text_claim",
+                "selected_probe": "ocr_context", "interval": [0.0, 10.0],
+                "status": "open"}
+    with pytest.raises(V9Blocked, match="ocr_context"):
+        resolve_reference_questions(
+            tmp_path / "reference.mp4", _draft(questions=[question]),
+            _ledger(), tmp_path, runner=FakeRunner())
+
+
 def test_program_validation_accepts_event_compression_and_evidence_montage(
         tmp_path: Path) -> None:
     content = _content()
@@ -293,7 +454,7 @@ def test_program_validation_accepts_event_compression_and_evidence_montage(
     assert event["semantic_requirement"]["required_event_understanding"].startswith(
         "understand_full_source_event")
     assert requirements["requirements"][1]["continuity_requirement"][
-        "same_event_required"] is False
+        "levels"]["event"] == "not_required"
 
 
 def test_two_coarse_windows_cannot_swallow_many_meaningful_units(tmp_path: Path) -> None:
@@ -333,7 +494,7 @@ def test_event_compression_order_evidence_montage_causality_and_dialogue_integri
     edit["editorial_patterns"][0]["ordering_constraint"] = "source_order"
     edit["editorial_patterns"][1]["source_semantics"] = "one_long_event"
     requirements = compile_material_requirements(content, edit, tmp_path)
-    requirements["requirements"][1]["continuity_requirement"]["same_event_required"] = True
+    requirements["requirements"][1]["continuity_requirement"]["levels"]["event"] = "required"
     result = validate_reference_programs(content, edit, requirements, _ledger())
     assert any("progression" in error for error in result["errors"])
     assert any("fabricates one event" in error for error in result["errors"])
@@ -374,7 +535,9 @@ def test_fake_runner_evidence_gap_probe_to_three_programs(tmp_path: Path) -> Non
                                            runner=runner)
     content = build_reference_content_program(draft, resolved, ledger, tmp_path,
                                               runner=runner)
-    edit = build_reference_edit_program(content, ledger, tmp_path, runner=runner)
+    edit = build_reference_edit_program(
+        content, ledger, tmp_path, runner=runner,
+        section_observations=_section_bank())
     requirements = compile_material_requirements(content, edit, tmp_path)
     result = validate_reference_programs(content, edit, requirements, ledger)
     assert result["passed"], result["errors"]
@@ -391,7 +554,11 @@ def test_fake_runner_full_v9_orchestration_stops_pending_human(
 
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"reference")
-    runner = FakeRunner(watch=[_draft()], ask=[_content(), _edit()])
+    runner = FakeRunner(watch=[
+        _draft(),
+        _section_watch("competition", "video_start", "cut_002", "cut_001"),
+        _section_watch("proofs", "cut_002", "video_end"),
+    ], ask=[_content(), _edit()])
     monkeypatch.setattr(module, "build_reference_evidence_ledger",
                         lambda *args, **kwargs: _ledger())
     monkeypatch.setattr(module, "_build_review_assets",
@@ -404,6 +571,8 @@ def test_fake_runner_full_v9_orchestration_stops_pending_human(
     assert result["long_video_perception_authorized"] is False
     assert (tmp_path / "run" / "human_review.template.json").is_file()
     assert not (tmp_path / "run" / "frozen_program_hashes.json").exists()
+    for stage in ("p0_a", "p0_b", "p0_c", "p0_d"):
+        assert list((tmp_path / "run" / "stages" / stage).glob("*/manifest.json"))
 
 
 def test_human_acceptance_requires_every_section_and_transfer_test(tmp_path: Path) -> None:
@@ -422,6 +591,7 @@ def test_human_acceptance_requires_every_section_and_transfer_test(tmp_path: Pat
         "material_requirement_searchable": True,
     }
     review = {
+        "reviewer": "human reviewer",
         "sections": [{"section_id": section_id, "passed": True, "checks": dict(checks)}
                      for section_id in ("competition", "proofs")],
         "requirement_transfer_test": {"passed": False},
@@ -434,3 +604,44 @@ def test_human_acceptance_requires_every_section_and_transfer_test(tmp_path: Pat
     result = accept_reference_programs(tmp_path, path)
     assert result["decision"] == "PASS"
     assert (tmp_path / "frozen_program_hashes.json").is_file()
+
+
+def test_unknown_continuity_requires_traced_amendment_and_new_transfer_review(
+        tmp_path: Path) -> None:
+    content = _content()
+    content["sections"][0]["continuity"]["opponent"] = "unknown"
+    (tmp_path / "reference_evidence.json").write_text(
+        json.dumps(_ledger()), encoding="utf-8")
+    (tmp_path / "reference_content_program.json").write_text(
+        json.dumps(content), encoding="utf-8")
+    (tmp_path / "reference_edit_program.json").write_text(
+        json.dumps(_edit()), encoding="utf-8")
+    compile_material_requirements(content, _edit(), tmp_path)
+    (tmp_path / "acceptance.json").write_text(json.dumps({
+        "automated_passed": True, "validation": {"passed": True}}), encoding="utf-8")
+    checks = dict.fromkeys((
+        "visible_content_correct", "event_phases_correct",
+        "composition_mode_correct", "text_audio_rhythm_role_correct",
+        "material_requirement_searchable"), True)
+    review = {"reviewer": "human reviewer",
+              "sections": [{"section_id": name, "passed": True, "checks": checks}
+                           for name in ("competition", "proofs")],
+              "requirement_transfer_test": {"passed": True},
+              "continuity_resolutions": []}
+    path = tmp_path / "review.json"
+    path.write_text(json.dumps(review), encoding="utf-8")
+    assert accept_reference_programs(tmp_path, path)["decision"] == "BLOCKED"
+    assert not (tmp_path / "frozen_program_hashes.json").exists()
+    review["continuity_resolutions"] = [{
+        "section_id": "competition", "dimension": "opponent",
+        "level": "not_required", "reason": "source frames show no recurring opponent",
+        "evidence_ids": ["ev_visual"],
+    }]
+    path.write_text(json.dumps(review), encoding="utf-8")
+    amended = accept_reference_programs(tmp_path, path)
+    assert amended["decision"] == "BLOCKED"
+    assert "continuity_amendment_requires_rereview" in amended["detail"]
+    assert not (tmp_path / "frozen_program_hashes.json").exists()
+    review["continuity_resolutions"] = []
+    path.write_text(json.dumps(review), encoding="utf-8")
+    assert accept_reference_programs(tmp_path, path)["decision"] == "PASS"

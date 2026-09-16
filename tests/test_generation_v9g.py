@@ -118,6 +118,21 @@ def test_frozen_program_tampering_blocks_contract(tmp_path: Path) -> None:
             "assets": {"subject": {"id": "C0"}}}))
 
 
+def test_v9g_explicitly_rejects_new_p0_continuity_schema(tmp_path: Path) -> None:
+    v9 = _v9_dir(tmp_path)
+    content_path = v9 / "reference_content_program.json"
+    content = json.loads(content_path.read_text(encoding="utf-8"))
+    content["schema_version"] = "reference_content_program_v9_p0"
+    _dump(content_path, content)
+    frozen_path = v9 / "frozen_program_hashes.json"
+    frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
+    frozen["program_sha256"][content_path.name] = _sha(content_path)
+    _dump(frozen_path, frozen)
+    with pytest.raises(V9GBlocked, match="v9_p0_contract_adapter_not_implemented"):
+        compile_generation_contract(v9, _dump(tmp_path / "target.json", {
+            "assets": {"subject": {"id": "C0"}}}))
+
+
 def test_contract_compiler_keeps_long_event_as_multiple_units(tmp_path: Path) -> None:
     contract = _contract(tmp_path)
     section = contract["sections"][0]
