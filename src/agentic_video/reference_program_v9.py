@@ -984,6 +984,27 @@ def reconcile_section_boundaries(
         return result, section_observations
 
     boundary_pts = _boundary_map(ledger)
+
+    def _nearest_boundary_id(pts: float) -> str:
+        return min(boundary_pts, key=lambda bid: abs(boundary_pts[bid] - pts))
+
+    # P0.2 修复 A：same_event 确定性规则——下一 Section 首 shot 与段前属同一事件时，
+    # 边界处于事件内部，不得保留；强制移动到 same_event 连跑结束处。
+    forced_moves: dict[str, str] = {}
+    for index in range(len(rows) - 1):
+        next_row = rows[index + 1]
+        head_shots = next_row.get("shots") or []
+        if not head_shots or head_shots[0].get("event_relation") != "same_event":
+            continue
+        boundary_id = _nearest_boundary_id(float(next_row["source_interval"][0]))
+        target_id = None
+        for shot in head_shots:
+            if shot.get("event_relation") != "same_event":
+                target_id = _nearest_boundary_id(float(shot["interval"][0]))
+                break
+        if target_id is not None and target_id != boundary_id:
+            forced_moves[boundary_id] = target_id
+
     payload = []
     for index in range(len(rows) - 1):
         previous_row, next_row = rows[index], rows[index + 1]
@@ -1033,7 +1054,18 @@ def reconcile_section_boundaries(
             "reason": str(verdict.get("reason") or ""),
             "action": "kept", "moved_to": None,
         }
-        if not semantic_change:
+        if boundary_id in forced_moves:
+            target = forced_moves[boundary_id]
+            record.update({
+                "action": "moved", "moved_to": target,
+                "semantic_change": False,
+                "change_types": ["event"],
+                "reason": ("deterministic override: next section head shot "
+                           "continues the same event (same_event)"),
+                "deterministic_override": True,
+            })
+            moves[boundary_id] = target
+        elif not semantic_change:
             target = str(verdict.get("recommended_boundary_id") or "")
             valid_ids = {row["boundary_id"] for row in item["candidate_boundary_ids"]}
             if target not in valid_ids:
@@ -1767,12 +1799,17 @@ unknown 表示尚不能判断，不得写成 not_required。
 continuity_basis 必须与六个维度一一对应，每个维度都写 reason（依据可见画面）；
 标 required 或 preferred 的维度必须给出 evidence_ids，其余维度 evidence_ids 可为空数组。
 不要自动补固定故事槽；Section 必须来自实际画面信息变化。
+sections 的数量、顺序与区间必须与输入 section_observations 的分段完全一致，
+不得使用对账前的旧边界，也不得自创边界。
 同一连续事件（如一场完整的对抗：准备→对抗→决定性结果→反应）不得被切成两个 Section；
-以输入的 boundary_reconciliation 与逐段观察为准。
+以输入的 boundary_reconciliation 与逐段观察为准，每个 Section 的事实描述必须覆盖
+该区间内全部可辨画面（包括区间开头的事件结果/反应镜头），不得无声跳过。
 输入 conflict_constraints.must_not_assert 中的词在整个输出中禁止出现；有 unresolved_topics
 时相关描述必须改用可观察结构（主体数量、动作顺序、可见结果），不使用争议分类名。
 最后一个 Section 若输入 OCR/逐镜头观察含屏幕文字，final_text_quote 必须逐字引用其中
 一条收尾文字，并据此判断其修辞功能（幽默/反差/抒情/宣告等），理由要引用原文。
+final_text_quote 非空时，audience_takeaway 与 cognition_change.after 必须直接解释这句
+收尾文字对观众的效果（例如自嘲/反差/轻松收尾），不得只写抽象抒情。
 其余 Section 的 final_text_quote 留空字符串。
 输入："""
 
@@ -2433,6 +2470,18 @@ def _validate_p02_structure(
         warnings: list[str]) -> None:
     """P0.2 结构规则：边界有据、shot 归一一致、冲突禁词、收尾文字引用。"""
     sections = content.get("sections") or []
+    if recomputed is not None:
+        observed = [
+            (str(row.get("section_id")),
+             [round(float(value), 6) for value in row.get("source_interval") or []])
+            for row in (section_observations or {}).get("sections") or []]
+        declared = [
+            (str(row.get("section_id")),
+             [round(float(value), 6) for value in row.get("interval") or []])
+            for row in sections]
+        if declared != observed:
+            errors.append("content sections diverge from reconciled observed "
+                          f"sections: {declared} != {observed}")
     if recomputed is not None and normalization is not None:
         for expected, stored in zip(recomputed.get("sections") or [],
                                     normalization.get("sections") or []):

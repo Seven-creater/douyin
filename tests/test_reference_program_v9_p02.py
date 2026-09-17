@@ -346,3 +346,51 @@ def test_moved_boundary_satisfies_justification_via_moved_to(tmp_path: Path) -> 
     assert not any("lacks reconciliation justification" in error
                    for error in result["errors"])
     assert not any("unjustified" in error for error in result["errors"])
+
+
+def test_same_event_head_shot_forces_boundary_move_over_model_verdict(
+        tmp_path: Path) -> None:
+    """下一 Section 首 shot 报 same_event 时，模型判 semantic_change=True 也必须被覆盖。"""
+    ledger = _ledger()
+    ledger["boundaries"].insert(3, {
+        "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
+        "kind": "cut_candidate"})
+    bank = _section_bank()
+    tail = {"information_added": "对手倒地，主角收势站立", "edit_function": "结果呈现",
+            "event_relation": "same_event", "supporting_deterministic_ids": []}
+    fresh = {"information_added": "家庭合影照片出现", "edit_function": "新证据",
+             "event_relation": "different_event", "supporting_deterministic_ids": []}
+    bank["sections"][1]["shots"] = [
+        {"shot_id": "proofs.shot_001", "start_boundary_id": "cut_002",
+         "end_boundary_id": "cut_003", "interval": [20.0, 25.0], **tail},
+        {"shot_id": "proofs.shot_002", "start_boundary_id": "cut_003",
+         "end_boundary_id": "video_end", "interval": [25.0, 30.0], **fresh},
+    ]
+    runner = FakeRunner(
+        watch=[_section_watch("competition", "video_start", "cut_002"),
+               _section_watch("proofs", "cut_003", "video_end")],
+        ask=[{"boundaries": [
+            {"boundary_id": "cut_002", "semantic_change": True,
+             "change_types": ["scene"], "reason": "模型误判：随后切换到照片",
+             "recommended_boundary_id": None}]}])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    result, _reconciled = reconcile_section_boundaries(
+        video, ledger, bank, tmp_path, runner=runner)
+    record = result["boundaries"][0]
+    assert record["action"] == "moved"
+    assert record["moved_to"] == "cut_003"
+    assert record["deterministic_override"] is True
+
+
+def test_content_sections_must_match_reconciled_observed_sections(
+        tmp_path: Path) -> None:
+    content = _content()
+    edit = _edit()
+    content["sections"][0]["interval"] = [0.0, 5.0]
+    content["sections"][0]["end_boundary_id"] = "cut_001"
+    req = compile_material_requirements(content, edit, tmp_path)
+    result = validate_reference_programs(content, edit, req, _ledger(),
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert any("diverge from reconciled" in error for error in result["errors"])
