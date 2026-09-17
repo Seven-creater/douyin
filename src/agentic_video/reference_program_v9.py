@@ -1554,7 +1554,8 @@ def _run_reference_probe(reference: Path, question: dict[str, Any],
             ffmpeg_bin=ffmpeg_bin)
         if not images or not hasattr(runner, "inspect_media"):
             raise V9Blocked("probe", "native_frame_probe_unavailable")
-        answer = runner.inspect_media(images, prompt, max_new_tokens=1536)
+        answer = runner.inspect_media(images, prompt, max_new_tokens=3072,
+                                      stop_after_json_object=True)
     elif selected == "ocr_context":
         if not hasattr(runner, "inspect_media"):
             raise V9Blocked("probe", "ocr_frame_probe_unavailable")
@@ -1562,13 +1563,14 @@ def _run_reference_probe(reference: Path, question: dict[str, Any],
                         end_s=interval[1])
         answer = runner.inspect_media(
             ocr_images, prompt, video_path=clip, fps=4.0,
-            source_origin_s=interval[0], max_new_tokens=1536)
+            source_origin_s=interval[0], max_new_tokens=3072,
+            stop_after_json_object=True)
     else:
         fps = 12.0 if selected == "dense_video" else 4.0
         answer = runner.watch(
             reference, prompt, start_s=interval[0], end_s=interval[1],
             clip_dir=output / "clip", duration_s=interval[1] - interval[0],
-            fps=fps, use_audio_in_video=True, max_new_tokens=1536,
+            fps=fps, use_audio_in_video=True, max_new_tokens=3072,
             stop_after_json_object=True)
     raw = _answer_text(answer)
     output.mkdir(parents=True, exist_ok=True)
