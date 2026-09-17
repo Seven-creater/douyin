@@ -18,7 +18,7 @@ from src.agentic_video.reference_program_v9 import (
     validate_reference_programs, _parse_one_object, _read_cached_output,
     _review_binding, HUMAN_REVIEW_VERSION,
     GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT,
-    EDIT_PROGRAM_PROMPT,
+    CONTENT_PROGRAM_PROMPT, EDIT_PROGRAM_PROMPT, CONTINUITY_DIMENSIONS,
 )
 
 
@@ -317,6 +317,14 @@ def test_production_watch_prompts_do_not_spoil_reference_answer() -> None:
 def test_edit_model_does_not_generate_deterministic_style_statistics() -> None:
     assert '"measured_style"' not in EDIT_PROGRAM_PROMPT
     assert "真实 PTS" in EDIT_PROGRAM_PROMPT
+
+
+def test_content_prompt_spells_out_full_continuity_basis_contract() -> None:
+    basis_block = CONTENT_PROGRAM_PROMPT.split('"continuity_basis"', 1)[1]
+    for dimension in CONTINUITY_DIMENSIONS:
+        assert f'"{dimension}"' in basis_block
+    assert "一一对应" in CONTENT_PROGRAM_PROMPT
+    assert '"primary_focus": {' in CONTENT_PROGRAM_PROMPT
 
 
 def test_legacy_cache_without_source_and_tool_hash_is_unavailable(tmp_path: Path) -> None:

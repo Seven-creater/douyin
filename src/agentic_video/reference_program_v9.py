@@ -1126,7 +1126,8 @@ boundary_id；参考片事实和可迁移结构必须分层。
   "core_expression": {"reference_specific": "", "transferable_structure": ""},
   "reference_specific_terms": [],
   "perception_focus": {
-    "primary_focus": {"type": "subject|event|theme|place|contrast|mixed"},
+    "primary_focus": {"type": "subject|event|theme|place|contrast|mixed",
+                      "detail": "一句话说明为什么这是主焦点"},
     "continuity_requirements": [], "important_evidence_types": [],
     "important_relations": []
   },
@@ -1145,10 +1146,21 @@ boundary_id；参考片事实和可迁移结构必须分层。
       "actor_role":"required|preferred|not_required|unknown",
       "spatial_orientation":"required|preferred|not_required|unknown"
     },
-    "continuity_basis": {"subject":{"reason":"画面依据","evidence_ids":[]}}
+    "continuity_basis": {
+      "subject":{"reason":"画面依据","evidence_ids":[]},
+      "opponent":{"reason":"画面依据","evidence_ids":[]},
+      "scene":{"reason":"画面依据","evidence_ids":[]},
+      "event":{"reason":"画面依据","evidence_ids":[]},
+      "actor_role":{"reason":"画面依据","evidence_ids":[]},
+      "spatial_orientation":{"reason":"画面依据","evidence_ids":[]}
+    }
   }]
 }
-每个连续性维度都要填写；unknown 表示尚不能判断，不得写成 not_required。
+primary_focus 必须是对象，type 取 subject|event|theme|place|contrast|mixed 之一。
+continuity 六个维度 subject/opponent/scene/event/actor_role/spatial_orientation 都要填写；
+unknown 表示尚不能判断，不得写成 not_required。
+continuity_basis 必须与六个维度一一对应，每个维度都写 reason（依据可见画面）；
+标 required 或 preferred 的维度必须给出 evidence_ids，其余维度 evidence_ids 可为空数组。
 不要自动补固定故事槽；Section 必须来自实际画面信息变化。
 输入："""
 
