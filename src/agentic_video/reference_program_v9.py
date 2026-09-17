@@ -1828,7 +1828,7 @@ EDIT_PROGRAM_PROMPT = """根据 Content Program、确定性时间线和逐 Secti
   "editorial_patterns": [{
     "section_id":"section_01",
     "shot_refs":["section_01.shot_C01"],
-    "transition_refs":["section_01.transition_T01"],
+    "transition_refs":[],
     "composition_mode":"continuous_clip|micro_montage|event_compression_montage|evidence_montage|dialogue_compression|reaction_result_pair|multi_angle_action|contrast_montage|text_led_montage",
     "duration_budget_s":0.0, "source_semantics":"one_long_event|multiple_events|dialogue|continuous_moment|paired_moments",
     "semantic_phases":[], "snippet_count_range":[1,1],
@@ -1839,7 +1839,8 @@ EDIT_PROGRAM_PROMPT = """根据 Content Program、确定性时间线和逐 Secti
   }]
 }
 shot_refs 只能引用输入 normalized_shots 的内容镜头 id（shot_C..）；转场段引用
-transition_refs（transition_T..），不得把转场段当内容镜头。
+transition_refs（transition_T..），不得把转场段当内容镜头。两个数组的 id 只能来自
+输入中实际存在的 id，没有对应元素就留空数组，禁止按命名规律编造 id。
 composition_mode 必须与镜头结构一致：内容镜头多于 1 个或有内部真切点的 Section 不得
 用 continuous_clip；单一内容镜头且无转场的 Section 不得声称蒙太奇类模式。
 同一连续事件多角度快速切换用 multi_angle_action；以屏幕文字/照片卡为主体的快速罗列
@@ -1898,9 +1899,13 @@ def build_reference_content_program(
     conflict_constraints = {
         "must_not_assert": (conflicts or {}).get("must_not_assert") or [],
         "unresolved_topics": (conflicts or {}).get("unresolved_topics") or []}
+    draft_payload = dict(draft or {})
+    if section_observations:
+        # 对账已取代初稿分段：剥离旧 section_drafts，防止模型混用对账前边界。
+        draft_payload.pop("section_drafts", None)
     payload = {
         "deterministic_evidence": _compact_evidence(ledger),
-        "draft": draft, "question_resolutions": resolved,
+        "draft": draft_payload, "question_resolutions": resolved,
         "section_observations": section_observations or {},
         "normalized_shots": normalization or {},
         "boundary_reconciliation": reconciliation or {},
