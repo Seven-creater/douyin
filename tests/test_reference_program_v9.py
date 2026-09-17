@@ -339,6 +339,7 @@ def test_section_edit_rewatches_source_video_and_keeps_cut_evidence(tmp_path: Pa
     assert len(runner.watch_calls) == 2
     assert runner.watch_calls[0][2]["start_s"] == 0.0
     assert runner.watch_calls[0][2]["end_s"] == 20.0
+    assert runner.watch_calls[0][2]["max_new_tokens"] == 4096
     assert '"cut_001"' in runner.watch_calls[0][1]
     assert '"cut_candidates_to_assess":["cut_001"]' in runner.watch_calls[0][1]
     assert bank["sections"][0]["shots"][0]["interval"] == [0.0, 10.0]

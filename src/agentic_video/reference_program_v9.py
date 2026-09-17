@@ -711,7 +711,7 @@ def build_section_observations(
             Path(reference), prompt, start_s=interval[0], end_s=interval[1],
             clip_dir=output_dir / "section_clips" / _safe_id(section_id),
             duration_s=interval[1] - interval[0], fps=4.0,
-            use_audio_in_video=True, max_new_tokens=2048,
+            use_audio_in_video=True, max_new_tokens=4096,
             stop_after_json_object=True)
         raw = _answer_text(answer)
         raw_path = output_dir / "raw_responses" / f"section_{_safe_id(section_id)}.txt"
