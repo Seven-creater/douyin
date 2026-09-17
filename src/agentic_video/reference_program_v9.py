@@ -866,6 +866,8 @@ _GAP_PROBES = {
     "cross_modal": {"cross_modal_check"},
 }
 
+NATIVE_PROBE_MAX_FRAMES = 60
+
 
 def _validate_probe_selection(question: dict[str, Any]) -> None:
     gap_type = str(question.get("gap_type") or "")
@@ -876,8 +878,15 @@ def _validate_probe_selection(question: dict[str, Any]) -> None:
                         f"gap={gap_type!r} probe={selected!r}")
 
 
+def _native_probe_frame_count(ledger: dict[str, Any], interval: list[float]) -> int:
+    start, end = map(float, interval)
+    return sum(start - 1e-6 <= float(row["pts_s"]) <= end + 1e-6
+               for row in ledger.get("native_frames") or [])
+
+
 def _native_probe_images(reference: Path, interval: list[float], output: Path, *,
-                         ffmpeg_bin: str, max_frames: int = 60) -> list[Path]:
+                         ffmpeg_bin: str,
+                         max_frames: int = NATIVE_PROBE_MAX_FRAMES) -> list[Path]:
     start, end = map(float, interval)
     output.mkdir(parents=True, exist_ok=True)
     for stale in output.glob("f*.jpg"):
@@ -965,6 +974,11 @@ def _run_reference_probe(reference: Path, question: dict[str, Any],
     input_path = _write_json(output / "input.json", probe_input)
     prompt = PROBE_PROMPT + json.dumps(probe_input, ensure_ascii=False)
     if selected == "native_frames":
+        frame_count = _native_probe_frame_count(ledger, interval)
+        if frame_count > NATIVE_PROBE_MAX_FRAMES:
+            raise V9Blocked(
+                "probe", "native_frame_probe_too_wide",
+                f"{frame_count} frames exceeds {NATIVE_PROBE_MAX_FRAMES}")
         images = _native_probe_images(
             reference, interval, output / "native_frames",
             ffmpeg_bin=ffmpeg_bin)
@@ -1039,10 +1053,30 @@ def resolve_reference_questions(
     known_ids = {str(row.get("id")) for row in questions}
     probe_log: list[dict[str, Any]] = []
     for round_index in range(1, max_rounds + 1):
-        pending = [row for row in questions if row.get("status") == "open"]
+        pending = [row for row in questions if row.get("status") == "open" and
+                   not row.get("probe_disposition")]
         if not pending:
             break
         for question in pending[:max_probes_per_round]:
+            if (question.get("selected_probe") == "native_frames" and
+                    question.get("importance") != "required"):
+                frame_count = _native_probe_frame_count(
+                    ledger, [float(value) for value in question["interval"]])
+                if frame_count > NATIVE_PROBE_MAX_FRAMES:
+                    question["probe_disposition"] = "skipped_scope_too_wide"
+                    question["probe_skip_reason"] = (
+                        "optional_native_frame_scope_exceeds_limit")
+                    probe_log.append({
+                        "round": round_index, "probe": "native_frames",
+                        "question_id": question.get("id"),
+                        "interval": question.get("interval"),
+                        "execution_status": "skipped",
+                        "skip_reason": question["probe_skip_reason"],
+                        "candidate_frame_count": frame_count,
+                        "max_frames": NATIVE_PROBE_MAX_FRAMES,
+                        "evidence_fields": [], "result_status": "open",
+                    })
+                    continue
             result, audit = _run_reference_probe(
                 Path(reference), question, ledger,
                 output_dir / "probes" / f"round_{round_index}" / str(question["id"]),

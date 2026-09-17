@@ -399,6 +399,27 @@ def test_required_signal_gap_upgrades_overlapping_optional_question() -> None:
     assert gaps[0]["trigger_ids"] == ["cut_001", "cut_002"]
 
 
+def test_optional_native_frame_gap_over_limit_is_kept_open_without_blocking(
+        tmp_path: Path) -> None:
+    question = {
+        "id": "optional_biography", "question": "What age did this happen?",
+        "importance": "optional", "gap_type": "visual_detail",
+        "selected_probe": "native_frames", "status": "open",
+        "interval": [0.0, 30.0],
+    }
+    runner = FakeRunner()
+    result = resolve_reference_questions(
+        tmp_path / "reference.mp4", _draft(questions=[question]), _ledger(),
+        tmp_path, runner=runner)
+    resolved_question = result["questions"][0]
+    assert resolved_question["status"] == "open"
+    assert resolved_question["probe_disposition"] == "skipped_scope_too_wide"
+    assert result["required_unresolved_ids"] == []
+    assert result["probe_history"][0]["execution_status"] == "skipped"
+    assert result["probe_history"][0]["candidate_frame_count"] == 901
+    assert runner.inspect_calls == []
+
+
 def test_required_question_probe_budget_remains_blocked(tmp_path: Path) -> None:
     question = {"id": "q1", "question": "what changes", "importance": "required",
                 "gap_type": "event_structure", "selected_probe": "dense_video",
