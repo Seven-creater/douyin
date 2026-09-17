@@ -318,6 +318,20 @@ def build_parser() -> argparse.ArgumentParser:
     reference_v9g.add_argument(
         "--plan-only", action="store_true",
         help="write a CPU-only, unverified H3 capability smoke plan")
+    reference_v9g.add_argument("--dry-run-real-backend", action="store_true",
+                               help="serialize and audit official H3 JSON without HTTP")
+    reference_v9g.add_argument("--execute", action="store_true",
+                               help="run real H3 smoke only after three safety gates")
+    reference_v9g.add_argument("--sync-check", action="store_true",
+                               help="read-only server git comparison; never pull")
+    reference_v9g.add_argument("--expected-code-sha", default=None)
+    reference_v9g.add_argument("--ssh-target", default=None)
+    reference_v9g.add_argument("--server-root", default=None)
+    reference_v9g.add_argument("--gpu-set", default=None,
+                               help="GPU indices needed by the selected H3 service")
+    reference_v9g.add_argument("--owned-service-pids", default=None)
+    reference_v9g.add_argument("--cases", default=None,
+                               help="comma-separated S0-S7 cases for staged variants")
     reference_v9g.add_argument("--input", default=None)
     reference_v9g.add_argument(
         "--gpu-pairs", default=None,
@@ -1897,10 +1911,59 @@ def _reference_generate_v9g(args, cfg) -> dict:
         validate_generation_contract,
         validate_upstream_lock,
         validate_license_gates,
+        _write_json,
     )
 
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    capability_modes = (args.plan_only, args.dry_run_real_backend,
+                        args.execute, args.sync_check)
+    if sum(bool(value) for value in capability_modes) > 1:
+        raise ValueError("choose only one capability mode")
+    if args.phase == "capability" and args.sync_check:
+        from src.agentic_video.generation_p51 import query_server_sync_plan
+
+        if not args.expected_code_sha or not args.ssh_target or not args.server_root:
+            raise ValueError("sync-check requires expected SHA, SSH target and root")
+        result = query_server_sync_plan(
+            repo_root(), expected_sha=args.expected_code_sha,
+            ssh_target=args.ssh_target, server_root=args.server_root)
+        (output / "server_sync_plan.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+    if args.phase == "capability" and args.dry_run_real_backend:
+        from src.agentic_video.generation_p4 import build_h3_capability_smoke_plan
+        from src.agentic_video.generation_p51 import audit_real_h3_payload
+
+        if not args.fixture_dir or not args.fl2va_endpoint or \
+                not args.ref2va_endpoint:
+            raise ValueError("dry-run requires fixtures and both H3 endpoints")
+        plan = build_h3_capability_smoke_plan(
+            fixture_dir=_v9g_path(args.fixture_dir),
+            backend_endpoints={"fl2va": args.fl2va_endpoint,
+                               "ref2va": args.ref2va_endpoint})
+        requests_dir = output / "capability" / "requests"
+        for case in plan["cases"]:
+            payload = SGLangH3Client.serialize_payload(case["request"])
+            receipt = audit_real_h3_payload(case, payload)
+            case_dir = requests_dir / case["case_id"]
+            case_dir.mkdir(parents=True, exist_ok=True)
+            for name, value in (("request.json", payload),
+                                ("request_manifest.json", case["manifest"]),
+                                ("condition_assets.json", case["assets"]),
+                                ("client_payload_receipt.json", receipt)):
+                (case_dir / name).write_text(
+                    json.dumps(value, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+        capability_dir = output / "capability"
+        (capability_dir / "capability_plan.json").write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+        (capability_dir / "backend_registry.json").write_text(
+            json.dumps(plan["backend_registry"], ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        return {"output": str(capability_dir), "dry_run_real_backend": True,
+                "case_count": len(plan["cases"]), "http_requests_sent": 0,
+                "real_capability_verified": False}
     if args.plan_only:
         if args.phase != "capability":
             raise ValueError("--plan-only is supported only for capability phase")
@@ -1962,9 +2025,74 @@ def _reference_generate_v9g(args, cfg) -> dict:
                 "section_count": len(contract["sections"])}
 
     if args.phase == "capability":
-        raise RuntimeError(
-            "real H3 capability execution is blocked until the P4 integrity harness "
-            "and effect review are connected; use --plan-only")
+        from src.agentic_video.generation_p4 import build_h3_capability_smoke_plan
+        from src.agentic_video.generation_p51 import (
+            audit_real_h3_payload, finalize_capability_registry,
+            require_execute_gates, run_h3_capability_case,
+            verify_capability_run_identity,
+        )
+
+        if not args.execute:
+            raise ValueError("capability requires --plan-only, --dry-run-real-backend, "
+                             "--sync-check or --execute")
+        if not all((args.v9_output, args.fixture_dir, args.fl2va_endpoint,
+                    args.ref2va_endpoint, args.expected_code_sha, args.gpu_set)):
+            raise ValueError("execute requires frozen V9, fixtures, endpoints, "
+                             "expected code SHA and GPU set")
+        selected_gpus = [int(value) for value in args.gpu_set.split(",")]
+        owned_pids = {int(value) for value in
+                      (args.owned_service_pids or "").split(",") if value}
+        gates = require_execute_gates(
+            _v9g_path(args.v9_output), expected_code_sha=args.expected_code_sha,
+            repo=repo_root(), required_gpus=selected_gpus,
+            owned_service_pids=owned_pids)
+        selected = set((args.cases or "S0,S1,S2,S3,S4,S5,S6,S7").split(","))
+        if not selected or not selected <= {f"S{index}" for index in range(8)}:
+            raise ValueError("--cases must contain S0-S7 IDs")
+        plan = build_h3_capability_smoke_plan(
+            fixture_dir=_v9g_path(args.fixture_dir),
+            backend_endpoints={"fl2va": args.fl2va_endpoint,
+                               "ref2va": args.ref2va_endpoint})
+        capability_dir = output / "capability_real"
+        capability_dir.mkdir(parents=True, exist_ok=True)
+        verify_capability_run_identity(
+            capability_dir / "capability_run_identity.json",
+            expected_code_sha=args.expected_code_sha, plan=plan)
+        registry_path = capability_dir / "backend_registry.json"
+        registry = (json.loads(registry_path.read_text(encoding="utf-8")) if
+                    registry_path.is_file() else plan["backend_registry"])
+        for case in plan["cases"]:
+            if case["case_id"] in selected:
+                audit_real_h3_payload(
+                    case, SGLangH3Client.serialize_payload(case["request"]),
+                    registry=registry)
+        (capability_dir / "execution_gates.json").write_text(
+            json.dumps(gates, ensure_ascii=False, indent=2), encoding="utf-8")
+        (capability_dir / "registry_before.json").write_text(
+            json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
+        clients = {"fl2va": SGLangH3Client(args.fl2va_endpoint),
+                   "ref2va": SGLangH3Client(args.ref2va_endpoint)}
+        results = []
+        for case in plan["cases"]:
+            if case["case_id"] not in selected:
+                continue
+            result = run_h3_capability_case(
+                case, clients[case["model_variant"]],
+                capability_dir / case["case_id"])
+            results.append(result)
+        existing = []
+        results_path = capability_dir / "capability_results.json"
+        if results_path.is_file():
+            existing = json.loads(results_path.read_text(encoding="utf-8"))
+        by_id = {row["case_id"]: row for row in existing}
+        by_id.update({row["case_id"]: row for row in results})
+        all_results = [by_id[key] for key in sorted(by_id)]
+        _write_json(results_path, all_results)
+        registry_result = finalize_capability_registry(
+            registry_path, registry, all_results, real_backend=True)
+        return {"output": str(capability_dir), "case_count": len(results),
+                "registry_committed": registry_result["committed"],
+                "all_cases_observed": len(all_results) == 8}
 
     if not contract_path.is_file():
         raise FileNotFoundError(f"generation contract missing: {contract_path}")

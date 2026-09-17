@@ -24,7 +24,8 @@ CAPABILITY_NAMES = (
     "ref2va_hybrid_first", "ref2va_hybrid_last", "ref2va_hybrid_first_last",
 )
 CAPABILITY_STATES = {
-    "unverified", "transport_only", "effective", "unsupported", "failed",
+    "unverified", "transport_only", "effective", "ineffective",
+    "unsupported", "failed", "unknown",
 }
 ASSET_ROLES = {
     "identity_reference", "scene_reference", "motion_reference",
@@ -239,7 +240,9 @@ def plan_h3_request_from_context(context: dict[str, Any], *,
 
 
 def build_h3_capability_smoke_plan(*, fixture_dir: Path | None = None,
-                                   backend_id: str = "local_h3_sglang") -> dict[str, Any]:
+                                   backend_id: str = "local_h3_sglang",
+                                   backend_endpoints: dict[str, str] | None = None) \
+        -> dict[str, Any]:
     """Plan S0–S7 without starting a server or inferring any capability PASS."""
     registry = new_capability_registry(backend_id)
     cases = [
@@ -311,7 +314,9 @@ def build_h3_capability_smoke_plan(*, fixture_dir: Path | None = None,
                 prompt=prompt, duration_s=4.0,
                 assets=[assets[key] for key, _, _ in conditions], bindings=bindings,
                 backend={"backend_id": backend_id, "type": "sglang_h3",
-                         "model_variant": variant, "endpoint": None})
+                         "model_variant": variant,
+                         "protocol": "sglang_v1_videos_json",
+                         "endpoint": (backend_endpoints or {}).get(variant)})
             row.update(plan)
             row["assets"] = [assets[key] for key, _, _ in conditions]
         planned.append(row)
@@ -581,7 +586,8 @@ def verify_formal_generation_authorization(output_dir: Path) -> dict[str, Any]:
 def validate_generated_media_transport(path: Path, *, duration_s: float,
                                        short_edge: int, fps: float = 24.0,
                                        audio_required: bool = True,
-                                       ffprobe_bin: str = "ffprobe") -> dict[str, Any]:
+                                       ffprobe_bin: str = "ffprobe",
+                                       ffmpeg_bin: str = "ffmpeg") -> dict[str, Any]:
     path = Path(path)
     if not path.is_file() or path.stat().st_size == 0:
         return {"backend_transport_ok": False, "reason_code": "media_missing_or_empty"}
@@ -626,6 +632,18 @@ def validate_generated_media_transport(path: Path, *, duration_s: float,
                                       actual["audio_codec"] == "aac" and
                                       actual["audio_sample_rate"] == 32000 and
                                       actual["audio_channels"] == 2)))
+    if passed:
+        try:
+            decoded = subprocess.run([
+                ffmpeg_bin, "-v", "error", "-xerror", "-i", str(path),
+                "-map", "0:v:0", "-f", "null", "-",
+            ], capture_output=True, check=False)
+        except OSError:
+            return {"backend_transport_ok": False,
+                    "reason_code": "ffmpeg_unavailable", "actual": actual}
+        if decoded.returncode:
+            return {"backend_transport_ok": False,
+                    "reason_code": "media_decode_failed", "actual": actual}
     return {"backend_transport_ok": passed,
             "reason_code": None if passed else "media_spec_mismatch", "actual": actual}
 

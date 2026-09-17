@@ -472,27 +472,42 @@ def build_h3_request(*, prompt: str, duration_s: float, references: list[dict[st
 class SGLangH3Client:
     """Thin implementation of the official asynchronous SGLang /v1/videos API."""
 
+    PAYLOAD_FIELDS = {
+        "model", "prompt", "seconds", "task", "conditions", "target",
+        "num_outputs_per_prompt", "num_inference_steps", "flow_shift",
+        "audio_flow_shift", "seed", "quality", "lora_name", "lora_scale",
+    }
+
     def __init__(self, endpoint: str, *, timeout_s: float = 7200.0,
                  poll_s: float = 2.0) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.timeout_s = float(timeout_s)
         self.poll_s = float(poll_s)
 
-    def generate(self, request: dict[str, Any], output_path: Path) -> dict[str, Any]:
-        allowed = {
-            "model", "prompt", "seconds", "task", "conditions", "target",
-            "num_outputs_per_prompt", "num_inference_steps", "flow_shift",
-            "audio_flow_shift", "seed", "quality", "lora_name", "lora_scale",
-        }
-        payload = {key: value for key, value in request.items() if key in allowed}
-        response = requests.post(f"{self.endpoint}/v1/videos", json=payload, timeout=60)
+    @classmethod
+    def serialize_payload(cls, request: dict[str, Any]) -> dict[str, Any]:
+        """Drop only internal metadata; preserve official condition order verbatim."""
+        return {key: deepcopy(value) for key, value in request.items()
+                if key in cls.PAYLOAD_FIELDS}
+
+    @staticmethod
+    def wire_body(payload: dict[str, Any]) -> bytes:
+        """Use the audited bytes for the actual JSON request body."""
+        return json.dumps(payload, ensure_ascii=False,
+                          separators=(",", ":")).encode("utf-8")
+
+    def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        response = requests.post(
+            f"{self.endpoint}/v1/videos", data=self.wire_body(payload),
+            headers={"Content-Type": "application/json"}, timeout=60)
         response.raise_for_status()
         created = response.json()
-        job_id = created.get("id")
-        if not job_id:
+        if not created.get("id"):
             raise V9GBlocked("generation", "h3_job_id_missing")
+        return created
+
+    def poll(self, job_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
-        status_payload: dict[str, Any] = {}
         while time.monotonic() < deadline:
             status_response = requests.get(
                 f"{self.endpoint}/v1/videos/{job_id}", timeout=30)
@@ -500,21 +515,29 @@ class SGLangH3Client:
             status_payload = status_response.json()
             status = status_payload.get("status")
             if status == "completed":
-                break
+                return status_payload
             if status == "failed":
                 raise V9GBlocked("generation", "h3_job_failed",
                                  json.dumps(status_payload, ensure_ascii=False)[:500])
             time.sleep(self.poll_s)
-        else:
-            raise V9GBlocked("generation", "h3_job_timeout", str(job_id))
+        raise V9GBlocked("generation", "h3_job_timeout", str(job_id))
+
+    def download(self, job_id: str, output_path: Path) -> dict[str, Any]:
         media = requests.get(f"{self.endpoint}/v1/videos/{job_id}/content",
                              timeout=300)
         media.raise_for_status()
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(media.content)
+        return {"output_path": str(output_path), "sha256": _file_hash(output_path)}
+
+    def generate(self, request: dict[str, Any], output_path: Path) -> dict[str, Any]:
+        created = self.submit(self.serialize_payload(request))
+        job_id = str(created["id"])
+        status_payload = self.poll(job_id)
+        media = self.download(job_id, output_path)
         return {"id": job_id, "status": status_payload,
-                "output_path": str(output_path), "sha256": _file_hash(output_path)}
+                **media}
 
 
 def build_generation_jobs(contract: dict[str, Any], capabilities: dict[str, Any],
