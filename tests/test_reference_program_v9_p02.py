@@ -16,7 +16,7 @@ from src.agentic_video.reference_program_v9 import (
     EDIT_PROGRAM_PROMPT, TRANSITION_TYPES,
 )
 from tests.test_reference_program_v9 import (
-    FakeRunner, _conflicts_clean, _content, _edit, _ledger,
+    FakeRunner, _conflicts_clean, _content, _draft, _edit, _ledger,
     _reconciliation, _section_bank, _section_watch,
 )
 
@@ -273,3 +273,54 @@ def test_montage_watch_stops_after_json_and_parses_per_shot(
     assert all(kwargs.get("stop_after_json_object") is True
                for _images, _prompt, kwargs in runner.inspect_calls)
     assert result["sections"][0]["segments"][1]["on_screen_text"] == "跆拳道全国冠军"
+
+
+def test_contract_repair_round_reasks_programs_once(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.agentic_video.reference_program_v9 as module
+
+    def _broken_content() -> dict:
+        value = _content()
+        value["sections"][0]["continuity_basis"]["spatial_orientation"] = {
+            "reason": "orientation visible", "evidence_ids": []}
+        return value
+
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"reference")
+    runner = FakeRunner(
+        watch=[
+            _draft(),
+            _section_watch("competition", "video_start", "cut_002", "cut_001"),
+            _section_watch("proofs", "cut_002", "video_end"),
+        ],
+        ask=[
+            {"boundaries": [{"boundary_id": "cut_002", "semantic_change": True,
+                             "change_types": ["event"], "reason": "new event",
+                             "recommended_boundary_id": None}]},
+            _conflicts_clean(),
+            _broken_content(), _edit(),
+            _content(), _edit(),
+        ])
+    def fake_ledger(_reference, output_dir, **_kwargs):
+        ledger = _ledger()
+        (Path(output_dir) / "reference_evidence.json").write_text(
+            json.dumps(ledger), encoding="utf-8")
+        return ledger
+
+    monkeypatch.setattr(module, "build_reference_evidence_ledger", fake_ledger)
+    monkeypatch.setattr(module, "_build_review_assets",
+                        lambda *args, **kwargs: [])
+    from types import SimpleNamespace
+    cfg = SimpleNamespace(perception={"ffmpeg_bin": "ffmpeg",
+                                      "ffprobe_bin": "ffprobe"})
+    result = module.run_reference_program_v9(cfg, video, tmp_path / "run",
+                                             runner=runner, force=True)
+    assert result["decision"] == "PENDING_HUMAN", result
+    assert (tmp_path / "run" / "raw_responses" /
+            "content_program_repair.txt").is_file()
+    manifest = json.loads((tmp_path / "run" / "run_manifest.json").read_text(
+        encoding="utf-8"))
+    assert manifest["stages"]["program_repair"]["passed_after_repair"] is True
+    repaired = json.loads((tmp_path / "run" / "reference_content_program.json")
+                          .read_text(encoding="utf-8"))
+    assert repaired["contract_repair"] is True

@@ -1826,6 +1826,10 @@ def _ask_object(runner: Any, prompt: str, output: Path, *, stage: str,
     }
 
 
+REPAIR_HEADER = """上一版输出违反契约校验，未通过。错误清单如下（逐条修复）：
+"""
+
+
 def build_reference_content_program(
         draft: dict[str, Any], resolved: dict[str, Any], ledger: dict[str, Any],
         output_dir: Path, *, runner,
@@ -1834,17 +1838,20 @@ def build_reference_content_program(
         reconciliation: dict[str, Any] | None = None,
         conflicts: dict[str, Any] | None = None,
         montage: dict[str, Any] | None = None,
+        repair_hint: list[str] | None = None,
         force: bool = False) -> dict[str, Any]:
     output_dir = Path(output_dir)
     output_path = output_dir / "reference_content_program.json"
+    suffix = "_repair" if repair_hint else ""
     input_hash = json_hash({"draft": draft, "resolved": resolved,
                             "ledger": json_hash(ledger),
                             "section_observations": section_observations,
                             "normalization": normalization,
                             "reconciliation": reconciliation,
                             "conflicts": conflicts, "montage": montage,
+                            "repair_hint": repair_hint,
                             "prompt": CONTENT_PROGRAM_PROMPT})
-    if output_path.is_file() and not force:
+    if output_path.is_file() and not force and not repair_hint:
         cached = json.loads(output_path.read_text(encoding="utf-8"))
         if cached.get("input_sha256") == input_hash:
             return cached
@@ -1863,10 +1870,14 @@ def build_reference_content_program(
         "conflict_constraints": conflict_constraints,
         "montage_shot_observations": montage or {},
     }
+    prefix = CONTENT_PROGRAM_PROMPT
+    if repair_hint:
+        prefix = (CONTENT_PROGRAM_PROMPT + REPAIR_HEADER +
+                  json.dumps(repair_hint, ensure_ascii=False) + "\n")
     value, audit = _ask_object(
-        runner, CONTENT_PROGRAM_PROMPT + json.dumps(
+        runner, prefix + json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")),
-        output_dir / "raw_responses" / "content_program.txt",
+        output_dir / "raw_responses" / f"content_program{suffix}.txt",
         stage="content_program")
     _attach_intervals(value, ledger, keys=("meaningful_units", "sections"),
                       stage="content_program")
@@ -1878,6 +1889,7 @@ def build_reference_content_program(
         "reference_observations": draft.get("observations") or [],
         "unresolved_questions": resolved.get("questions") or [],
         "probe_history": resolved.get("probe_history") or [],
+        "contract_repair": bool(repair_hint),
         "provenance": audit,
     })
     _write_json(output_path, value)
@@ -1899,17 +1911,20 @@ def build_reference_edit_program(
         normalization: dict[str, Any] | None = None,
         conflicts: dict[str, Any] | None = None,
         montage: dict[str, Any] | None = None,
+        repair_hint: list[str] | None = None,
         force: bool = False) -> dict[str, Any]:
     output_dir = Path(output_dir)
     output_path = output_dir / "reference_edit_program.json"
     if not section_observations or not section_observations.get("sections"):
         raise V9Blocked("edit_program", "direct_section_watch_required")
+    suffix = "_repair" if repair_hint else ""
     input_hash = json_hash({"content": content, "ledger": json_hash(ledger),
                             "section_observations": section_observations,
                             "normalization": normalization,
                             "conflicts": conflicts, "montage": montage,
+                            "repair_hint": repair_hint,
                             "prompt": EDIT_PROGRAM_PROMPT})
-    if output_path.is_file() and not force:
+    if output_path.is_file() and not force and not repair_hint:
         cached = json.loads(output_path.read_text(encoding="utf-8"))
         if cached.get("input_sha256") == input_hash:
             return cached
@@ -1920,10 +1935,15 @@ def build_reference_edit_program(
                "conflict_constraints": {
                    "must_not_assert": (conflicts or {}).get("must_not_assert") or []},
                "montage_shot_observations": montage or {}}
+    prefix = EDIT_PROGRAM_PROMPT
+    if repair_hint:
+        prefix = (EDIT_PROGRAM_PROMPT + REPAIR_HEADER +
+                  json.dumps(repair_hint, ensure_ascii=False) + "\n")
     value, audit = _ask_object(
-        runner, EDIT_PROGRAM_PROMPT + json.dumps(
+        runner, prefix + json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")),
-        output_dir / "raw_responses" / "edit_program.txt", stage="edit_program")
+        output_dir / "raw_responses" / f"edit_program{suffix}.txt",
+        stage="edit_program")
     boundaries = _boundary_map(ledger)
     for operation in value.get("operations") or []:
         start_id = operation.get("start_boundary_id")
@@ -1964,6 +1984,7 @@ def build_reference_edit_program(
     value.update({
         "schema_version": EDIT_VERSION,
         "input_sha256": input_hash,
+        "contract_repair": bool(repair_hint),
         "direct_section_watch_sha256": json_hash(section_observations),
         "section_rewatch_refs": [
             {"section_id": row["section_id"],
@@ -2942,6 +2963,29 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             content, edit, requirements, ledger, section_observations,
             reconciliation=reconciliation, conflicts=conflicts, montage=montage,
             normalization=normalization)
+        if not validation["passed"]:
+            # P0.2：一轮有界契约修复——把错误清单回喂模型各重问一次（extract_template 同款）。
+            repair_hint = list(validation["errors"])
+            content = build_reference_content_program(
+                draft, resolved, ledger, output_dir, runner=runner,
+                section_observations=section_observations,
+                normalization=normalization, reconciliation=reconciliation,
+                conflicts=conflicts, montage=montage_payload,
+                repair_hint=repair_hint, force=True)
+            edit = build_reference_edit_program(
+                content, ledger, output_dir, runner=runner,
+                section_observations=section_observations,
+                normalization=normalization, conflicts=conflicts,
+                montage=montage_payload, repair_hint=repair_hint, force=True)
+            requirements = compile_material_requirements(content, edit, output_dir)
+            validation = validate_reference_programs(
+                content, edit, requirements, ledger, section_observations,
+                reconciliation=reconciliation, conflicts=conflicts,
+                montage=montage, normalization=normalization)
+            manifest["stages"]["program_repair"] = {
+                "status": "complete", "rounds": 1,
+                "hint_errors": repair_hint,
+                "passed_after_repair": validation["passed"]}
         _write_json(output_dir / "validation.json", validation)
         manifest["stages"]["programs"] = {
             "status": "complete" if validation["passed"] else "blocked",
