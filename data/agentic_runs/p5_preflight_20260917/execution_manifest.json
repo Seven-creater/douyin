@@ -1,0 +1,82 @@
+{
+  "schema_version": "p5_execution_manifest_v1",
+  "checked_at_utc": "2026-09-17T01:00:25Z",
+  "decision": "BLOCKED_BY_GPU_AVAILABILITY",
+  "model_calls_started": 0,
+  "gpu_jobs_started": 0,
+  "server": {
+    "ssh_target": "wangqihao@10.1.4.86",
+    "repository": "/data02/usr/wangqihao/Demo/research",
+    "head": "35688121d50ab0235fd55dccbba8122c2de3c8d1",
+    "remote_tracking_main": "c82ad59bee8b56213973db63a23dae11a69674e0",
+    "untracked_files_preserved": [
+      ".canary_1437206",
+      "REANNOT_1080_RESULTS.txt"
+    ],
+    "gpu_observation": {
+      "source": "nvidia-smi --query-gpu and --query-compute-apps",
+      "gpu_count": 8,
+      "all_utilization_percent": 100,
+      "all_total_memory_mib": 49140,
+      "used_memory_mib_by_index": [21208, 21210, 21210, 21210, 21210, 21210, 21210, 21192],
+      "other_user_compute_pids_by_index": [3842135, 3842136, 3842137, 3842138, 3842139, 3842140, 3842141, 3842142],
+      "gpu_uuid_by_index": [
+        "GPU-3a5a9905-cab6-45b4-e01c-06d9324d57a1",
+        "GPU-8bf98ed4-d6f0-f306-6391-627572056a53",
+        "GPU-b46852c4-c21c-174b-af27-fada730b70a8",
+        "GPU-1908dfcb-7f61-d18a-0043-0d80873ea0b8",
+        "GPU-0e28be62-bf04-7ae1-7705-964886d86823",
+        "GPU-272dc0d7-6979-e86f-4202-3dd22cb46c89",
+        "GPU-4b0aabe7-a5af-3c51-708f-8425fd89a424",
+        "GPU-15ff210f-bd5e-68f1-0738-4940f3191b40"
+      ]
+    }
+  },
+  "local_repository": {
+    "head": "22e99a83fc6850065c1f01bbd3ffe5079aca5ccd",
+    "origin_main": "22e99a83fc6850065c1f01bbd3ffe5079aca5ccd",
+    "working_tree_clean_at_check": true
+  },
+  "reference": {
+    "local_path": "C:/Users/29785/Desktop/douyin/data/videos/7682719919410072847/video.mp4",
+    "server_path": "/data02/usr/wangqihao/Demo/research/data/videos/7682719919410072847/video.mp4",
+    "bytes": 2837685,
+    "sha256_local_and_server": "2f95e24edd2cf4b79cc1f40f7e202174c53a6abcf084e728bb49e3ca92938a17"
+  },
+  "gate_a": {
+    "name": "real_v9_reference_understanding_and_human_freeze",
+    "status": "not_started",
+    "reason": "all_server_gpus_busy",
+    "three_programs_frozen": false,
+    "human_review_completed": false
+  },
+  "gate_b": {
+    "name": "real_h3_s0_s7_condition_effect",
+    "status": "not_started",
+    "reasons": [
+      "gate_a_not_passed",
+      "all_server_gpus_busy",
+      "real_capability_executor_not_connected_to_cli"
+    ],
+    "case_statuses": {
+      "S0": "unverified",
+      "S1": "unverified",
+      "S2": "unverified",
+      "S3": "unverified",
+      "S4": "unverified",
+      "S5": "unverified",
+      "S6": "unverified",
+      "S7": "unverified"
+    }
+  },
+  "actions_not_taken": [
+    "server_git_pull",
+    "other_user_process_termination_or_pause",
+    "gpu_allocation",
+    "omni_launch",
+    "h3_launch",
+    "program_accept_or_freeze",
+    "capability_registry_promotion",
+    "generation_unit_pilot"
+  ]
+}
