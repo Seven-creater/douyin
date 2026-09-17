@@ -1187,7 +1187,8 @@ EDIT_PROGRAM_PROMPT = """根据 Content Program、确定性时间线和逐 Secti
 
 def _ask_object(runner: Any, prompt: str, output: Path, *, stage: str,
                 max_new_tokens: int = 4096) -> tuple[dict[str, Any], dict[str, Any]]:
-    answer = runner.ask(prompt, max_new_tokens=max_new_tokens)
+    answer = runner.ask(
+        prompt, max_new_tokens=max_new_tokens, stop_after_json_object=True)
     raw = _answer_text(answer)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(raw, encoding="utf-8")

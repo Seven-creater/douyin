@@ -646,6 +646,9 @@ def test_fake_runner_evidence_gap_probe_to_three_programs(tmp_path: Path) -> Non
     edit = build_reference_edit_program(
         content, ledger, tmp_path, runner=runner,
         section_observations=_section_bank())
+    assert len(runner.ask_calls) == 2
+    assert all(kwargs["stop_after_json_object"] is True
+               for _prompt, kwargs in runner.ask_calls)
     requirements = compile_material_requirements(content, edit, tmp_path)
     result = validate_reference_programs(content, edit, requirements, ledger,
                                          _section_bank())

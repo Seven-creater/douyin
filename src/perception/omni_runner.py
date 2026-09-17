@@ -389,7 +389,8 @@ class OmniRunner:
             use_audio_in_video=use_audio, input_build_s=input_build_s)
 
     # ---------- 纯文本推理（Phase 3 模板抽取用） ----------
-    def ask(self, prompt: str, *, max_new_tokens: int | None = None) -> OmniAnswer:
+    def ask(self, prompt: str, *, max_new_tokens: int | None = None,
+            stop_after_json_object: bool = False) -> OmniAnswer:
         """纯文本问答。注意：chat template 在 processor 上（tokenizer.chat_template 未设，
         2026-09-07 冒烟实测）；纯文本消息无多模态占位符，不经过 audio 占位符替换的坑路径。"""
         self.load()
@@ -404,11 +405,13 @@ class OmniRunner:
         input_build_s = time.time() - t_pre0
         try:
             return self._generate(inputs, max_new_tokens=max_new_tokens,
-                                  input_build_s=input_build_s)
+                                  input_build_s=input_build_s,
+                                  stop_after_json_object=stop_after_json_object)
         except TypeError:
             # 5.8.0 若 generate 强制要求 use_audio_in_video，补传 False 重试一次
             return self._generate(inputs, max_new_tokens=max_new_tokens,
-                                   use_audio_in_video=False, input_build_s=input_build_s)
+                                   use_audio_in_video=False, input_build_s=input_build_s,
+                                   stop_after_json_object=stop_after_json_object)
 
     # ---------- 共享生成尾部 ----------
     def _generate(self, inputs, *, max_new_tokens: int | None = None,
