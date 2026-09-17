@@ -347,6 +347,25 @@ def test_dry_run_serializes_all_cases_without_network(
     assert set(registry["capabilities"].values()) == {"unverified"}
 
 
+def test_cli_sync_check_nests_status_for_status_emitter(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.agentic_video import generation_p51
+    from src.agentic_video.cli import _reference_generate_v9g, build_parser
+
+    monkeypatch.setattr(generation_p51, "query_server_sync_plan",
+                        lambda *_args, **_kwargs: {"status": "BEHIND_SAFE",
+                                                 "pull_executed": False})
+    args = build_parser().parse_args([
+        "reference-generate-v9g", "--phase", "capability", "--sync-check",
+        "--expected-code-sha", "abc", "--ssh-target", "example@host",
+        "--server-root", "/repo", "--output", str(tmp_path),
+    ])
+    result = _reference_generate_v9g(args, None)
+    assert "status" not in result
+    assert result["server_sync_plan"]["status"] == "BEHIND_SAFE"
+    assert (tmp_path / "server_sync_plan.json").is_file()
+
+
 def test_p0_unfrozen_blocks_before_git_or_gpu(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from src.agentic_video import generation_p51

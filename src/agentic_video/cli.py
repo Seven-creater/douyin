@@ -1930,7 +1930,8 @@ def _reference_generate_v9g(args, cfg) -> dict:
             ssh_target=args.ssh_target, server_root=args.server_root)
         (output / "server_sync_plan.json").write_text(
             json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        return result
+        return {"output": str(output / "server_sync_plan.json"),
+                "server_sync_plan": result}
     if args.phase == "capability" and args.dry_run_real_backend:
         from src.agentic_video.generation_p4 import build_h3_capability_smoke_plan
         from src.agentic_video.generation_p51 import audit_real_h3_payload
