@@ -18,6 +18,7 @@ from src.agentic_video.reference_program_v9 import (
     validate_reference_programs, _parse_one_object, _read_cached_output,
     _review_binding, HUMAN_REVIEW_VERSION,
     GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT,
+    EDIT_PROGRAM_PROMPT,
 )
 
 
@@ -311,6 +312,11 @@ def test_production_watch_prompts_do_not_spoil_reference_answer() -> None:
     for prompt in (GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT):
         for spoiler in ("没有双手", "跆拳道", "比赛", "能力展示", "全国冠军"):
             assert spoiler not in prompt
+
+
+def test_edit_model_does_not_generate_deterministic_style_statistics() -> None:
+    assert '"measured_style"' not in EDIT_PROGRAM_PROMPT
+    assert "真实 PTS" in EDIT_PROGRAM_PROMPT
 
 
 def test_legacy_cache_without_source_and_tool_hash_is_unavailable(tmp_path: Path) -> None:

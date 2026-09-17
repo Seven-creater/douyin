@@ -1174,13 +1174,9 @@ EDIT_PROGRAM_PROMPT = """根据 Content Program、确定性时间线和逐 Secti
     "semantic_continuity":"required", "ordering_constraint":"preserve_event_progression|claim_consistency|source_order|verified_relation",
     "individual_duration_policy":"minimum_sufficient_duration",
     "audience_requirement":"", "evidence_ids":[]
-  }],
-  "measured_style": {
-    "reference_duration_s":0.0, "meaningful_unit_count":0,
-    "section_duration_distribution":[], "shot_duration_distribution":[],
-    "information_interval_distribution":[]
-  }
+  }]
 }
+不要输出 measured_style；镜头、Section 和信息间隔的时长统计由程序根据真实 PTS 计算。
 不同事件不能被编造成单一事件因果；对白压缩不得改变原意。
 输入："""
 
