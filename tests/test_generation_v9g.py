@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 from src.agentic_video.generation_v9g import (
+    _json_hash,
     H3_CAPABILITIES,
+    SGLangH3Client,
     V9GBlocked,
     adapt_contract_to_filmdsl,
     accept_v9g,
@@ -256,13 +258,15 @@ class _FakeH3:
         return {"output_path": str(output_path), "sha256": _sha(output_path)}
 
 
-def test_capability_manifest_is_based_on_real_call_results(tmp_path: Path) -> None:
+def test_capability_probe_does_not_promote_a_returned_file_to_effective(tmp_path: Path) -> None:
     fixtures = {key: f"file:///{key}" for key in (
         "first", "last", "image", "video", "audio")}
     fl2va, ref2va = _FakeH3(), _FakeH3()
     manifest = probe_h3_capabilities(
         {"fl2va": fl2va, "ref2va": ref2va}, fixtures, tmp_path)
-    assert all(manifest[name] for name in H3_CAPABILITIES)
+    assert all(manifest[name] is False for name in H3_CAPABILITIES)
+    assert manifest["capability_status"] == "unverified"
+    assert manifest["evidence"]["t2va"]["transport"]["backend_transport_ok"] is False
     hybrid = json.loads((tmp_path / "ref2va_hybrid_first_last" / "request.json")
                         .read_text(encoding="utf-8"))
     assert any(row["role"] == "reference" for row in hybrid["conditions"])
@@ -420,6 +424,63 @@ def test_fake_h3_fake_omni_contract_to_raw_unit_chain(tmp_path: Path) -> None:
     assert len(results) == 3
     assert all(row["passed"] for row in results)
     assert all(row["contract_hash"] == contract["contract_hash"] for row in results)
+    assert all(row["simulation_only"] is True for row in results)
+
+
+def test_real_h3_client_cannot_run_without_p4_authorization(tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    jobs = build_generation_jobs(contract, _caps())
+    with pytest.raises(V9GBlocked, match="p4_formal_authorization_missing_or_stale"):
+        run_v9g_generation_jobs(
+            contract, jobs, tmp_path / "run",
+            clients={"fl2va": SGLangH3Client("http://127.0.0.1:9"),
+                     "ref2va": SGLangH3Client("http://127.0.0.1:9")},
+            runner=object(), capabilities=_caps())
+
+
+def test_forged_in_memory_p4_authorization_cannot_reach_real_h3(
+        tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    jobs = build_generation_jobs(contract, _caps())
+    authorization = {
+        "passed": True, "simulation_only": False,
+        "contract_hash": contract["contract_hash"],
+        "job_request_sha256": {
+            job["unit_id"]: _json_hash(job["request"]) for job in jobs},
+    }
+    with pytest.raises(V9GBlocked, match="formal_authorization_artifact_missing"):
+        run_v9g_generation_jobs(
+            contract, jobs, tmp_path / "run",
+            clients={"fl2va": SGLangH3Client("http://127.0.0.1:9"),
+                     "ref2va": SGLangH3Client("http://127.0.0.1:9")},
+            runner=object(), capabilities=_caps(),
+            formal_authorization=authorization)
+
+
+def test_p4_zero_repair_mode_does_not_issue_unvalidated_second_request(
+        tmp_path: Path) -> None:
+    contract = _contract(tmp_path)
+    calls = {"generation": 0, "repair": 0}
+
+    def generate(request: dict, output: Path) -> dict:
+        calls["generation"] += 1
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"fake")
+        return {"output_path": str(output)}
+
+    def repair(record: dict, history: dict) -> dict:
+        calls["repair"] += 1
+        return {"request": record["request"]}
+
+    result = run_generate_observe_repair(
+        contract, "S1.G1", tmp_path / "run", generate=generate,
+        neutral_observe=lambda video, prompt: {"subject": "A"},
+        verify_contract=lambda observed, expected: {"passed": False,
+                                                      "issues": ["not shown"]},
+        plan_repair=repair, initial_request={"prompt": "fixture"},
+        max_repairs=0)
+    assert result["passed"] is False
+    assert calls == {"generation": 1, "repair": 0}
 
 
 def test_cli_exposes_all_v9g_phases() -> None:
@@ -509,5 +570,8 @@ def test_fake_backends_complete_raw_snippet_section_and_human_gates(
     human = _dump(tmp_path / "human.json", {
         "passed": True, "sections": [{"section_id": "S1", "passed": True}]})
     accepted = accept_v9g(run_dir, human)
-    assert accepted["passed"]
-    assert (run_dir / "rendered.mp4").is_file()
+    assert not accepted["passed"]
+    assert accepted["formal_generation_gate"]["reason_code"] == \
+        "formal_authorization_artifact_missing"
+    assert (run_dir / "debug_preview.mp4").is_file()
+    assert not (run_dir / "rendered.mp4").exists()

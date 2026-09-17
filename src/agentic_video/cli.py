@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -314,6 +315,9 @@ def build_parser() -> argparse.ArgumentParser:
     reference_v9g.add_argument("--fl2va-endpoint", default=None)
     reference_v9g.add_argument("--ref2va-endpoint", default=None)
     reference_v9g.add_argument("--fixture-dir", default=None)
+    reference_v9g.add_argument(
+        "--plan-only", action="store_true",
+        help="write a CPU-only, unverified H3 capability smoke plan")
     reference_v9g.add_argument("--input", default=None)
     reference_v9g.add_argument(
         "--gpu-pairs", default=None,
@@ -1888,7 +1892,7 @@ def _reference_generate_v9g(args, cfg) -> dict:
         SGLangH3Client, adapt_contract_to_filmdsl,
         build_asset_and_state_pack, build_generation_jobs,
         compile_generation_contract, evaluate_v9g_experiment,
-        finalize_unit_snippets, probe_h3_capabilities,
+        finalize_unit_snippets,
         render_and_review_sections, run_v9g_generation_jobs,
         validate_generation_contract,
         validate_upstream_lock,
@@ -1897,6 +1901,38 @@ def _reference_generate_v9g(args, cfg) -> dict:
 
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if args.plan_only:
+        if args.phase != "capability":
+            raise ValueError("--plan-only is supported only for capability phase")
+        from src.agentic_video.generation_p4 import build_h3_capability_smoke_plan
+
+        plan = build_h3_capability_smoke_plan(
+            fixture_dir=_v9g_path(args.fixture_dir) if args.fixture_dir else None)
+        capability_dir = output / "capability"
+        requests_dir = capability_dir / "requests"
+        requests_dir.mkdir(parents=True, exist_ok=True)
+        for case in plan["cases"]:
+            if "request" not in case:
+                continue
+            case_dir = requests_dir / case["case_id"]
+            case_dir.mkdir(parents=True, exist_ok=True)
+            for filename, value in (("request.json", case["request"]),
+                                    ("condition_manifest.json", case["manifest"]),
+                                    ("assets.json", case["assets"])):
+                (case_dir / filename).write_text(
+                    json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        for filename, value in (("capability_plan.json", plan),
+                                ("backend_registry.json", plan["backend_registry"]),
+                                ("manifest.json", {"plan_only": True,
+                                                    "fixtures_ready": plan["fixtures_ready"],
+                                                    "case_count": len(plan["cases"]),
+                                                    "real_capability_verified": False})):
+            (capability_dir / filename).write_text(
+                json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"output": str(capability_dir), "plan_only": True,
+                "case_count": len(plan["cases"]),
+                "fixtures_ready": plan["fixtures_ready"],
+                "real_capability_verified": False}
     code_gate = _v9g_path(args.code_license_gate)
     model_gate = _v9g_path(args.model_license_gate)
     licenses = validate_license_gates(code_gate, model_gate)
@@ -1926,28 +1962,9 @@ def _reference_generate_v9g(args, cfg) -> dict:
                 "section_count": len(contract["sections"])}
 
     if args.phase == "capability":
-        if not args.fl2va_endpoint or not args.ref2va_endpoint or not args.fixture_dir:
-            raise ValueError(
-                "capability phase requires both H3 endpoints and --fixture-dir")
-        fixture_dir = _v9g_path(args.fixture_dir)
-        fixtures = {
-            "first": (fixture_dir / "first.png").as_uri(),
-            "last": (fixture_dir / "last.png").as_uri(),
-            "image": (fixture_dir / "reference.png").as_uri(),
-            "video": (fixture_dir / "reference.mp4").as_uri(),
-            "audio": (fixture_dir / "reference.wav").as_uri(),
-        }
-        missing = [uri for uri in fixtures.values()
-                   if not Path(uri.removeprefix("file:///")).is_file()]
-        if missing:
-            raise FileNotFoundError("capability fixtures missing: " + ",".join(missing))
-        manifest = probe_h3_capabilities({
-            "fl2va": SGLangH3Client(args.fl2va_endpoint),
-            "ref2va": SGLangH3Client(args.ref2va_endpoint),
-        }, fixtures, output / "capability")
-        return {"output": str(output),
-                "passed_count": sum(manifest.get(key) is True for key in manifest
-                                    if key != "evidence")}
+        raise RuntimeError(
+            "real H3 capability execution is blocked until the P4 integrity harness "
+            "and effect review are connected; use --plan-only")
 
     if not contract_path.is_file():
         raise FileNotFoundError(f"generation contract missing: {contract_path}")
@@ -1958,6 +1975,16 @@ def _reference_generate_v9g(args, cfg) -> dict:
                            ";".join(contract_validation["errors"]))
     capability_path = output / "capability" / "capability_manifest.json"
     if args.phase in {"pilot", "generate"}:
+        from src.agentic_video.generation_p4 import (
+            P4Blocked, validate_formal_h3_job, verify_frozen_program_snapshot,
+        )
+
+        registry_path = output / "capability" / "backend_registry.json"
+        if not args.v9_output or not registry_path.is_file():
+            raise P4Blocked("p4_registry_or_v9_snapshot_missing")
+        p0_frozen = verify_frozen_program_snapshot(_v9g_path(args.v9_output), contract)
+        if not p0_frozen:
+            raise P4Blocked("p0_programs_not_frozen")
         if not capability_path.is_file():
             raise FileNotFoundError(f"capability manifest missing: {capability_path}")
         if not args.fl2va_endpoint or not args.ref2va_endpoint or not args.gpu_pairs:
@@ -1965,6 +1992,32 @@ def _reference_generate_v9g(args, cfg) -> dict:
         capabilities = json.loads(capability_path.read_text(encoding="utf-8"))
         jobs = build_generation_jobs(
             contract, capabilities, output / "generation_jobs.json")
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        selected_jobs = jobs[:2] if args.phase == "pilot" else jobs
+        request_hashes = {}
+        for job in selected_jobs:
+            plan_path = output / "generation_conditions" / f"{job['unit_id']}.json"
+            if not plan_path.is_file():
+                raise P4Blocked("formal_condition_manifest_missing", job["unit_id"])
+            condition_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            validate_formal_h3_job(
+                job["request"], condition_plan["manifest"],
+                condition_plan["assets"], registry, p0_frozen=p0_frozen,
+                expected_endpoint=(args.ref2va_endpoint if
+                                   job["request"]["task"] == "ref2va" else
+                                   args.fl2va_endpoint),
+                expected_contract_hash=contract["contract_hash"],
+                expected_unit_id=job["unit_id"])
+            request_hashes[job["unit_id"]] = condition_plan["manifest"]["request_sha256"]
+        authorization = {
+            "schema_version": "v9g_p4_formal_authorization_v1", "passed": True,
+            "simulation_only": False, "contract_hash": contract["contract_hash"],
+            "v9_output": str(_v9g_path(args.v9_output)),
+            "registry_sha256": hashlib.sha256(registry_path.read_bytes()).hexdigest(),
+            "job_request_sha256": request_hashes,
+        }
+        (output / "formal_generation_authorization.json").write_text(
+            json.dumps(authorization, ensure_ascii=False, indent=2), encoding="utf-8")
         from src.perception.omni_pool import OmniProcessPool
         with OmniProcessPool(
                 args.gpu_pairs, cfg.perception.get("omni") or {},
@@ -1975,7 +2028,8 @@ def _reference_generate_v9g(args, cfg) -> dict:
                     "fl2va": SGLangH3Client(args.fl2va_endpoint),
                     "ref2va": SGLangH3Client(args.ref2va_endpoint),
                 }, runner=runner, capabilities=capabilities,
-                max_units=2 if args.phase == "pilot" else None)
+                max_units=2 if args.phase == "pilot" else None,
+                formal_authorization=authorization)
         return {"output": str(output), "unit_count": len(results),
                 "passed_count": sum(row.get("passed") is True for row in results)}
 

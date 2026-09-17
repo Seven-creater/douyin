@@ -151,13 +151,21 @@ def compile_h3_context_preview(draft: dict[str, Any], catalog: dict[str, Any], *
     definitions = []
     retention = []
     references = []
-    for index, asset in enumerate(assets, 1):
-        label = f"<{'Picture' if asset['media_type'] == 'image' else 'Video' if asset['media_type'] in {'video', 'video_audio'} else 'Audio'} {index}>"
+    label_counts = {"Picture": 0, "Video": 0, "Audio": 0}
+    for asset in assets:
+        label_kind = ("Picture" if asset["media_type"] == "image" else
+                      "Video" if asset["media_type"] in {"video", "video_audio"} else
+                      "Audio")
+        label_counts[label_kind] += 1
+        label = f"<{label_kind} {label_counts[label_kind]}>"
         descriptors = asset["transfer_descriptors"]
         transfer = "; ".join(f"{kind}: {descriptors[kind]}" for kind in sorted(descriptors))
         definitions.append(f"{label} [{asset['asset_id']}]: {transfer}")
         retention.append(f"{label}: permitted transfer only: {', '.join(asset['allowed_transfer'])}")
-        references.append({"asset_id": asset["asset_id"], "type": asset["media_type"],
+        references.append({"asset_id": asset["asset_id"], "request_label": label,
+                           "type": asset["media_type"], "namespace": asset["namespace"],
+                           "allowed_transfer": list(asset["allowed_transfer"]),
+                           "forbidden_transfer": list(asset["forbidden_transfer"]),
                            "uri": asset["path"], "sha256": asset["sha256"]})
     continuity = "; ".join(f"{key}={value}" for key, value in sorted(
         unit.get("continuity_ids", {}).items())

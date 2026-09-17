@@ -90,6 +90,22 @@ def test_reference_motion_uses_only_permitted_descriptor(tmp_path: Path) -> None
     assert any(row["asset_id"] == "ref_action" for row in context["references"])
 
 
+def test_reference_labels_are_numbered_per_modality(tmp_path: Path) -> None:
+    base = _catalog(tmp_path)
+    motion = _entry(tmp_path, "ref_motion", "reference_evidence", "video",
+                    {"motion": "moves forward"}, ["identity"])
+    audio = _entry(tmp_path, "ref_audio", "reference_evidence", "audio",
+                   {"audio": "short beat"}, ["identity"])
+    catalog = build_condition_asset_catalog([*base["assets"], motion, audio])
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    fixture["action_plans"]["S2"][0]["condition_keys"] += ["ref_motion", "ref_audio"]
+    context = compile_h3_context_preview(
+        compile_p1_contract_draft(**fixture), catalog, unit_id="S2.G1")
+    assert [row["request_label"] for row in context["references"]] == [
+        "<Picture 1>", "<Picture 2>", "<Picture 3>", "<Video 1>", "<Audio 1>",
+    ]
+
+
 def test_catalog_fails_closed_when_asset_changes(tmp_path: Path) -> None:
     catalog = _catalog(tmp_path)
     Path(catalog["assets"][0]["path"]).write_bytes(b"changed")

@@ -585,7 +585,9 @@ def _capability_cases(fixtures: dict[str, str]) -> list[tuple[str, str, dict[str
 
 def probe_h3_capabilities(clients: dict[str, Any], fixtures: dict[str, str],
                           output_dir: Path) -> dict[str, Any]:
-    """Probe every capability with real requests; documentation is not evidence."""
+    """Legacy probe records transport only; it never certifies condition effect."""
+    from .generation_p4 import validate_generated_media_transport
+
     output_dir = Path(output_dir)
     results: dict[str, Any] = {}
     for name, variant, kwargs in _capability_cases(fixtures):
@@ -599,10 +601,11 @@ def probe_h3_capabilities(clients: dict[str, Any], fixtures: dict[str, str],
         try:
             response = clients[variant].generate(
                 request, output_dir / name / "output.mp4")
-            passed = Path(response["output_path"]).is_file() and \
-                Path(response["output_path"]).stat().st_size > 0
+            transport = validate_generated_media_transport(
+                Path(response["output_path"]), duration_s=4.0, short_edge=768)
             results[name] = {
-                "passed": passed, "variant": variant,
+                "passed": False, "transport": transport,
+                "conditioning_status": "unverified", "variant": variant,
                 "request_sha256": _file_hash(request_path),
                 "response": response,
             }
@@ -611,7 +614,8 @@ def probe_h3_capabilities(clients: dict[str, Any], fixtures: dict[str, str],
                              "error": f"{type(exc).__name__}: {exc}"}
     manifest = {
         "schema_version": CAPABILITY_VERSION, "created_at": _now(),
-        **{name: bool(results.get(name, {}).get("passed")) for name in H3_CAPABILITIES},
+        **{name: False for name in H3_CAPABILITIES},
+        "capability_status": "unverified",
         "evidence": results,
     }
     _write_json(output_dir / "capability_manifest.json", manifest)
@@ -634,8 +638,8 @@ def run_generate_observe_repair(
         plan_repair: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
         initial_request: dict[str, Any], max_repairs: int = 2) -> dict[str, Any]:
     """NEWTON-style bounded Planner–Executor–Verifier loop with neutral observation."""
-    if max_repairs != 2:
-        raise V9GBlocked("policy", "repair_budget_must_equal_two")
+    if max_repairs not in {0, 2}:
+        raise V9GBlocked("policy", "repair_budget_must_be_zero_or_two")
     section, unit = _unit_contract(contract, unit_id)
     output_dir = Path(output_dir)
     trace = ArtifactTrace(output_dir, unit_id)
@@ -713,12 +717,45 @@ def run_generate_observe_repair(
 def run_v9g_generation_jobs(contract: dict[str, Any], jobs: list[dict[str, Any]],
                              output_dir: Path, *, clients: dict[str, SGLangH3Client],
                              runner: Any, capabilities: dict[str, Any],
-                             max_units: int | None = None) -> list[dict[str, Any]]:
+                             max_units: int | None = None,
+                             formal_authorization: dict[str, Any] | None = None) \
+        -> list[dict[str, Any]]:
     """Execute compiled jobs with prompt-isolated Omni observation and verification."""
     output_dir = Path(output_dir)
     selected_jobs = jobs[:max_units] if max_units is not None else jobs
+    real_backend = any(isinstance(client, SGLangH3Client)
+                       for client in clients.values())
+    if real_backend and (
+            not formal_authorization or
+            formal_authorization.get("passed") is not True or
+            formal_authorization.get("simulation_only") is not False or
+            formal_authorization.get("contract_hash") != contract.get("contract_hash") or
+            {job["unit_id"]: _json_hash(job["request"]) for job in selected_jobs} !=
+            formal_authorization.get("job_request_sha256")):
+        raise V9GBlocked("capability", "p4_formal_authorization_missing_or_stale")
+    if real_backend:
+        from .generation_p4 import (
+            P4Blocked, verify_preflight_generation_authorization,
+        )
+
+        try:
+            verify_preflight_generation_authorization(
+                output_dir, contract, selected_jobs,
+                expected_endpoints={name: client.endpoint for name, client in
+                                    clients.items() if isinstance(client, SGLangH3Client)})
+        except P4Blocked as exc:
+            raise V9GBlocked("capability", exc.reason_code) from exc
     results = []
     for job in selected_jobs:
+        if real_backend:
+            try:
+                verify_preflight_generation_authorization(
+                    output_dir, contract, selected_jobs,
+                    expected_endpoints={name: client.endpoint for name, client in
+                                        clients.items() if isinstance(
+                                            client, SGLangH3Client)})
+            except P4Blocked as exc:
+                raise V9GBlocked("capability", exc.reason_code) from exc
         initial = deepcopy(job["request"])
 
         def generate(request: dict[str, Any], destination: Path) -> dict[str, Any]:
@@ -777,10 +814,12 @@ def run_v9g_generation_jobs(contract: dict[str, Any], jobs: list[dict[str, Any]]
                 "contract_hash", "section_id", "unit_id") if key in old})
             return {"request": repaired}
 
-        results.append(run_generate_observe_repair(
+        result = run_generate_observe_repair(
             contract, job["unit_id"], output_dir, generate=generate,
             neutral_observe=observe, verify_contract=verify, plan_repair=repair,
-            initial_request=initial))
+            initial_request=initial, max_repairs=0 if real_backend else 2)
+        result["simulation_only"] = not real_backend
+        results.append(result)
     _write_json(output_dir / "generation_results.json", {
         "contract_hash": contract["contract_hash"], "results": results})
     return results
@@ -1082,6 +1121,8 @@ def evaluate_v9g_experiment(rows: Iterable[dict[str, Any]], *,
 
 def accept_v9g(output_dir: Path, human_review_path: Path) -> dict[str, Any]:
     """Final human gate; it never manufactures a delivery artifact."""
+    from .generation_p4 import P4Blocked, verify_formal_generation_authorization
+
     output_dir = Path(output_dir)
     assembly_path = output_dir / "section_assembly.json"
     blind_path = output_dir / "blind_review.json"
@@ -1096,14 +1137,20 @@ def accept_v9g(output_dir: Path, human_review_path: Path) -> dict[str, Any]:
     human_passed = bool(required_sections) and all(
         human_rows.get(section_id, {}).get("passed") is True
         for section_id in required_sections)
+    try:
+        formal_gate = verify_formal_generation_authorization(output_dir)
+    except P4Blocked as exc:
+        formal_gate = {"passed": False, "reason_code": exc.reason_code}
     passed = (assembly.get("passed") is True and blind.get("passed") is True and
-              human_passed and human.get("passed") is True)
+              human_passed and human.get("passed") is True and
+              formal_gate["passed"] is True)
     result = {
         "schema_version": "v9g_acceptance_v1", "passed": passed,
         "decision": "PASS" if passed else "BLOCKED",
         "all_required_sections_passed": assembly.get("passed") is True,
         "blind_review_passed": blind.get("passed") is True,
         "human_acceptance_passed": human_passed and human.get("passed") is True,
+        "formal_generation_gate": formal_gate,
         "formal_artifact_authorized": passed,
     }
     if passed:
