@@ -862,6 +862,38 @@ def normalize_section_shots(section_observations: dict[str, Any],
             "sections": sections_out}
 
 
+def _aligned_montage_for_payload(normalization: dict[str, Any],
+                                 montage: dict[str, Any] | None) -> dict[str, Any]:
+    """把逐镜头观察对齐到最终归一化：升回内容镜头的段改标 content 并换成新 shot id。
+
+    否则 payload 里残留已被升回的 transition_T.. 旧 id，模型会引用不存在的转场段。
+    """
+    if not montage:
+        return montage or {}
+    promote_map: dict[str, str] = {}
+    for section in normalization.get("sections") or []:
+        for shot in section.get("content_shots") or []:
+            if shot.get("reclassified_from"):
+                promote_map[str(shot["reclassified_from"])] = str(shot["shot_id"])
+    final_transition_ids = {
+        str(row.get("transition_id"))
+        for section in normalization.get("sections") or []
+        for row in section.get("transition_segments") or []}
+    aligned = dict(montage)
+    aligned["sections"] = []
+    for section in montage.get("sections") or []:
+        rows = []
+        for row in section.get("segments") or []:
+            row = dict(row)
+            segment_id = str(row.get("segment_id"))
+            if segment_id in promote_map:
+                row["segment_id"] = promote_map[segment_id]
+                row["segment_kind"] = "content_promoted"
+            rows.append(row)
+        aligned["sections"].append({**section, "segments": rows})
+    return aligned
+
+
 def apply_montage_reclassification(normalization: dict[str, Any],
                                    montage: dict[str, Any] | None) -> dict[str, Any]:
     """快速蒙太奇逐镜头观察可把带实义屏幕文字的转场段升回内容镜头（附依据）。"""
@@ -2850,6 +2882,7 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             reference, ledger, normalization, output_dir, runner=runner,
             ffmpeg_bin=ffmpeg_bin, force=force)
         normalization = apply_montage_reclassification(normalization, montage)
+        montage_payload = _aligned_montage_for_payload(normalization, montage)
         _write_json(output_dir / "shot_normalization.json", normalization)
         manifest["stages"]["shot_normalization"] = {
             "status": "complete",
@@ -2898,11 +2931,11 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             draft, resolved, ledger, output_dir, runner=runner,
             section_observations=section_observations,
             normalization=normalization, reconciliation=reconciliation,
-            conflicts=conflicts, montage=montage, force=force)
+            conflicts=conflicts, montage=montage_payload, force=force)
         edit = build_reference_edit_program(
             content, ledger, output_dir, runner=runner,
             section_observations=section_observations,
-            normalization=normalization, conflicts=conflicts, montage=montage,
+            normalization=normalization, conflicts=conflicts, montage=montage_payload,
             force=force)
         requirements = compile_material_requirements(content, edit, output_dir)
         validation = validate_reference_programs(
