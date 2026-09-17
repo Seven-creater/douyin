@@ -394,3 +394,38 @@ def test_content_sections_must_match_reconciled_observed_sections(
                                          _section_bank(),
                                          reconciliation=_reconciliation())
     assert any("diverge from reconciled" in error for error in result["errors"])
+
+
+def test_edit_builder_aligns_mode_constants_deterministically(
+        tmp_path: Path) -> None:
+    from src.agentic_video.reference_program_v9 import (
+        build_reference_edit_program, normalize_section_shots)
+
+    content = _content()
+    from src.agentic_video.reference_program_v9 import _attach_intervals
+    _attach_intervals(content, _ledger(),
+                      keys=("meaningful_units", "sections"), stage="edit_program")
+    raw_edit = _edit()
+    # 模型错误一：多镜头段标 continuous_clip；错误二：event_compression 缺模式常量
+    raw_edit["editorial_patterns"][0]["composition_mode"] = "continuous_clip"
+    raw_edit["editorial_patterns"][1]["composition_mode"] = "event_compression_montage"
+    raw_edit["editorial_patterns"][1]["source_continuity"] = "continuous_required"
+    raw_edit["editorial_patterns"][1]["ordering_constraint"] = "source_order"
+    raw_edit["editorial_patterns"][1]["source_semantics"] = "one_long_event"
+    bank = _section_bank()
+    normalization = normalize_section_shots(bank, _ledger())
+    runner = FakeRunner(ask=[raw_edit])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    edit = build_reference_edit_program(
+        content, _ledger(), tmp_path, runner=runner,
+        section_observations=bank, normalization=normalization, force=True)
+    first = edit["editorial_patterns"][0]
+    assert first["composition_mode"] == "multi_angle_action"
+    second = edit["editorial_patterns"][1]
+    assert second["composition_mode"] == "event_compression_montage"
+    assert second["source_continuity"] == "non_contiguous_allowed"
+    assert second["ordering_constraint"] == "preserve_event_progression"
+    aligns = {row["field"]: row for row in edit["programmatic_mode_alignment"]}
+    assert aligns["composition_mode"]["from"] == "continuous_clip"
+    assert aligns["source_continuity"]["basis"] == "mode_mandated_constant"

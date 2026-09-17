@@ -208,11 +208,14 @@ def _edit() -> dict:
 
 
 def _section_watch(section_id: str, start: str, end: str, cut: str | None = None) -> dict:
+    boundary_pts = {"video_start": 0.0, "cut_001": 10.0, "cut_002": 20.0,
+                    "cut_003": 25.0, "video_end": 30.0}
     pairs = [(start, cut), (cut, end)] if cut else [(start, end)]
     return {
         "section_id": section_id,
         "shots": [{"shot_id": f"{section_id}.shot_{index:03d}",
                    "start_boundary_id": left, "end_boundary_id": right,
+                   "interval": [boundary_pts[left], boundary_pts[right]],
                    "information_added": "a visible action changes another subject's state",
                    "edit_function": "establishes a new stage",
                    "event_relation": "same_event",

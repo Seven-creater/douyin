@@ -1995,6 +1995,42 @@ def build_reference_edit_program(
                                                 stage="edit_program")
             operation["interval"] = [round(start, 6), round(end, 6)]
             operation["time_source"] = "deterministic_boundary_registry"
+    # P0.2 修复 C：模式配套常量与矛盾模式的确定性矫正（记录依据，不静默）。
+    normalized_by_section = {
+        str(row.get("section_id")): row
+        for row in (normalization or {}).get("sections") or []}
+    programmatic_alignments: list[dict[str, Any]] = []
+    for pattern in value.get("editorial_patterns") or []:
+        section_id = str(pattern.get("section_id") or "")
+        mode = str(pattern.get("composition_mode") or "")
+        if mode == "event_compression_montage":
+            if pattern.get("source_continuity") != "non_contiguous_allowed":
+                pattern["source_continuity"] = "non_contiguous_allowed"
+                programmatic_alignments.append(
+                    {"section_id": section_id, "field": "source_continuity",
+                     "basis": "mode_mandated_constant"})
+            if pattern.get("ordering_constraint") != "preserve_event_progression":
+                pattern["ordering_constraint"] = "preserve_event_progression"
+                programmatic_alignments.append(
+                    {"section_id": section_id, "field": "ordering_constraint",
+                     "basis": "mode_mandated_constant"})
+        if mode == "dialogue_compression":
+            pattern["semantic_continuity"] = "required"
+        row = normalized_by_section.get(section_id) or {}
+        content_shot_count = len(row.get("content_shots") or [])
+        has_real_cuts = bool(row.get("real_cut_pts"))
+        if mode == "continuous_clip" and (content_shot_count > 1 or has_real_cuts):
+            same_event_majority = sum(
+                1 for shot in row.get("content_shots") or []
+                if shot.get("event_relation") == "same_event") > content_shot_count / 2
+            replacement = ("multi_angle_action" if same_event_majority
+                           else "micro_montage")
+            pattern["composition_mode"] = replacement
+            programmatic_alignments.append({
+                "section_id": section_id, "field": "composition_mode",
+                "from": "continuous_clip", "to": replacement,
+                "basis": "contradicts observed real cuts/shots"})
+    value["programmatic_mode_alignment"] = programmatic_alignments
     section_durations = [float(row["interval"][1]) - float(row["interval"][0])
                          for row in content.get("sections") or []]
     cut_times = [float(row["pts_s"]) for row in
