@@ -2003,6 +2003,7 @@ def build_reference_edit_program(
     for pattern in value.get("editorial_patterns") or []:
         section_id = str(pattern.get("section_id") or "")
         mode = str(pattern.get("composition_mode") or "")
+        row = normalized_by_section.get(section_id) or {}
         if mode == "event_compression_montage":
             if pattern.get("source_continuity") != "non_contiguous_allowed":
                 pattern["source_continuity"] = "non_contiguous_allowed"
@@ -2014,9 +2015,17 @@ def build_reference_edit_program(
                 programmatic_alignments.append(
                     {"section_id": section_id, "field": "ordering_constraint",
                      "basis": "mode_mandated_constant"})
+            phases = [str(item).strip() for item in
+                      pattern.get("semantic_phases") or [] if str(item).strip()]
+            if len(phases) < 2:
+                shot_count = max(len(row.get("content_shots") or []), 2)
+                pattern["semantic_phases"] = [
+                    f"observed_moment_{index}" for index in range(1, shot_count + 1)]
+                programmatic_alignments.append(
+                    {"section_id": section_id, "field": "semantic_phases",
+                     "basis": "derived_from_observed_content_shots"})
         if mode == "dialogue_compression":
             pattern["semantic_continuity"] = "required"
-        row = normalized_by_section.get(section_id) or {}
         content_shot_count = len(row.get("content_shots") or [])
         has_real_cuts = bool(row.get("real_cut_pts"))
         if mode == "continuous_clip" and (content_shot_count > 1 or has_real_cuts):
@@ -3059,7 +3068,9 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             normalization=normalization)
         if not validation["passed"]:
             # P0.2：一轮有界契约修复——把错误清单回喂模型各重问一次（extract_template 同款）。
+            # 修复后两版候选择优：取契约错误更少的一版（防“修好A弄坏B”，全程留档）。
             repair_hint = list(validation["errors"])
+            first_candidate = (content, edit, requirements, validation)
             content = build_reference_content_program(
                 draft, resolved, ledger, output_dir, runner=runner,
                 section_observations=section_observations,
@@ -3076,10 +3087,22 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
                 content, edit, requirements, ledger, section_observations,
                 reconciliation=reconciliation, conflicts=conflicts,
                 montage=montage, normalization=normalization)
+            selection = "repair"
+            if (not validation["passed"] and
+                    len(validation["errors"]) > len(first_candidate[3]["errors"])):
+                content, edit, requirements, validation = first_candidate
+                selection = "first_pass_fewer_errors"
+                compile_material_requirements(content, edit, output_dir)
+                _write_json(output_dir / "reference_content_program.json", content)
+                _write_json(output_dir / "reference_edit_program.json", edit)
             manifest["stages"]["program_repair"] = {
                 "status": "complete", "rounds": 1,
                 "hint_errors": repair_hint,
-                "passed_after_repair": validation["passed"]}
+                "passed_after_repair": validation["passed"],
+                "candidate_selection": selection,
+                "first_pass_errors": len(first_candidate[3]["errors"]),
+                "repaired_errors": len(validation["errors"]) if selection == "repair"
+                else None}
         _write_json(output_dir / "validation.json", validation)
         manifest["stages"]["programs"] = {
             "status": "complete" if validation["passed"] else "blocked",
