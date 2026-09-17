@@ -113,9 +113,11 @@ def _snapshot_stage(output_dir: Path, stage: str, input_hash: str,
 def _parse_one_object(raw: str, *, stage: str) -> dict[str, Any]:
     cleaned = re.sub(r"<think>.*?</think>", "", str(raw or ""),
                      flags=re.DOTALL).strip()
-    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.DOTALL)
-    if fenced:
-        cleaned = fenced.group(1).strip()
+    opening = re.match(r"^```(?:json)?[ \t]*\r?\n", cleaned)
+    if opening:
+        cleaned = cleaned[opening.end():].strip()
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
     if not cleaned:
         raise V9Blocked(stage, "model_response_not_one_json_object")
     try:

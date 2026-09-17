@@ -287,7 +287,9 @@ def test_cut_candidates_merge_within_two_native_frames() -> None:
 
 def test_model_response_must_be_exactly_one_json_object() -> None:
     assert _parse_one_object('```json\n{"ok": true}\n```', stage="test") == {"ok": True}
-    for raw in ('{"a": 1} trailing', '{"a": 1}{"b": 2}', '[1, 2]'):
+    assert _parse_one_object('```json\n{"ok": true}', stage="test") == {"ok": True}
+    for raw in ('{"a": 1} trailing', '{"a": 1}{"b": 2}', '[1, 2]',
+                '```json\n{"ok": true} trailing'):
         with pytest.raises(V9Blocked):
             _parse_one_object(raw, stage="test")
 
