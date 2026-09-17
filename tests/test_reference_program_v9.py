@@ -14,11 +14,14 @@ from src.agentic_video.reference_program_v9 import (
     build_reference_edit_program, build_reference_understanding_draft,
     build_section_observations, collect_reference_gaps,
     compile_material_requirements, merge_cut_candidates,
+    normalize_section_shots, apply_montage_reclassification,
+    reconcile_section_boundaries, semantic_conflict_gate,
     resolve_reference_questions, run_reference_program_v9,
     validate_reference_programs, _parse_one_object, _read_cached_output,
     _review_binding, HUMAN_REVIEW_VERSION,
     GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT,
     CONTENT_PROGRAM_PROMPT, EDIT_PROGRAM_PROMPT, CONTINUITY_DIMENSIONS,
+    TRANSITION_TYPES,
 )
 
 
@@ -168,7 +171,8 @@ def _edit() -> dict:
         ],
         "editorial_patterns": [
             {"section_id": "competition", "duration_budget_s": 5.0,
-             "shot_refs": ["competition.shot_001", "competition.shot_002"],
+             "shot_refs": ["competition.shot_C01", "competition.shot_C02"],
+             "transition_refs": [],
              "composition_mode": "event_compression_montage",
              "source_semantics": "one_long_event",
              "semantic_phases": ["setup", "decisive_action", "visible_result"],
@@ -180,7 +184,8 @@ def _edit() -> dict:
              "audience_requirement": "blind viewer understands progression",
              "evidence_ids": ["ev_visual"]},
             {"section_id": "proofs", "duration_budget_s": 4.0,
-             "shot_refs": ["proofs.shot_001"],
+             "shot_refs": ["proofs.shot_C01"],
+             "transition_refs": [],
              "composition_mode": "evidence_montage",
              "source_semantics": "multiple_events",
              "semantic_phases": ["independent_proof_a", "independent_proof_b"],
@@ -227,6 +232,22 @@ def _section_bank() -> dict:
         dict(_section_watch("proofs", "cut_002", "video_end"),
              source_interval=[20.0, 30.0], raw_response_sha256="c" * 64),
     ]}
+
+
+def _reconciliation() -> dict:
+    return {"schema_version": "boundary_reconciliation_v9_p02",
+            "boundaries": [
+                {"boundary_id": "cut_002", "between": ["competition", "proofs"],
+                 "semantic_change": True, "change_types": ["event"],
+                 "reason": "a different event begins here",
+                 "action": "kept", "moved_to": None}],
+            "sections_after": [], "rewatched": []}
+
+
+def _conflicts_clean() -> dict:
+    return {"schema_version": "semantic_conflicts_v9_p02",
+            "contradictions": [], "neutral_rechecks": [],
+            "unresolved_topics": [], "must_not_assert": []}
 
 
 class FakeRunner:
@@ -539,7 +560,8 @@ def test_program_validation_accepts_event_compression_and_evidence_montage(
     edit = _edit()
     requirements = compile_material_requirements(content, edit, tmp_path)
     validation = validate_reference_programs(content, edit, requirements, _ledger(),
-                                             _section_bank())
+                                             _section_bank(),
+                                             reconciliation=_reconciliation())
     assert validation["passed"], validation["errors"]
     event = requirements["requirements"][0]
     assert event["presentation_requirement"] == {
@@ -564,13 +586,15 @@ def test_edit_validation_rejects_missing_section_rewatch_or_shot_refs(
     edit = _edit()
     req = compile_material_requirements(content, edit, tmp_path)
     assert validate_reference_programs(content, edit, req, _ledger(),
-                                       _section_bank())["passed"]
+                                       _section_bank(),
+                                       reconciliation=_reconciliation())["passed"]
     assert any("direct Section watch" in message for message in
                validate_reference_programs(content, edit, req, _ledger())["errors"])
     edit["editorial_patterns"][0]["shot_refs"] = []
-    assert any("direct shot refs missing" in message for message in
+    assert any("shot refs missing" in message for message in
                validate_reference_programs(content, edit, req, _ledger(),
-                                           _section_bank())["errors"])
+                                           _section_bank(),
+                                           reconciliation=_reconciliation())["errors"])
 
 
 def test_two_coarse_windows_cannot_swallow_many_meaningful_units(tmp_path: Path) -> None:
@@ -665,7 +689,8 @@ def test_fake_runner_evidence_gap_probe_to_three_programs(tmp_path: Path) -> Non
                for _prompt, kwargs in runner.ask_calls)
     requirements = compile_material_requirements(content, edit, tmp_path)
     result = validate_reference_programs(content, edit, requirements, ledger,
-                                         _section_bank())
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
     assert result["passed"], result["errors"]
     assert resolved["required_unresolved_ids"] == []
     assert {path.name for path in tmp_path.iterdir()} >= {
@@ -684,7 +709,13 @@ def test_fake_runner_full_v9_orchestration_stops_pending_human(
         _draft(),
         _section_watch("competition", "video_start", "cut_002", "cut_001"),
         _section_watch("proofs", "cut_002", "video_end"),
-    ], ask=[_content(), _edit()])
+    ], ask=[
+        {"boundaries": [{"boundary_id": "cut_002", "semantic_change": True,
+                         "change_types": ["event"], "reason": "new event",
+                         "recommended_boundary_id": None}]},
+        _conflicts_clean(),
+        _content(), _edit(),
+    ])
     def fake_ledger(_reference, output_dir, **_kwargs):
         ledger = _ledger()
         (Path(output_dir) / "reference_evidence.json").write_text(
@@ -711,6 +742,8 @@ def test_human_acceptance_requires_every_section_and_transfer_test(tmp_path: Pat
         json.dumps(_ledger()), encoding="utf-8")
     (tmp_path / "section_observations.json").write_text(
         json.dumps(_section_bank()), encoding="utf-8")
+    (tmp_path / "boundary_reconciliation.json").write_text(
+        json.dumps(_reconciliation()), encoding="utf-8")
     (tmp_path / "reference_content_program.json").write_text(
         json.dumps(_content()), encoding="utf-8")
     (tmp_path / "reference_edit_program.json").write_text(
@@ -750,6 +783,8 @@ def test_human_review_rejects_changed_program_after_signoff(tmp_path: Path) -> N
         json.dumps(_ledger()), encoding="utf-8")
     (tmp_path / "section_observations.json").write_text(
         json.dumps(_section_bank()), encoding="utf-8")
+    (tmp_path / "boundary_reconciliation.json").write_text(
+        json.dumps(_reconciliation()), encoding="utf-8")
     (tmp_path / "reference_content_program.json").write_text(
         json.dumps(content), encoding="utf-8")
     (tmp_path / "reference_edit_program.json").write_text(
@@ -785,6 +820,8 @@ def test_unknown_continuity_requires_traced_amendment_and_new_transfer_review(
         json.dumps(_ledger()), encoding="utf-8")
     (tmp_path / "section_observations.json").write_text(
         json.dumps(_section_bank()), encoding="utf-8")
+    (tmp_path / "boundary_reconciliation.json").write_text(
+        json.dumps(_reconciliation()), encoding="utf-8")
     (tmp_path / "reference_content_program.json").write_text(
         json.dumps(content), encoding="utf-8")
     (tmp_path / "reference_edit_program.json").write_text(

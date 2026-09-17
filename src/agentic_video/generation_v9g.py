@@ -35,6 +35,7 @@ H3_CAPABILITIES = (
 COMPOSITION_MODES = {
     "continuous_clip", "micro_montage", "event_compression_montage",
     "evidence_montage", "dialogue_compression", "reaction_result_pair",
+    "multi_angle_action", "contrast_montage", "text_led_montage",
 }
 NEUTRAL_OBSERVATION_PROMPT = """Observe only what is visibly or audibly present.
 Use temporary local subject IDs. Report subjects, initiator, affected subject,
@@ -863,7 +864,8 @@ def select_evidence_moments(event_timeline: list[dict[str, Any]], *,
             float(row["interval"][1]) - float(row["interval"][0]),
             float(row["interval"][0])))
         selected.append(deepcopy(candidates[0]))
-    if composition_mode in {"event_compression_montage", "reaction_result_pair"}:
+    if composition_mode in {"event_compression_montage", "reaction_result_pair",
+                                   "multi_angle_action"}:
         starts = [float(row["interval"][0]) for row in selected]
         if starts != sorted(starts):
             return {"passed": False, "reason_code": "event_progression_reordered",
