@@ -324,3 +324,25 @@ def test_contract_repair_round_reasks_programs_once(
     repaired = json.loads((tmp_path / "run" / "reference_content_program.json")
                           .read_text(encoding="utf-8"))
     assert repaired["contract_repair"] is True
+
+
+def test_moved_boundary_satisfies_justification_via_moved_to(tmp_path: Path) -> None:
+    """边界被对账移动后，校验器必须按 moved_to 的 PTS 认领依据记录。"""
+    content = _content()
+    # 模拟对账后：competition 结束边界被移动，proofs 从移动点开始
+    content["sections"][0]["interval"] = [0.0, 10.0]
+    content["sections"][1]["interval"] = [10.0, 30.0]
+    edit = _edit()
+    req = compile_material_requirements(content, edit, tmp_path)
+    moved = {"schema_version": "boundary_reconciliation_v9_p02",
+             "boundaries": [
+                 {"boundary_id": "cut_002", "between": ["competition", "proofs"],
+                  "semantic_change": False, "change_types": ["none"],
+                  "reason": "同一事件仍在延续", "action": "moved",
+                  "moved_to": "cut_001"}],
+             "sections_after": [], "rewatched": []}
+    result = validate_reference_programs(content, edit, req, _ledger(),
+                                         _section_bank(), reconciliation=moved)
+    assert not any("lacks reconciliation justification" in error
+                   for error in result["errors"])
+    assert not any("unjustified" in error for error in result["errors"])

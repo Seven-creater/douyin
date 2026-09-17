@@ -2447,7 +2447,11 @@ def _validate_p02_structure(
         record = None
         for row in (reconciliation or {}).get("boundaries") or []:
             pts = _boundary_map(ledger).get(str(row.get("boundary_id")))
-            if pts is not None and abs(pts - boundary_start) < 1e-6:
+            moved_pts = (_boundary_map(ledger).get(str(row.get("moved_to")))
+                         if row.get("action") == "moved" else None)
+            if ((pts is not None and abs(pts - boundary_start) < 1e-6) or
+                    (moved_pts is not None and
+                     abs(moved_pts - boundary_start) < 1e-6)):
                 record = row
                 break
         if record is None:
