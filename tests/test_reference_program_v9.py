@@ -340,8 +340,19 @@ def test_section_edit_rewatches_source_video_and_keeps_cut_evidence(tmp_path: Pa
     assert runner.watch_calls[0][2]["start_s"] == 0.0
     assert runner.watch_calls[0][2]["end_s"] == 20.0
     assert '"cut_001"' in runner.watch_calls[0][1]
+    assert '"cut_candidates_to_assess":["cut_001"]' in runner.watch_calls[0][1]
     assert bank["sections"][0]["shots"][0]["interval"] == [0.0, 10.0]
     assert (tmp_path / "raw_responses" / "section_competition.txt").is_file()
+
+
+def test_section_end_boundary_is_not_an_assessable_internal_cut() -> None:
+    import src.agentic_video.reference_program_v9 as module
+
+    evidence = module._section_evidence(_ledger(), [0.0, 10.0])
+    assert any(row["boundary_id"] == "cut_001"
+               for row in evidence["boundaries"])
+    assert all(row["boundary_id"] != "cut_001"
+               for row in evidence["cut_candidates"])
 
 
 def test_signal_gap_only_when_current_explanation_is_incomplete() -> None:

@@ -626,6 +626,8 @@ def build_reference_understanding_draft(
 SECTION_WATCH_PROMPT = """直接观看这一段参考原视频，只输出一个 JSON 对象。切点是候选信号，
 不能仅凭切点数量推断剪辑模式。先说明每个可辨画面单元新增的信息，再解释镜头之间是否
 属于同一事件；看不清的地方明确写成未决问题。时间只能引用输入中的 boundary_id。
+cut_assessments 只能评估输入 cut_candidates_to_assess 列出的内部切点；Section 起止
+boundary 只是时间锚点，未列入该数组时不得当作本段可验证切点。数组为空则输出空数组。
 {
   "section_id":"...",
   "shots":[{"start_boundary_id":"...","end_boundary_id":"...",
@@ -702,6 +704,8 @@ def build_section_observations(
             "draft": {key: section.get(key) for key in (
                 "start_boundary_id", "end_boundary_id", "evidence_ids", "unit_ids")},
             "deterministic_evidence": evidence,
+            "cut_candidates_to_assess": [
+                row["boundary_id"] for row in evidence["cut_candidates"]],
         }, ensure_ascii=False, separators=(",", ":"))
         answer = runner.watch(
             Path(reference), prompt, start_s=interval[0], end_s=interval[1],
