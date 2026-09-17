@@ -239,3 +239,37 @@ def test_edit_prompt_uses_finite_ontology_and_transition_refs() -> None:
     assert "shot_C01" in EDIT_PROGRAM_PROMPT
     assert "zoom_blur" in TRANSITION_TYPES
     assert EDIT_VERSION.endswith("_p02")
+
+
+def test_montage_watch_stops_after_json_and_parses_per_shot(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import src.agentic_video.reference_program_v9 as module
+
+    content_shots = [
+        {"shot_id": f"main.shot_C{index:02d}",
+         "interval": [index * 0.5, index * 0.5 + 0.5],
+         "duration_s": 0.5, "information_added": "x", "edit_function": "y",
+         "event_relation": "same_event", "interior_real_cuts": []}
+        for index in range(1, 5)]
+    normalization = {"sections": [{
+        "section_id": "main", "interval": [0.0, 2.0], "real_cut_pts": [0.5],
+        "content_shots": content_shots, "transition_segments": []}]}
+    monkeypatch.setattr(
+        module, "_extract_segment_frames",
+        lambda ffmpeg_bin, reference, interval, out_dir, count=3: [out_dir / "f0.jpg"])
+    answers = [
+        {"segment_id": shot["shot_id"], "visible_content": f"内容{index}",
+         "on_screen_text": "跆拳道全国冠军" if index == 2 else None,
+         "transition_type": None}
+        for index, shot in enumerate(content_shots, 1)]
+    runner = FakeRunner(inspect=answers)
+    ledger = _ledger()
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    result = module.watch_fast_montage_shots(
+        video, ledger, normalization, tmp_path, runner=runner,
+        ffmpeg_bin="ffmpeg", force=True)
+    assert len(result["sections"][0]["segments"]) == 4
+    assert all(kwargs.get("stop_after_json_object") is True
+               for _images, _prompt, kwargs in runner.inspect_calls)
+    assert result["sections"][0]["segments"][1]["on_screen_text"] == "跆拳道全国冠军"

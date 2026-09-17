@@ -1145,11 +1145,16 @@ def watch_fast_montage_shots(
             "segment_id": request["segment_id"],
             "segment_kind": request["segment_kind"],
             "interval": request["interval"]}, ensure_ascii=False,
-            separators=(",", ":"))} for request in requests]
+            separators=(",", ":")),
+        "kwargs": {"stop_after_json_object": True, "max_new_tokens": 768},
+    } for request in requests]
     if hasattr(runner, "inspect_media_many"):
         answers = runner.inspect_media_many(prompts)
     else:
-        answers = [runner.inspect_media(**prompt) for prompt in prompts]
+        answers = [
+            runner.inspect_media(prompt["image_paths"], prompt["prompt"],
+                                 **prompt["kwargs"])
+            for prompt in prompts]
     for request, answer in zip(requests, answers):
         raw = _answer_text(answer)
         raw_path = (output_dir / "raw_responses" / "montage" /

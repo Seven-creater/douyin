@@ -375,7 +375,8 @@ class OmniRunner:
                       video_path: Path | None = None,
                       fps: float | None = None,
                       source_origin_s: float = 0.0,
-                      max_new_tokens: int | None = None) -> OmniAnswer:
+                      max_new_tokens: int | None = None,
+                      stop_after_json_object: bool = False) -> OmniAnswer:
         """Inspect images, optionally together with one already-cut video."""
         self.load()
         t_pre0 = time.time()
@@ -386,7 +387,8 @@ class OmniRunner:
         input_build_s = time.time() - t_pre0
         return self._generate(
             inputs, max_new_tokens=max_new_tokens,
-            use_audio_in_video=use_audio, input_build_s=input_build_s)
+            use_audio_in_video=use_audio, input_build_s=input_build_s,
+            stop_after_json_object=stop_after_json_object)
 
     # ---------- 纯文本推理（Phase 3 模板抽取用） ----------
     def ask(self, prompt: str, *, max_new_tokens: int | None = None,
