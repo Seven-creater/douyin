@@ -629,7 +629,7 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
         (job_dir / "prompt.txt").write_text(
             str(job["request"].get("prompt") or ""), encoding="utf-8")
     if plan_only or not execute:
-        return {"status": "planned",
+        return {"phase": "planned",
                 "plan_path": str(output_dir / "lt0_plan.json"),
                 "aspect_ratio": aspect_ratio,
                 "contact_sheets": [row["contact_sheet"]
@@ -733,6 +733,6 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
               "limits": ["First Frame 归 LT0.1", "音频参考对比归后续",
                          "12 vs 15 时长退化单独实验"]}
     _write_json(output_dir / "lt0_report.json", report)
-    return {"status": "complete",
+    return {"phase": "complete",
             "report_path": str(output_dir / "lt0_report.json"),
             "summary": summary}

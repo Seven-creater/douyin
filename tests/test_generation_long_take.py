@@ -324,7 +324,7 @@ def test_plan_only_writes_requests_without_http(
     summary = module.run_lt0_experiment(
         _NSConfig(), p04e_dir, tmp_path / "out",
         reference=tmp_path / "video.mp4", plan_only=True, execute=False)
-    assert summary["status"] == "planned"
+    assert summary["phase"] == "planned"
     assert summary["take_count"] == 8
     assert summary["aspect_ratio"] == "9:16"
     plan = json.loads((tmp_path / "out" / "lt0_plan.json").read_text(
