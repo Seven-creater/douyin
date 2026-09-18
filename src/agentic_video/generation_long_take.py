@@ -764,9 +764,16 @@ def observe_long_take(video_path: Path, output_dir: Path, *, runner,
         if identity_text.startswith("json"):
             identity_text = identity_text[4:]
     identity = json.loads(identity_text)
-    if not isinstance(identity.get("frames"), list) or \
-            len(identity["frames"]) != len(sample_paths):
+    # 模型可能幻觉多余采样行（首跑实测：5 帧输入回了 6+ 行）——丢弃
+    # 越界行，但给定样本必须全覆盖，缺号仍硬拦。
+    frames = [row for row in (identity.get("frames") or [])
+              if isinstance(row, dict)
+              and isinstance(row.get("sample_index"), int)
+              and 1 <= row["sample_index"] <= len(sample_paths)]
+    covered = {row["sample_index"] for row in frames}
+    if covered != set(range(1, len(sample_paths) + 1)):
         raise LT0Blocked("observe", "identity_frames_invalid", take_id)
+    identity["frames"] = frames
     return {"take_id": take_id, "duration_s": duration_s,
             "observation": observation, "identity": identity}
 
