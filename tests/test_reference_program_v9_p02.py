@@ -666,3 +666,42 @@ def test_hook_takeaway_must_present_quoted_proposition(tmp_path: Path) -> None:
                                          _section_bank(),
                                          reconciliation=_reconciliation())
     assert not any("hook takeaway" in error for error in result["errors"])
+
+
+def test_rhetorical_change_inside_event_does_not_split_section(
+        tmp_path: Path) -> None:
+    """事件内部的阶段变化（如决胜时刻）不得成为 Section 边界。"""
+    ledger = _ledger()
+    ledger["boundaries"].insert(3, {
+        "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
+        "kind": "cut_candidate"})
+    bank = _section_bank()
+    bank["sections"][1]["shots"][0]["event_relation"] = "different_event"
+    runner = FakeRunner(
+        watch=[_full_watch("competition", ["video_start", "cut_001", "cut_002",
+                                           "cut_003"]),
+               _full_watch("proofs", ["cut_003", "video_end"])],
+        inspect=[
+            {"event_continuity": True, "rhetorical_function_continuity": False,
+             "audience_cognition_continuity": False, "semantic_change": True,
+             "reason": "决胜时刻，修辞功能变化但仍是同一场比赛"},
+            {"event_continuity": False, "rhetorical_function_continuity": False,
+             "audience_cognition_continuity": False, "semantic_change": True,
+             "reason": "照片蒙太奇开始，新事件"}])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        result, _reconciled = reconcile_section_boundaries(
+            video, ledger, bank, tmp_path, runner=runner)
+    finally:
+        module._boundary_frames = original
+    record = result["boundaries"][0]
+    assert record["action"] == "moved"
+    assert record["moved_to"] == "cut_003"
+    assert record["attempts"][0]["accepted_by_event_gate"] is False
+    assert record["attempts"][1]["accepted_by_event_gate"] is True

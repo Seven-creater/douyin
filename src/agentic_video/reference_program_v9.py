@@ -1078,16 +1078,21 @@ def reconcile_section_boundaries(
                 ffmpeg_bin=ffmpeg_bin, attempt=_attempt,
                 slug=_safe_id(f"{previous_row.get('section_id')}_"
                               f"{next_row.get('section_id')}"))
+            # P0.3d：事件维度是边界硬闸——同一事件内部的阶段变化（准备/对抗/
+            # 结果/反应）属于 semantic_phases，不是 Section 边界；边界只在新
+            # 事件开始处成立。修辞/认知维度记录在案但不单独放行。
+            event_discontinuity = verdict.get("event_continuity") is False
             attempts.append({
                 "boundary_id": current_id,
                 "method": ("frame_check+same_event_signal" if head_same_event
                            else "frame_check"),
                 "same_event_signal": head_same_event,
                 "semantic_change": verdict["semantic_change"],
+                "accepted_by_event_gate": event_discontinuity,
                 "detail": {key: verdict.get(key) for key in (
                     "event_continuity", "rhetorical_function_continuity",
                     "audience_cognition_continuity", "reason")}})
-            if verdict["semantic_change"]:
+            if event_discontinuity:
                 accepted_id = current_id
                 break
             forward = [bid for bid in candidates
