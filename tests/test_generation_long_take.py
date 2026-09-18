@@ -101,7 +101,10 @@ def test_brief_compiles_official_six_sections_with_compressed_phases() -> None:
     assert "一镜到底" not in clause
     assert "Natural camera movement or internal cuts are allowed" in clause
     assert "different setting" in clause
-    assert brief["subject_textual_definition"].startswith("白色道服红色护具")
+    # v3：subject 定义只写人物外观（词表确定性抽取），不塞事件
+    assert brief["subject_wardrobe"]["subject_1"] == \
+        "a white dobok, a red chest protector"
+    assert "[reference generation]" in brief["prompt_fields"]["summary"]
 
 
 @pytest.mark.parametrize("recipe,ref_count,has_video,variant", [
@@ -110,7 +113,7 @@ def test_brief_compiles_official_six_sections_with_compressed_phases() -> None:
     ("video_only", 1, True, "ref2va"),
     ("canonical_plus_video", 4, True, "ref2va"),
 ])
-def test_wire_prompt_official_structure_per_recipe(
+def test_wire_prompt_official_schema_per_recipe(
         recipe: str, ref_count: int, has_video: bool,
         variant: str) -> None:
     brief = _brief()
@@ -120,32 +123,74 @@ def test_wire_prompt_official_structure_per_recipe(
         visual_reference={"path": visual_path}, recipe=recipe, seed=1001,
         seconds=12, aspect_ratio="3:4")
     prompt = request["prompt"]
-    for section in SIX_SECTIONS:
-        assert f"{section}:\n" in prompt, section
     conditions = request["conditions"]
     assert len(conditions) == ref_count
     assert all(row["role"] == "reference" for row in conditions)
     if has_video:
         assert conditions[-1]["type"] == "video"
     assert request["_lt0"]["server_variant"] == variant
-    has_pictures = recipe in {"canonical_only", "canonical_plus_video"}
-    assert ("<Picture 1>" in prompt) is has_pictures
-    assert ("<Video 1>" in prompt) is has_video
-    if has_pictures:
-        assert "defined jointly by" in prompt  # Subject 1 = Picture 1+2
-        assert "<Subject 2> is the opponent, defined by <Picture 3>" in prompt
+    # 官方 shot/timeline grammar（英文 + [Shot N] At 00:0X.000）
+    assert "[Shot 1] At 00:00.000," in prompt
+    assert "[Shot 4] At 00:09.000," in prompt
+    assert "white dobok" in prompt
+    if recipe == "prompt_only":
+        # T2VA 三字段 base schema；不得带 Ref2VA 六段或引用标签
+        assert "integrated_multimodal_description:" in prompt
+        assert "overall_soundscape:" in prompt
+        assert "non_diegetic_music:" in prompt
+        assert "subject_definitions:" not in prompt
+        assert "<Subject" not in prompt
+        assert "<Picture" not in prompt and "<Video" not in prompt
+        assert "the protagonist" in prompt and "the opponent" in prompt
     else:
-        assert "<Subject 1> is the protagonist:" in prompt
-    if has_video:
-        assert "Do not require exact source timing" in prompt
-        assert "Transfer from <Video 1>: initiation; action; " \
-               "resolution; reflection" in prompt
-    else:
-        assert "No reference material" in prompt
-    # 时间箱按秒展开（12s → 0-2 / 2-7 / 7-9 / 9-12）
-    assert "0-2s:" in prompt and "9-12s:" in prompt
-    # 相同 brief 字段派生：summary/detailed 骨架不随 recipe 改写
-    assert "12-second taekwondo sparring event clip" in prompt
+        for section in SIX_SECTIONS:
+            assert f"{section}:\n" in prompt, section
+        assert "[reference generation]" in prompt
+        assert "attribute_transfer" in prompt
+        assert "No reference material" not in prompt  # B 矛盾句已除
+        has_pictures = recipe in {"canonical_only",
+                                  "canonical_plus_video"}
+        assert ("<Picture 1>" in prompt) is has_pictures
+        assert ("<Video 1>" in prompt) is has_video
+        if has_pictures:
+            assert "defined jointly by" in prompt
+        else:
+            assert "an adult taekwondo athlete wearing" in prompt
+        if has_video:
+            assert "Do not copy exact cut timing or frames" in prompt
+        else:
+            assert "<Video" not in prompt
+        assert "12-second taekwondo sparring event" in prompt
+
+
+def test_wire_prompt_validator_catches_contract_violations() -> None:
+    brief = _brief()
+    visual_path = str(Path("/ref.mp4").resolve())
+    good = {recipe: build_long_take_request(
+        brief, pack=_pack(), visual_reference={"path": visual_path},
+        recipe=recipe, seed=1, seconds=12, aspect_ratio="3:4")
+        for recipe in RECIPES}
+    for request in good.values():
+        lt0.validate_lt0_wire_prompt(request)  # 全部通过
+    # A 泄漏 Ref2VA 六段 → 拦
+    broken = json.loads(json.dumps(good["prompt_only"]))
+    broken["prompt"] += "\n\nsubject_definitions:\n<Picture 1>"
+    with pytest.raises(LT0Blocked) as excinfo:
+        lt0.validate_lt0_wire_prompt(broken)
+    assert excinfo.value.reason_code == "wire_check_t2va_leak"
+    # B 缺全部 retention marker → 拦
+    broken = json.loads(json.dumps(good["canonical_only"]))
+    for marker in lt0.RETENTION_MARKERS:
+        broken["prompt"] = broken["prompt"].replace(marker, "xx")
+    with pytest.raises(LT0Blocked) as excinfo:
+        lt0.validate_lt0_wire_prompt(broken)
+    assert excinfo.value.reason_code == "wire_check_retention_marker"
+    # D 标签与条件不匹配（删掉一张图）→ 拦
+    broken = json.loads(json.dumps(good["canonical_plus_video"]))
+    broken["conditions"] = broken["conditions"][:3]
+    with pytest.raises(LT0Blocked) as excinfo:
+        lt0.validate_lt0_wire_prompt(broken)
+    assert excinfo.value.reason_code == "wire_check_video_label_mismatch"
 
 
 def test_video_only_without_visual_reference_blocks() -> None:
@@ -443,14 +488,16 @@ def test_plan_only_writes_all_eight_wire_payloads_without_http(
     canonical_d = json.loads(
         (tmp_path / "out" / "takes" / "canonical_plus_video_s1002" /
          "request.json").read_text(encoding="utf-8"))
-    # A：零条件、无 <Picture>/<Video> 引用（t2va）
+    # A：零条件、T2VA 三字段（无 <Picture>/<Video>/<Subject>）
     assert prompt_only["conditions"] == []
+    assert "integrated_multimodal_description:" in prompt_only["prompt"]
     assert "<Picture" not in prompt_only["prompt"]
     assert "<Video" not in prompt_only["prompt"]
-    # D：3 图（无 arena）+ 1 静音视频，标签与条件顺序对应
+    # D：3 图（无 arena）+ 1 静音视频，标签与条件顺序对应 + 混合路由备注
     assert [row["type"] for row in canonical_d["conditions"]] == [
         "image", "image", "image", "video"]
-    assert canonical_d["prompt"].count("<Picture") == 3
+    assert canonical_d["_lt0"]["route_override_note"] == "ref2va_mixed"
+    assert canonical_d["_lt0"]["condition_mix"] == "image+video"
     for take_dir in take_dirs:
         assert (take_dir / "prompt.txt").is_file()
 

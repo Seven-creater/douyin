@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import subprocess
 import tempfile
 from copy import deepcopy
@@ -66,6 +67,41 @@ PHASE_SHOT_MAP: dict[str, list[int]] = {
 PHASE_TIME_BUDGET_S: dict[str, float] = {
     "initiation": 2.0, "action": 5.0, "resolution": 2.0, "reflection": 3.0,
 }
+# 官方 retention markers（Ref2VA Prompt Guide：每个 reference 的保留/迁移关系）。
+RETENTION_MARKERS = ("fully_preserved", "partially_preserved",
+                     "attribute_transfer", "weak_reference")
+# 外观词确定性词表（Prompt Compiler v3：中文证据 → 英文 wire，不调模型）。
+WARDROBE_GLOSSARY: tuple[tuple[str, str], ...] = (
+    ("白色道服", "a white dobok"),
+    ("红色护具", "a red chest protector"),
+    ("红白护具", "red-and-white protective gear"),
+    ("红色头盔", "red headgear"),
+    ("黑色服装", "black clothing"),
+    ("蓝色护具", "a blue chest protector"),
+)
+# wire 时间线模板：phase → 英文 shot 指令（official shot/timeline grammar）。
+PHASE_WIRE_TEMPLATES: dict[str, str] = {
+    "initiation": (
+        "Two taekwondo athletes prepare to begin the match inside the same "
+        "indoor training hall. <Subject 1>, wearing {c0_wardrobe}, takes "
+        "the initiative and begins to attack."),
+    "action": (
+        "<Subject 1> launches a sustained kicking exchange against "
+        "<Subject 2>. The interaction remains physically coherent, with "
+        "<Subject 2> visibly reacting to the impacts."),
+    "resolution": (
+        "<Subject 1> delivers a decisive high kick. <Subject 2> loses "
+        "balance and falls to the mat."),
+    "reflection": (
+        "The exchange has ended. <Subject 1> relaxes, turns away from the "
+        "bout, and gives a light, confident reaction toward the camera."),
+}
+
+
+def _wardrobe_english(*texts: str) -> list[str]:
+    joined = "".join(str(text or "") for text in texts)
+    return [english for chinese, english in WARDROBE_GLOSSARY
+            if chinese in joined]
 
 
 class LT0Blocked(RuntimeError):
@@ -372,31 +408,35 @@ def compile_long_take_brief(content_program: dict[str, Any],
         cursor = span_end
     subject_text = " ".join(
         fact.split("。"))[:400] if fact else "两位跆拳道选手：主角与对手。"
-    # 官方 H3-Context-IR 六段结构（人工审核：Ref2VA Prompt Guide 要求
-    # subject_definitions/summary/retention_analysis/detailed_description/
-    # overall_soundscape/non_diegetic_music；角色引用要写 <Subject N>，
-    # 且同一 Subject 可由多个 reference assets 共同定义）。
+    # Prompt Compiler v3（人工审核 p0520）：subject 定义只写人物外观，不塞
+    # 事件（事件归 detailed_description）；外观词确定性词表抽取，不调模型。
+    all_texts = [fact] + [row for shot in phase_rows
+                          for row in shot["evidence_text"]]
+    c0_wardrobe = _wardrobe_english(*all_texts) or \
+        ["a taekwondo dobok with protective gear"]
+    c1_wardrobe = _wardrobe_english(
+        *[row for row in all_texts if "对手" in row or "蓝" in row or "黑" in row]
+    ) or ["a taekwondo dobok with protective gear"]
     brief = {
         "schema_version": LT0_VERSION, "section_id": section_id,
         "interval": section.get("interval"),
         "reference_specific_fact": fact,
         "subject_textual_definition": subject_text,
+        "subject_wardrobe": {
+            "subject_1": ", ".join(c0_wardrobe),
+            "subject_2": ", ".join(c1_wardrobe)},
         "phases": phase_rows,
         "compressed_phase_lines": compressed,
         "phase_timeboxes": timeboxes,
         "required_continuity": continuity,
         "prompt_fields": {
             "subject_definitions": "{{SUBJECT_DEFINITIONS}}",
-            "summary": ("Generate one coherent {{SECONDS}}-second taekwondo "
-                        "sparring event clip featuring <Subject 1> (the "
-                        "protagonist) and <Subject 2> (the opponent). "
-                        "Preserve both subjects throughout the entire clip."),
-            "retention_analysis": (
-                "Preserve:\n"
-                "- identity, body proportions, uniforms and protective gear "
-                "of both subjects\n"
-                "- the same indoor taekwondo training-hall setting\n"
-                "{{RETENTION_REFERENCE}}"),
+            "summary": ("[reference generation] Generate one coherent "
+                        "{{SECONDS}}-second taekwondo sparring event clip "
+                        "featuring <Subject 1> (the protagonist) and "
+                        "<Subject 2> (the opponent). Preserve both subjects "
+                        "throughout the entire clip."),
+            "retention_analysis": "{{RETENTION_MARKERS}}",
             "detailed_description": "{{TIMEBOXES}}",
             "overall_soundscape": (
                 "Natural ambient sound consistent with the depicted activity "
@@ -421,18 +461,86 @@ def compile_long_take_brief(content_program: dict[str, Any],
     return brief
 
 
-def _wire_prompt(brief: dict[str, Any], *, recipe: str, seconds: float,
-                 pack: dict[str, Any] | None) -> str:
-    """按官方 H3-Context-IR 六段结构组装 wire prompt。
+def _timestamp(seconds: float) -> str:
+    return f"{int(seconds) // 60:02d}:{int(seconds) % 60:02d}.000"
 
-    所有 recipe 共用同一 brief 字段，只有 subject_definitions 与
-    retention 的 reference 段随 conditioning 变化——比较的只有条件本身。
-    <Subject 1> 由 Picture 1+2 共同定义、<Subject 2> 由 Picture 3 定义
-    （官方 Guide：同一 Subject 可由多个 reference assets 联合定义）。
+
+def _wire_shot_lines(brief: dict[str, Any], *, seconds: float,
+                     with_subject_labels: bool) -> list[str]:
+    """官方 shot/timeline grammar：[Shot N] At 00:0X.000 + 英文模板指令。
+
+    模板参数化外观（词表抽取），不机械翻译模型中文证据；中文证据保留在
+    brief JSON 里供审计。
     """
-    textual = str(brief.get("subject_textual_definition") or "")
+    wardrobe = brief.get("subject_wardrobe") or {}
+    lines = []
+    for index, box in enumerate(brief.get("phase_timeboxes") or [], 1):
+        template = PHASE_WIRE_TEMPLATES.get(box["phase"])
+        if template is None:
+            template = (f"The {box['phase']} stage of the event unfolds "
+                        "coherently with both subjects consistent.")
+        line = template.replace("{c0_wardrobe}",
+                                wardrobe.get("subject_1", "a taekwondo dobok"))
+        if not with_subject_labels:
+            line = (line.replace("<Subject 1>", "the protagonist")
+                        .replace("<Subject 2>", "the opponent"))
+        at = _timestamp(box["span_ratio"][0] * seconds)
+        lines.append(f"[Shot {index}] At {at}, {line}")
+    lines.append(str(brief.get("continuity_clause") or ""))
+    return lines
+
+
+def _retention_marker_lines(brief: dict[str, Any], recipe: str) -> list[str]:
+    """官方 retention markers：每个 reference/subject 的保留与迁移关系。"""
     use_canonical = recipe in {"canonical_only", "canonical_plus_video"}
     use_video = recipe in {"video_only", "canonical_plus_video"}
+    wardrobe = brief.get("subject_wardrobe") or {}
+    lines = [
+        "<Subject 1> (throughout): fully_preserved - preserve the "
+        "protagonist's identity, body proportions, and wardrobe "
+        f"({wardrobe.get('subject_1', 'a taekwondo dobok')}).",
+        "<Subject 2> (throughout): fully_preserved - preserve the "
+        "opponent's identity and wardrobe "
+        f"({wardrobe.get('subject_2', 'a taekwondo dobok')}).",
+        "Setting (throughout): fully_preserved - the same indoor taekwondo "
+        "training hall.",
+    ]
+    if use_canonical:
+        lines[1:1] = [
+            "<Picture 1> (source for <Subject 1>): attribute_transfer - "
+            "transfer facial identity and headgear appearance.",
+            "<Picture 2> (source for <Subject 1>): attribute_transfer - "
+            "transfer full-body proportions, uniform and protective gear.",
+            "<Picture 3> (source for <Subject 2>): attribute_transfer - "
+            "transfer appearance, clothing and protective gear.",
+        ]
+    if use_video:
+        lines.append(
+            "<Video 1>: attribute_transfer - transfer the overall event "
+            "progression, attacking-defending relationship, major kicking "
+            "motion, visible outcome, and camera energy. Do not copy exact "
+            "cut timing or frames.")
+    return lines
+
+
+def _wire_prompt(brief: dict[str, Any], *, recipe: str, seconds: float,
+                 pack: dict[str, Any] | None) -> str:
+    """Prompt Compiler v3：A 用官方 T2VA 三字段 base schema；B/C/D 用官方
+    Ref2VA 六段 schema（[reference generation] + retention markers）。
+    实验语义相同，prompt grammar 服从对应 checkpoint 的官方格式。
+    """
+    use_canonical = recipe in {"canonical_only", "canonical_plus_video"}
+    use_video = recipe in {"video_only", "canonical_plus_video"}
+    wardrobe = brief.get("subject_wardrobe") or {}
+    if recipe == "prompt_only":
+        # T2VA 三字段（base schema）：无 subject_definitions/retention。
+        shot_lines = _wire_shot_lines(brief, seconds=seconds,
+                                      with_subject_labels=False)
+        return "\n\n".join([
+            "integrated_multimodal_description:\n" + "\n\n".join(shot_lines),
+            "overall_soundscape:\n" +
+            brief["prompt_fields"]["overall_soundscape"],
+            "non_diegetic_music:\nN/A"])
     subject_lines = []
     if use_canonical:
         subject_lines.append(
@@ -444,35 +552,24 @@ def _wire_prompt(brief: dict[str, Any], *, recipe: str, seconds: float,
             "<Subject 2> is the opponent, defined by <Picture 3>.")
     else:
         subject_lines.append(
-            f"<Subject 1> is the protagonist: {textual}")
+            "<Subject 1> is the protagonist: an adult taekwondo athlete "
+            f"wearing {wardrobe.get('subject_1', 'a taekwondo dobok')}.")
         subject_lines.append(
-            "<Subject 2> is the opponent competing against <Subject 1> "
-            "in the same match.")
+            "<Subject 2> is the opposing taekwondo athlete wearing "
+            f"{wardrobe.get('subject_2', 'a taekwondo dobok')}.")
     if use_video:
         subject_lines.append(
             "<Video 1> provides the overall temporal structure, sparring "
             "interaction, major motion progression, and camera energy of "
             "the reference event.")
-    retention_reference = (
-        "Transfer from <Video 1>: " + "; ".join(
-            row["phase"] for row in brief.get("phases") or []) +
-        ".\nDo not require exact source timing, exact source cuts, or "
-        "frame-by-frame reproduction."
-        if use_video else
-        "No reference material; rely on the textual description alone.")
-    timebox_lines = []
-    for box in brief.get("phase_timeboxes") or []:
-        start = box["span_ratio"][0] * seconds
-        end = box["span_ratio"][1] * seconds
-        timebox_lines.append(f"{start:.0f}-{end:.0f}s:\n{box['line']}")
-    timebox_lines.append(str(brief.get("continuity_clause") or ""))
     fields = dict(brief["prompt_fields"])
     fields["subject_definitions"] = "\n".join(subject_lines)
-    fields["retention_analysis"] = fields["retention_analysis"].replace(
-        "{{RETENTION_REFERENCE}}", retention_reference)
+    fields["retention_analysis"] = "\n".join(
+        _retention_marker_lines(brief, recipe))
     fields["summary"] = fields["summary"].replace(
         "{{SECONDS}}", f"{seconds:g}")
-    fields["detailed_description"] = "\n\n".join(timebox_lines)
+    fields["detailed_description"] = "\n\n".join(
+        _wire_shot_lines(brief, seconds=seconds, with_subject_labels=True))
     sections = [f"{key}:\n{fields[key]}" for key in (
         "subject_definitions", "summary", "retention_analysis",
         "detailed_description", "overall_soundscape", "non_diegetic_music")]
@@ -514,7 +611,59 @@ def build_long_take_request(brief: dict[str, Any], *,
                        "seconds": float(seconds), "version": LT0_VERSION,
                        "server_variant": "fl2va" if not references
                        else "ref2va"}
+    types = {row.get("type") for row in references}
+    if len(types) > 1:
+        # 混合条件路由备注（v9g route_h3_mode 取排序首位的 capability 名，
+        # 只反映单类；审计按条件组合重标）。
+        request["_lt0"]["condition_mix"] = \
+            "+".join(sorted(str(item) for item in types))
+        request["_lt0"]["route_override_note"] = "ref2va_mixed"
     return request
+
+
+def validate_lt0_wire_prompt(request: dict[str, Any]) -> None:
+    """执行前 sanity check（人工审核 p0520 定稿，替代下一轮 plan 人工审）：
+
+    A：task=t2va、零条件、T2VA 三字段 schema（不得出现 Ref2VA 六段）；
+    B/C/D：task=ref2va、六段齐全、summary 含 [reference generation]、
+    retention 至少一个合法 marker、<Picture>/<Video> 标签与条件顺序匹配。
+    """
+    recipe = str((request.get("_lt0") or {}).get("recipe") or "")
+    prompt = str(request.get("prompt") or "")
+    conditions = request.get("conditions") or []
+    if recipe == "prompt_only":
+        if request.get("task") != "t2va" or conditions:
+            raise LT0Blocked("plan", "wire_check_t2va_contract", recipe)
+        if "integrated_multimodal_description:" not in prompt:
+            raise LT0Blocked("plan", "wire_check_t2va_schema", recipe)
+        if "subject_definitions:" in prompt or "<Picture" in prompt or \
+                "<Video" in prompt:
+            raise LT0Blocked("plan", "wire_check_t2va_leak", recipe)
+        return
+    if request.get("task") != "ref2va" or not conditions:
+        raise LT0Blocked("plan", "wire_check_ref2va_contract", recipe)
+    for section in ("subject_definitions:", "summary:", "retention_analysis:",
+                    "detailed_description:", "overall_soundscape:",
+                    "non_diegetic_music:"):
+        if section not in prompt:
+            raise LT0Blocked("plan", "wire_check_section_missing",
+                             f"{recipe}:{section}")
+    if "[reference generation]" not in prompt:
+        raise LT0Blocked("plan", "wire_check_summary_marker", recipe)
+    if not any(marker in prompt for marker in RETENTION_MARKERS):
+        raise LT0Blocked("plan", "wire_check_retention_marker", recipe)
+    if "No reference material" in prompt:
+        raise LT0Blocked("plan", "wire_check_contradictory_retention", recipe)
+    picture_labels = sorted({
+        int(label) for label in re.findall(r"<Picture (\d+)>", prompt)})
+    video_labels = sorted({
+        int(label) for label in re.findall(r"<Video (\d+)>", prompt)})
+    image_count = sum(1 for row in conditions if row.get("type") == "image")
+    video_count = sum(1 for row in conditions if row.get("type") == "video")
+    if picture_labels != list(range(1, image_count + 1)):
+        raise LT0Blocked("plan", "wire_check_picture_label_mismatch", recipe)
+    if video_labels != list(range(1, video_count + 1)):
+        raise LT0Blocked("plan", "wire_check_video_label_mismatch", recipe)
 
 
 LONG_TAKE_OBSERVE_PROMPT = """只观察这段视频画面本身可见的内容，不要推断生成
@@ -810,6 +959,7 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                 brief, pack=pack, visual_reference=visual_reference,
                 recipe=recipe, seed=seed, seconds=seconds,
                 aspect_ratio=aspect_ratio)
+            validate_lt0_wire_prompt(request)
             jobs.append({"take_id": take_id, "recipe": recipe,
                          "seed": seed, "request": request})
     plan = {"schema_version": LT0_VERSION, "execute_authorized": bool(execute),
