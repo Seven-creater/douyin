@@ -355,8 +355,16 @@ def build_parser() -> argparse.ArgumentParser:
     long_take.add_argument("--ref2va-endpoint",
                            default="http://127.0.0.1:30011")
     long_take.add_argument("--fl2va-endpoint",
-                           default="http://127.0.0.1:30010",
-                           help="prompt_only (t2va) baseline server")
+                           default="http://127.0.0.1:30011",
+                           help="unified diffusers serve handles t2va too; "
+                                "set differently only for sglang backends")
+    long_take.add_argument("--h3-backend", default="diffusers",
+                           choices=("diffusers", "sglang"),
+                           help="diffusers unified serve (driver-safe) or "
+                                "sglang (needs cu13 driver >=580)")
+    long_take.add_argument("--h3-python-bin", default=None,
+                           help="python for the diffusers serve (default: "
+                                "current interpreter)")
     long_take.add_argument("--gpu-set", default="0,1,6,7")
     long_take.add_argument("--gpu-pairs", default="0,1;6,7",
                            help="Omni observation pairs (H3 stopped first)")
@@ -2249,6 +2257,7 @@ def _long_take_lt0(args, cfg) -> dict:
         gpu_set=args.gpu_set, seconds=float(args.seconds), seeds=seeds,
         pack_picks=picks, gpu_pairs=args.gpu_pairs,
         manage_server=not args.no_manage_server,
+        h3_backend=args.h3_backend, h3_python_bin=args.h3_python_bin,
         ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
 
 

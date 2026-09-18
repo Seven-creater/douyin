@@ -22,6 +22,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 import tempfile
 from copy import deepcopy
 from pathlib import Path
@@ -848,24 +849,38 @@ def _endpoint_reachable(endpoint: str, *, timeout_s: float = 5.0) -> bool:
         return False
 
 
-def _ensure_h3_server(endpoint: str, *, variant: str, manage_server: bool,
-                      port: int, repo_root: Path, log_path: Path
+def _ensure_h3_server(endpoint: str, *, backend: str, variant: str,
+                      manage_server: bool, port: int, repo_root: Path,
+                      log_path: Path, gpu_set: str = "0,1,6,7",
+                      python_bin: str | None = None
                       ) -> subprocess.Popen | None:
     """H3 与 Omni 错峰占同一组卡：必要时由实验自起 server（记录 owned
-    进程组，任务后回收）。variant ∈ fl2va|ref2va——A 无 references 是
-    t2va 任务，必须跑 fl2va server；B/C/D 才是 ref2va（人工审核 p0510）。"""
+    进程组，任务后回收）。
+
+    backend=sglang：serve_h3.sh variant fl2va|ref2va（需驱动 ≥580 的 cu13
+    栈，本机驱动 575 不可用）；backend=diffusers：统一图 serve
+    （t2va/ref2va 同服，官方 /v1/videos 契约）——LT0 现行后端。"""
     if _endpoint_reachable(endpoint):
         return None
     if not manage_server:
         raise LT0Blocked("h3", "h3_endpoint_unreachable", endpoint)
-    script = repo_root / "scripts" / "v9g" / "serve_h3.sh"
-    if not script.is_file():
-        raise LT0Blocked("h3", "serve_script_missing", str(script))
+    import os
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = open(log_path, "ab")
+    if backend == "diffusers":
+        command = [python_bin or sys.executable, "-m",
+                   "src.generation.minimax_h3_ref2va_serve",
+                   "--port", str(port)]
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu_set}
+    else:
+        script = repo_root / "scripts" / "v9g" / "serve_h3.sh"
+        if not script.is_file():
+            raise LT0Blocked("h3", "serve_script_missing", str(script))
+        command = ["bash", str(script), variant, str(port)]
+        env = None
     process = subprocess.Popen(
-        ["bash", str(script), variant, str(port)], cwd=str(repo_root),
-        stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        command, cwd=str(repo_root), stdout=log, stderr=subprocess.STDOUT,
+        start_new_session=True, env=env)
     import time
     deadline = time.monotonic() + 3600.0
     while time.monotonic() < deadline:
@@ -912,13 +927,15 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                        reference: Path,
                        plan_only: bool = False, execute: bool = False,
                        ref2va_endpoint: str = "http://127.0.0.1:30011",
-                       fl2va_endpoint: str = "http://127.0.0.1:30010",
+                       fl2va_endpoint: str = "http://127.0.0.1:30011",
                        gpu_set: str = "0,1,6,7",
                        seconds: float = DEFAULT_SECONDS,
                        seeds: tuple[int, ...] = DEFAULT_SEEDS,
                        pack_picks: dict[str, float] | None = None,
                        gpu_pairs: str = "0,1;6,7",
                        manage_server: bool = True,
+                       h3_backend: str = "diffusers",
+                       h3_python_bin: str | None = None,
                        ffmpeg_bin: str = "ffmpeg") -> dict[str, Any]:
     """三段顺序 GPU 占用：CPU 计划（--plan-only 止于此）→ H3 生成 → Omni
     盲观察+对比 → lt0_report.json。LT0 为能力实验：P0 冻结与正式 V9-G
@@ -1006,12 +1023,13 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
     take_results = []
 
     def _run_group(group_jobs: list[dict[str, Any]], endpoint: str,
-                   variant: str) -> None:
+                   variant: str, *, stop_after: bool = True) -> None:
         port = endpoint.rsplit(":", 1)[-1].split("/")[0]
         server_process = _ensure_h3_server(
-            endpoint, variant=variant, manage_server=manage_server,
-            port=int(port), repo_root=repo_root,
-            log_path=output_dir / f"h3_server_{variant}.log")
+            endpoint, backend=h3_backend, variant=variant,
+            manage_server=manage_server, port=int(port), repo_root=repo_root,
+            log_path=output_dir / f"h3_server_{variant}.log",
+            gpu_set=gpu_set, python_bin=h3_python_bin)
         client = SGLangH3Client(endpoint)
         try:
             for job in group_jobs:
@@ -1044,12 +1062,18 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                 _write_json(job_dir / "job_state.json", state)
                 take_results.append(state)
         finally:
-            _stop_owned_server(server_process)
+            if stop_after:
+                _stop_owned_server(server_process)
 
-    _run_group([job for job in jobs if job["recipe"] == "prompt_only"],
-               fl2va_endpoint, "fl2va")
-    _run_group([job for job in jobs if job["recipe"] != "prompt_only"],
-               ref2va_endpoint, "ref2va")
+    if fl2va_endpoint.rstrip("/") == ref2va_endpoint.rstrip("/"):
+        # 统一 diffusers serve 同时服务 t2va 与 ref2va：单进程一次跑完，
+        # 不在两组之间重启（模型加载 ~10 分钟）。
+        _run_group(jobs, ref2va_endpoint, "unified", stop_after=True)
+    else:
+        _run_group([job for job in jobs if job["recipe"] == "prompt_only"],
+                   fl2va_endpoint, "fl2va")
+        _run_group([job for job in jobs if job["recipe"] != "prompt_only"],
+                   ref2va_endpoint, "ref2va")
 
     # ---- Omni 阶段：盲观察 + 身份锚比对 + 三分离对比 ----
     omni_cfg = (getattr(cfg, "perception", None) or {}).get("omni") or {}
