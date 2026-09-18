@@ -701,10 +701,8 @@ def _section_evidence(ledger: dict[str, Any], interval: list[float]) -> dict[str
     }
 
 
-def _observe_section(reference: Path, section_id: str, interval: list[float],
-                     ledger: dict[str, Any], output_dir: Path, *, runner,
-                     raw_name: str | None = None) -> dict[str, Any]:
-    """Watch one Section interval in source media; shared by first pass and reconciliation."""
+def _section_watch_request(section_id: str, interval: list[float],
+                           ledger: dict[str, Any]) -> dict[str, Any]:
     evidence = _section_evidence(ledger, interval)
     prompt = SECTION_WATCH_PROMPT + json.dumps({
         "section_id": section_id,
@@ -712,14 +710,15 @@ def _observe_section(reference: Path, section_id: str, interval: list[float],
         "cut_candidates_to_assess": [
             row["boundary_id"] for row in evidence["cut_candidates"]],
     }, ensure_ascii=False, separators=(",", ":"))
-    answer = runner.watch(
-        Path(reference), prompt, start_s=interval[0], end_s=interval[1],
-        clip_dir=output_dir / "section_clips" / _safe_id(section_id),
-        duration_s=interval[1] - interval[0], fps=4.0,
-        use_audio_in_video=True, max_new_tokens=4096,
-        stop_after_json_object=True)
-    raw = _answer_text(answer)
-    raw_name = raw_name or f"section_{_safe_id(section_id)}.txt"
+    return {"prompt": prompt, "evidence": evidence}
+
+
+def _validate_section_answer(raw: str, answer: Any, section_id: str,
+                             interval: list[float],
+                             evidence: dict[str, Any],
+                             ledger: dict[str, Any], output_dir: Path,
+                             *, raw_name: str, prompt: str) -> dict[str, Any]:
+    """校验一段 Section 复看应答（单发与批量路径共用）。"""
     raw_path = output_dir / "raw_responses" / raw_name
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_text(raw, encoding="utf-8")
@@ -738,16 +737,16 @@ def _observe_section(reference: Path, section_id: str, interval: list[float],
                 not str(shot.get("edit_function") or "").strip() or
                 shot.get("event_relation") not in {
                     "same_event", "different_event", "uncertain"}):
-            raise V9Blocked("section_watch", "shot_explanation_incomplete", section_id)
+            raise V9Blocked("section_watch", "shot_explanation_incomplete",
+                            section_id)
     valid_cuts = {row["boundary_id"] for row in evidence["cut_candidates"]}
     for assessment in value.get("cut_assessments") or []:
         if (assessment.get("boundary_id") not in valid_cuts or
                 assessment.get("status") not in {"real_cut", "not_cut", "uncertain"} or
                 not str(assessment.get("reason") or "").strip()):
             raise V9Blocked("section_watch", "cut_assessment_invalid", section_id)
-    # P0.3：每个 Section 内部候选切点必须逐一交作业；整段 watch 吞不下的
-    # 密集切点记录在案，由 _complete_dense_cut_assessments 逐对帧补判。
-    assessed = {str(row.get("boundary_id")) for row in value.get("cut_assessments") or []}
+    assessed = {str(row.get("boundary_id"))
+                for row in value.get("cut_assessments") or []}
     missing_cuts = sorted(valid_cuts - assessed)
     if missing_cuts:
         value["pending_cut_assessments"] = missing_cuts
@@ -759,6 +758,24 @@ def _observe_section(reference: Path, section_id: str, interval: list[float],
         "model_audit": _answer_audit(answer),
     })
     return value
+
+
+def _observe_section(reference: Path, section_id: str, interval: list[float],
+                     ledger: dict[str, Any], output_dir: Path, *, runner,
+                     raw_name: str | None = None) -> dict[str, Any]:
+    """Watch one Section interval in source media; shared by first pass and reconciliation."""
+    request = _section_watch_request(section_id, interval, ledger)
+    answer = runner.watch(
+        Path(reference), request["prompt"], start_s=interval[0], end_s=interval[1],
+        clip_dir=output_dir / "section_clips" / _safe_id(section_id),
+        duration_s=interval[1] - interval[0], fps=4.0,
+        use_audio_in_video=True, max_new_tokens=4096,
+        stop_after_json_object=True)
+    return _validate_section_answer(
+        _answer_text(answer), answer, section_id, interval, request["evidence"],
+        ledger, output_dir,
+        raw_name=raw_name or f"section_{_safe_id(section_id)}.txt",
+        prompt=request["prompt"])
 
 
 DENSE_CUT_PROMPT = """每两帧一组（before/after）是一个候选切点两侧的画面。
@@ -833,7 +850,10 @@ def build_section_observations(
         reference: Path, draft: dict[str, Any], ledger: dict[str, Any],
         output_dir: Path, *, runner, ffmpeg_bin: str = "ffmpeg",
         force: bool = False) -> dict[str, Any]:
-    """Rewatch each draft Section in source media before compiling either Program."""
+    """Rewatch each draft Section in source media before compiling either Program.
+
+    多 worker 池可用时整段复看并行下发（watch_many），密集切点补判也批量并行。
+    """
     output_dir = Path(output_dir)
     output_path = output_dir / "section_observations.json"
     sections = draft.get("section_drafts") or []
@@ -847,22 +867,119 @@ def build_section_observations(
         if (cached.get("reference_sha256") == source_hash and
                 cached.get("input_sha256") == input_hash):
             return cached
-    rows = []
+    specs = []
     for section in sections:
         section_id = str(section.get("section_id") or "")
         interval = section.get("interval")
         if not section_id or not isinstance(interval, list) or len(interval) != 2:
             raise V9Blocked("section_watch", "section_interval_missing", section_id)
-        rows.append(_complete_dense_cut_assessments(
-            Path(reference), ledger,
-            _observe_section(Path(reference), section_id, interval, ledger,
-                             output_dir, runner=runner),
-            output_dir, runner=runner, ffmpeg_bin=ffmpeg_bin))
+        specs.append((section_id, [float(interval[0]), float(interval[1])]))
+    requests = {section_id: _section_watch_request(section_id, interval, ledger)
+                for section_id, interval in specs}
+    rows: list[dict[str, Any]] = []
+    if hasattr(runner, "watch_many") and len(specs) > 1:
+        watch_requests = [{
+            "video_path": str(Path(reference)),
+            "prompt": requests[section_id]["prompt"],
+            "kwargs": {
+                "start_s": interval[0], "end_s": interval[1],
+                "clip_dir": output_dir / "section_clips" / _safe_id(section_id),
+                "duration_s": interval[1] - interval[0], "fps": 4.0,
+                "use_audio_in_video": True, "max_new_tokens": 4096,
+                "stop_after_json_object": True},
+        } for section_id, interval in specs]
+        answers = runner.watch_many(watch_requests)
+        for (section_id, interval), answer in zip(specs, answers):
+            rows.append(_validate_section_answer(
+                _answer_text(answer), answer, section_id, interval,
+                requests[section_id]["evidence"], ledger, output_dir,
+                raw_name=f"section_{_safe_id(section_id)}.txt",
+                prompt=requests[section_id]["prompt"]))
+    else:
+        for section_id, interval in specs:
+            rows.append(_observe_section(Path(reference), section_id, interval,
+                                         ledger, output_dir, runner=runner))
+    # 密集切点补判：跨 Section 汇总后一次批量下发（可用池时）。
+    pending = {str(row.get("section_id")): list(row.get("pending_cut_assessments") or [])
+               for row in rows if row.get("pending_cut_assessments")}
+    if pending:
+        boundary_pts = _boundary_map(ledger)
+        duration = float(ledger["reference"]["duration_s"])
+        batch_requests = []
+        batch_meta = []
+        for row in rows:
+            section_id = str(row.get("section_id"))
+            for batch_index in range(0, len(pending.get(section_id) or []), 3):
+                batch = pending[section_id][batch_index:batch_index + 3]
+                images = []
+                for boundary_id in batch:
+                    pair_dir = (output_dir / "dense_cut_frames" /
+                                _safe_id(section_id) / _safe_id(boundary_id))
+                    pair_dir.mkdir(parents=True, exist_ok=True)
+                    for tag, offset in (("before", -0.25), ("after", 0.25)):
+                        timestamp = min(max(
+                            boundary_pts[boundary_id] + offset, 0.02), duration - 0.02)
+                        jpg = pair_dir / f"{tag}.jpg"
+                        if not jpg.is_file():
+                            common.run_ffmpeg(ffmpeg_bin, [
+                                "-y", "-ss", f"{timestamp:.3f}", "-i",
+                                str(reference), "-frames:v", "1", "-q:v", "3",
+                                str(jpg)], timeout_s=60)
+                        images.append(jpg)
+                payload = [{"boundary_id": bid} for bid in batch]
+                batch_requests.append({
+                    "image_paths": images,
+                    "prompt": DENSE_CUT_PROMPT + json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")),
+                    "kwargs": {"stop_after_json_object": True,
+                               "max_new_tokens": 1024}})
+                batch_meta.append((row, section_id, batch, batch_index))
+        if hasattr(runner, "inspect_media_many") and len(batch_requests) > 1:
+            answers = runner.inspect_media_many(batch_requests)
+        else:
+            answers = [runner.inspect_media(prompt=item["prompt"],
+                                            image_paths=item["image_paths"],
+                                            **item["kwargs"])
+                       for item in batch_requests]
+        for (row, section_id, batch, batch_index), answer in zip(
+                batch_meta, answers):
+            _merge_dense_cut_answer(reference, row, section_id, batch,
+                                    batch_index, _answer_text(answer), answer,
+                                    output_dir)
+        for row in rows:
+            row.pop("pending_cut_assessments", None)
     result = {"schema_version": SECTION_OBSERVATIONS_VERSION,
               "reference_sha256": source_hash, "input_sha256": input_hash,
               "sections": rows}
     _write_json(output_path, result)
     return result
+
+
+def _merge_dense_cut_answer(reference: Path, row: dict[str, Any],
+                            section_id: str, batch: list[str],
+                            batch_index: int, raw: str, answer: Any,
+                            output_dir: Path) -> None:
+    raw_path = (output_dir / "raw_responses" /
+                f"dense_cuts_{_safe_id(section_id)}_{batch_index}.txt")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text(raw, encoding="utf-8")
+    value = _parse_one_object(raw, stage="section_watch")
+    covered = set()
+    for assessment in value.get("assessments") or []:
+        boundary_id = str(assessment.get("boundary_id") or "")
+        if (boundary_id not in batch or
+                assessment.get("status") not in {
+                    "real_cut", "not_cut", "uncertain"} or
+                not str(assessment.get("reason") or "").strip()):
+            continue
+        row.setdefault("cut_assessments", []).append(
+            {"boundary_id": boundary_id,
+             "status": assessment["status"],
+             "reason": f"[dense-frame-check] {assessment['reason']}"})
+        covered.add(boundary_id)
+    if set(batch) - covered:
+        raise V9Blocked("section_watch", "cut_assessment_missing",
+                        f"{section_id}:{sorted(set(batch) - covered)}")
 
 
 def normalize_section_shots(section_observations: dict[str, Any],
