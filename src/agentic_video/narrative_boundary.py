@@ -40,20 +40,30 @@ NARRATIVE_BOUNDARY_PROMPT = """判断候选边界两侧的叙事功能是否变�
 
 判定规则：
 1. 事件的完整闭环（准备→对抗→结果→赛后反应）属于同一功能；一个事件的
-   直接后果与反应仍是原功能的收尾，不是新功能。
+   直接后果与反应仍是原功能的收尾，不是新功能。**若两侧仍属同一完整事件
+   （same_event=true），边界必不成立**——闭环内的庆祝/收束是 phase。
 2. 新功能必须开启新的表达目的（换论证角色），不是给旧目的换情绪色彩。
 3. punchline_payoff 只用于**片尾**的打趣/点题/收束段；事件刚结束时的
    情绪反应（微笑、庆祝、面对镜头）仍是该事件功能的收尾，不是
    punchline_payoff。
-3. 只输出一个 JSON 对象：
+4. 只输出一个 JSON 对象：
 {"before_function":"从功能表中选一个","after_function":"从功能表中选一个",
  "same_event":true,"reason":"具体描述两侧画面与功能归属的依据"}
 same_event 记录两侧是否同一独立发生（供下游剪辑模式派生用，不影响本判定）。
 reason 必须具体到画面内容，不得输出占位文字。输入："""
 
 
-def decide_narrative_boundary(before_function: Any, after_function: Any) -> bool:
-    """确定性终判：边界成立 ⟺ 两侧叙事功能枚举不同（用户伪代码原样）。"""
+def decide_narrative_boundary(before_function: Any, after_function: Any,
+                              same_event: Any = False) -> bool:
+    """确定性终判：边界成立 ⟺ 功能枚举不同 **且** 两侧不是同一完整事件。
+
+    p04b 实测：模型可把事件收尾庆祝选成 punchline_payoff（功能看似变化），
+    但它同时如实报告 same_event=true（完整闭环未中断）。闭环内的收尾是
+    phase 不是 Section，因此 same_event=true 一票否决（用户判据：完整事件
+    setup/attack→result→reaction 必须同段）。
+    """
+    if same_event is True:
+        return False
     return str(before_function) != str(after_function)
 
 

@@ -1201,9 +1201,11 @@ def reconcile_section_boundaries(
                 slug=_safe_id(f"{previous_row.get('section_id')}_"
                               f"{next_row.get('section_id')}"),
                 global_outline=global_outline)
-            # P0.4：LLM 只从有限功能表选枚举；keep/move = 枚举不等比较。
+            # P0.4：LLM 只从有限功能表选枚举；keep/move = 枚举不等比较 +
+            # same_event 闭环否决（同一完整事件的收尾庆祝是 phase 不是 Section）。
             boundary_needed = narrative_boundary.decide_narrative_boundary(
-                verdict.get("before_function"), verdict.get("after_function"))
+                verdict.get("before_function"), verdict.get("after_function"),
+                verdict.get("same_event"))
             attempts.append({
                 "boundary_id": current_id,
                 "method": ("frame_check+same_event_signal" if head_same_event
@@ -2088,6 +2090,25 @@ def build_reference_content_program(
         stage="content_program")
     _attach_intervals(value, ledger, keys=("meaningful_units", "sections"),
                       stage="content_program")
+    # P0.4：continuity_basis 引用维度漏填 evidence_ids 时回填 Section 自身
+    # 引用的观察证据（同源弱链接，记录审计），不再赌修复轮能补上。
+    known_ids = {str(row.get("evidence_id")) for row in
+                 draft.get("observations") or [] if row.get("evidence_id")}
+    evidence_backfills: list[dict[str, Any]] = []
+    for section in value.get("sections") or []:
+        section_ids = [str(item) for item in section.get("evidence_ids") or []
+                       if str(item) in known_ids]
+        for dimension, support in (section.get("continuity_basis") or {}).items():
+            level = (section.get("continuity") or {}).get(dimension)
+            if (level in {"required", "preferred"} and
+                    not (support.get("evidence_ids") or []) and section_ids):
+                support["evidence_ids"] = list(section_ids)
+                evidence_backfills.append({
+                    "section_id": section.get("section_id"),
+                    "dimension": dimension,
+                    "basis": "section_level_evidence"})
+    if evidence_backfills:
+        value["programmatic_evidence_backfill"] = evidence_backfills
     value.update({
         "schema_version": CONTENT_VERSION,
         "input_sha256": input_hash,

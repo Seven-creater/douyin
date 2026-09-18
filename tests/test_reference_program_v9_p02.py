@@ -136,7 +136,7 @@ def _full_watch(section_id: str, boundary_names: list[str],
 
 def _narrative_verdict(*, before_function: str = "counter_evidence",
                        after_function: str | None = None,
-                       same_event: bool = True,
+                       same_event: bool = False,
                        reason: str = "边界前后画面承担的论证角色发生了切换"
                        ) -> dict:
     """P0.4 叙事功能边界判定的合法输出形状（LLM 只选枚举，代码比较）。"""
@@ -149,16 +149,20 @@ def _narrative_verdict(*, before_function: str = "counter_evidence",
 
 
 def test_narrative_function_decision_matches_canonical_boundaries() -> None:
-    """P0.4 用户规则：边界 ⟺ 有限功能表枚举不同（纯字符串比较）。"""
+    """P0.4 用户规则：边界 ⟺ 功能枚举不同且非同一完整事件。"""
     from src.agentic_video.narrative_boundary import decide_narrative_boundary
 
-    # 5.1s：提出命题 → 用行动反驳
+    # 5.1s：提出命题 → 用行动反驳（不同事件）
     assert decide_narrative_boundary("problem_statement",
                                      "counter_evidence") is True
-    # 13.0s：比赛的对抗与赛后反应收尾仍都是反证（同功能 → 不是边界）
+    # 13.0s（p04b 实测）：模型把收尾庆祝选成 punchline_payoff，但如实报告
+    # same_event=true（完整闭环未中断）→ 一票否决，不切
+    assert decide_narrative_boundary("counter_evidence", "punchline_payoff",
+                                     same_event=True) is False
+    # 同功能 → 不切
     assert decide_narrative_boundary("counter_evidence",
                                      "counter_evidence") is False
-    # 16.7s：反证 → 并列证据扩展
+    # 16.7s：反证 → 并列证据扩展（新事件）
     assert decide_narrative_boundary("counter_evidence",
                                      "evidence_expansion") is True
 
@@ -405,8 +409,9 @@ def test_contract_repair_round_reasks_programs_once(
 
     def _broken_content() -> dict:
         value = _content()
+        # 未知证据 id：不可被 section 级回填自动治愈，必须走修复轮
         value["sections"][0]["continuity_basis"]["spatial_orientation"] = {
-            "reason": "orientation visible", "evidence_ids": []}
+            "reason": "orientation visible", "evidence_ids": ["ev_nope"]}
         return value
 
     video = tmp_path / "reference.mp4"
@@ -585,6 +590,29 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     assert op_align["from"] == "text_led_montage"
     assert op_align["to"] == "hard_cut"
     assert edit["operations"][0]["operation_type"] == "hard_cut"
+
+
+def test_continuity_basis_evidence_backfill_from_section_evidence(
+        tmp_path: Path) -> None:
+    """P0.4：continuity_basis 漏填 evidence_ids → 确定性回填 Section 级证据。"""
+    from src.agentic_video.reference_program_v9 import (
+        build_reference_content_program)
+
+    broken = _content()
+    for dimension, support in broken["sections"][0]["continuity_basis"].items():
+        support["evidence_ids"] = []
+    resolved = {"questions": [], "probe_history": [],
+                "required_unresolved_ids": []}
+    value = build_reference_content_program(
+        _draft(), resolved, _ledger(), tmp_path, runner=FakeRunner(ask=[broken]))
+    rows = value.get("programmatic_evidence_backfill") or []
+    assert rows and all(row["basis"] == "section_level_evidence"
+                        for row in rows)
+    section = value["sections"][0]
+    for dimension, support in section["continuity_basis"].items():
+        if (section["continuity"] or {}).get(dimension) in {
+                "required", "preferred"}:
+            assert support["evidence_ids"], dimension
 
 
 def test_narrative_usability_block_gates_p0_exit_criteria(
@@ -769,13 +797,13 @@ def test_aftermath_and_parallel_evidence_do_not_split_section(
                _full_watch("proofs", ["cut_003", "video_end"])],
         inspect=[
             _narrative_verdict(before_function="counter_evidence",
-                               after_function="counter_evidence",
-                               same_event=False,
-                               reason="事件收尾反应与并列新证据，论证角色未变"),
+                               after_function="punchline_payoff",
+                               same_event=True,
+                               reason="庆祝微笑被选成收尾，但事件完整闭环未中断"),
             _narrative_verdict(before_function="counter_evidence",
                                after_function="evidence_expansion",
                                same_event=False,
-                               reason="证据罗列结束，进入收尾扩展功能")])
+                               reason="照片类并列证据开启新的表达目的")])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
