@@ -334,9 +334,19 @@ def test_global_watch_uses_four_fps_without_flashvid_or_native_frame_batch(tmp_p
 
 
 def test_production_watch_prompts_do_not_spoil_reference_answer() -> None:
-    for prompt in (GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT):
-        for spoiler in ("没有双手", "跆拳道", "比赛", "能力展示", "全国冠军"):
-            assert spoiler not in prompt
+    from src.agentic_video.reference_program_v9 import (
+        BOUNDARY_FRAME_CHECK_PROMPT, DENSE_CUT_PROMPT, PER_SHOT_PROMPT,
+        CONFLICT_GATE_PROMPT, NEUTRAL_EVENT_RECHECK_PROMPT,
+        CONFLICT_RESOLUTION_PROMPT, REPAIR_HEADER, PROBE_PROMPT)
+    prompts = (GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT,
+               CONTENT_PROGRAM_PROMPT, EDIT_PROGRAM_PROMPT,
+               BOUNDARY_FRAME_CHECK_PROMPT, DENSE_CUT_PROMPT, PER_SHOT_PROMPT,
+               CONFLICT_GATE_PROMPT, NEUTRAL_EVENT_RECHECK_PROMPT,
+               CONFLICT_RESOLUTION_PROMPT, REPAIR_HEADER, PROBE_PROMPT)
+    for prompt in prompts:
+        for spoiler in ("没有双手", "跆拳道", "比赛", "能力展示", "全国冠军",
+                        "废人", "剪脚指甲"):
+            assert spoiler not in prompt, (spoiler, prompt[:60])
 
 
 def test_edit_model_does_not_generate_deterministic_style_statistics() -> None:

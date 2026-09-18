@@ -448,11 +448,15 @@ def test_same_event_head_shot_forces_boundary_move_without_ask(
         watch=[_full_watch("competition", ["video_start", "cut_001", "cut_002",
                                            "cut_003"]),
                _full_watch("proofs", ["cut_003", "video_end"])],
-        inspect=[{"event_continuity": False,
-                  "rhetorical_function_continuity": False,
-                  "audience_cognition_continuity": False,
-                  "semantic_change": True,
-                  "reason": "照片蒙太奇开始"}])
+        inspect=[
+            {"event_continuity": True, "rhetorical_function_continuity": True,
+             "audience_cognition_continuity": True, "semantic_change": False,
+             "reason": "同属准备阶段"},
+            {"event_continuity": False,
+             "rhetorical_function_continuity": False,
+             "audience_cognition_continuity": False,
+             "semantic_change": True,
+             "reason": "照片蒙太奇开始"}])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
@@ -468,8 +472,9 @@ def test_same_event_head_shot_forces_boundary_move_without_ask(
     record = result["boundaries"][0]
     assert record["action"] == "moved"
     assert record["moved_to"] == "cut_003"
-    assert record["attempts"][0]["method"] == "same_event_rule"
-    assert record["attempts"][1]["method"] == "frame_check"
+    assert record["attempts"][0]["method"] == "frame_check+same_event_signal"
+    assert record["attempts"][0]["same_event_signal"] is True
+    assert record["attempts"][1]["semantic_change"] is True
     assert not runner.ask_calls
 
 
@@ -498,6 +503,7 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     raw_edit = _edit()
     # 模型错误一：多镜头段标 continuous_clip；错误二：event_compression 缺模式常量
     raw_edit["editorial_patterns"][0]["composition_mode"] = "continuous_clip"
+    raw_edit["editorial_patterns"][0]["snippet_count_range"] = [1, 1]
     raw_edit["editorial_patterns"][1]["composition_mode"] = "event_compression_montage"
     raw_edit["editorial_patterns"][1]["source_continuity"] = "continuous_required"
     raw_edit["editorial_patterns"][1]["ordering_constraint"] = "source_order"
@@ -514,6 +520,8 @@ def test_edit_builder_aligns_mode_constants_deterministically(
         section_observations=bank, normalization=normalization, force=True)
     first = edit["editorial_patterns"][0]
     assert first["composition_mode"] == "multi_angle_action"
+    # 模式被矫正为蒙太奇类后，snippet 下限必须同步对齐（顺序修复的锚定）
+    assert first["snippet_count_range"] == [2, 2]
     second = edit["editorial_patterns"][1]
     assert second["composition_mode"] == "event_compression_montage"
     assert second["source_continuity"] == "non_contiguous_allowed"
@@ -634,3 +642,27 @@ def test_dense_cut_completion_fills_missing_assessments(
             tmp_path / "reference.mp4", _cut_ledger(), bank["sections"][0],
             tmp_path, runner=runner2, ffmpeg_bin="ffmpeg")
     assert excinfo.value.reason_code == "cut_assessment_missing"
+
+
+def test_hook_takeaway_must_present_quoted_proposition(tmp_path: Path) -> None:
+    ledger = _ledger()
+    ledger["ocr"]["normalized_claim_events"] = [
+        {"claim_id": "ocr_001", "interval": [1.0, 3.0],
+         "text": "人们常常觉得失去了双手就会变成一个废人",
+         "evidence_type": "observed_textual_claim"},
+    ]
+    content = _content()
+    edit = _edit()
+    content["sections"][0]["hook_text_quote"] = "失去了双手就会变成一个废人"
+    req = compile_material_requirements(content, edit, tmp_path)
+    result = validate_reference_programs(content, edit, req, ledger,
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert any("hook takeaway does not present" in error
+               for error in result["errors"])
+    content["sections"][0]["audience_takeaway"] = (
+        "视频提出一个待反驳的社会偏见：人们觉得失去双手就会变成废人。")
+    result = validate_reference_programs(content, edit, req, ledger,
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert not any("hook takeaway" in error for error in result["errors"])

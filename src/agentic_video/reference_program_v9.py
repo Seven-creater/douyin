@@ -981,7 +981,8 @@ after_1 约+0.4s、after_2 约+1.0s、after_3 约+2.0s）。从三个维度分�
 event（是否同一事件的延续，含准备/对抗/结果/反应阶段）、rhetorical_function
 （叙事功能是否改变：提出命题/提供反证/扩展证据/收尾打趣等）、audience_cognition
 （观众此刻获得的信息是否发生质变）。任一维度不连续即 semantic_change=true。
-注意：同主题不等于同事件（都属跆拳道也可以是"提出偏见"与"反驳偏见"两种功能）。
+注意：同主题不等于同事件（同一活动里"提出断言"与"给出反证"是两种叙事功能；
+准备阶段与对抗阶段可以同属一个事件）。
 只输出一个 JSON 对象：
 {"event_continuity": true, "rhetorical_function_continuity": false,
  "audience_cognition_continuity": false, "semantic_change": true,
@@ -1072,26 +1073,23 @@ def reconcile_section_boundaries(
                 head_shots and
                 head_shots[0].get("event_relation") == "same_event" and
                 abs(float(head_shots[0]["interval"][0]) - current_pts) < 0.5)
-            if head_same_event:
-                attempts.append({
-                    "boundary_id": current_id, "method": "same_event_rule",
-                    "semantic_change": False,
-                    "reason": "next section head shot continues the same event"})
-            else:
-                verdict = _frame_check_boundary(
-                    reference, current_pts, ledger, output_dir, runner=runner,
-                    ffmpeg_bin=ffmpeg_bin, attempt=_attempt,
-                    slug=_safe_id(f"{previous_row.get('section_id')}_"
-                                  f"{next_row.get('section_id')}"))
-                attempts.append({
-                    "boundary_id": current_id, "method": "frame_check",
-                    "semantic_change": verdict["semantic_change"],
-                    "detail": {key: verdict.get(key) for key in (
-                        "event_continuity", "rhetorical_function_continuity",
-                        "audience_cognition_continuity", "reason")}})
-                if verdict["semantic_change"]:
-                    accepted_id = current_id
-                    break
+            verdict = _frame_check_boundary(
+                reference, current_pts, ledger, output_dir, runner=runner,
+                ffmpeg_bin=ffmpeg_bin, attempt=_attempt,
+                slug=_safe_id(f"{previous_row.get('section_id')}_"
+                              f"{next_row.get('section_id')}"))
+            attempts.append({
+                "boundary_id": current_id,
+                "method": ("frame_check+same_event_signal" if head_same_event
+                           else "frame_check"),
+                "same_event_signal": head_same_event,
+                "semantic_change": verdict["semantic_change"],
+                "detail": {key: verdict.get(key) for key in (
+                    "event_continuity", "rhetorical_function_continuity",
+                    "audience_cognition_continuity", "reason")}})
+            if verdict["semantic_change"]:
+                accepted_id = current_id
+                break
             forward = [bid for bid in candidates
                        if boundary_pts[bid] > current_pts + 0.05]
             if not forward:
@@ -2062,6 +2060,20 @@ def build_reference_edit_program(
                      "basis": "derived_from_observed_content_shots"})
         if mode == "dialogue_compression":
             pattern["semantic_continuity"] = "required"
+        content_shot_count = len(row.get("content_shots") or [])
+        has_real_cuts = bool(row.get("real_cut_pts"))
+        if mode == "continuous_clip" and (content_shot_count > 1 or has_real_cuts):
+            same_event_majority = sum(
+                1 for shot in row.get("content_shots") or []
+                if shot.get("event_relation") == "same_event") > content_shot_count / 2
+            replacement = ("multi_angle_action" if same_event_majority
+                           else "micro_montage")
+            pattern["composition_mode"] = replacement
+            mode = replacement
+            programmatic_alignments.append({
+                "section_id": section_id, "field": "composition_mode",
+                "from": "continuous_clip", "to": replacement,
+                "basis": "contradicts observed real cuts/shots"})
         if mode in MONTAGE_LIKE_MODES:
             shot_count = len(row.get("content_shots") or [])
             low = max(2, math.ceil(0.6 * shot_count)) if shot_count else 2
@@ -2075,19 +2087,6 @@ def build_reference_edit_program(
                     "section_id": section_id, "field": "snippet_count_range",
                     "from": current, "to": [low, high],
                     "basis": "aligned_to_observed_content_shot_count"})
-        content_shot_count = len(row.get("content_shots") or [])
-        has_real_cuts = bool(row.get("real_cut_pts"))
-        if mode == "continuous_clip" and (content_shot_count > 1 or has_real_cuts):
-            same_event_majority = sum(
-                1 for shot in row.get("content_shots") or []
-                if shot.get("event_relation") == "same_event") > content_shot_count / 2
-            replacement = ("multi_angle_action" if same_event_majority
-                           else "micro_montage")
-            pattern["composition_mode"] = replacement
-            programmatic_alignments.append({
-                "section_id": section_id, "field": "composition_mode",
-                "from": "continuous_clip", "to": replacement,
-                "basis": "contradicts observed real cuts/shots"})
     value["programmatic_mode_alignment"] = programmatic_alignments
     section_durations = [float(row["interval"][1]) - float(row["interval"][0])
                          for row in content.get("sections") or []]
@@ -2670,6 +2669,18 @@ def _validate_p02_structure(
                 errors.append(
                     f"{first['section_id']} hook_text_quote not verbatim "
                     "on-screen text")
+            else:
+                takeaway = _normalized_text(first.get("audience_takeaway"))
+                refers_proposition = (
+                    any(takeaway.find(quote[index:index + 4]) >= 0
+                        for index in range(max(len(quote) - 3, 1))) or
+                    any(word in takeaway for word in (
+                        "偏见", "反驳", "质疑", "推翻", "命题", "刻板", "认为",
+                        "觉得", "成见")))
+                if not refers_proposition:
+                    errors.append(
+                        f"{first['section_id']} hook takeaway does not present "
+                        "the quoted proposition (reads as introduction)")
             break
     # P0.3：蒙太奇类模式 snippet 下限必须 >=2，与参考镜头结构一致。
     patterns_by_section = {
