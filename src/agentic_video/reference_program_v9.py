@@ -63,7 +63,7 @@ MONTAGE_SHOT_TRIGGER_COUNT = 4
 MONTAGE_MEDIAN_SHOT_MAX_S = 0.8
 MONTAGE_TRANSITION_TRIGGER_COUNT = 2
 # P0.3：边界对账最大迭代轮数（move 后必须复查新边界，直到真实语义变化）。
-RECONCILE_MAX_ITERATIONS = 4
+RECONCILE_MAX_ITERATIONS = 6
 # P0.3：蒙太奇类模式的 snippet 数与参考镜头结构对齐（下限≈0.6n）。
 MONTAGE_LIKE_MODES = {
     "micro_montage", "event_compression_montage", "evidence_montage",
@@ -981,8 +981,10 @@ after_1 约+0.4s、after_2 约+1.0s、after_3 约+2.0s）。从三个维度分�
 event（是否同一事件的延续，含准备/对抗/结果/反应阶段）、rhetorical_function
 （叙事功能是否改变：提出命题/提供反证/扩展证据/收尾打趣等）、audience_cognition
 （观众此刻获得的信息是否发生质变）。任一维度不连续即 semantic_change=true。
-注意：同主题不等于同事件（同一活动里"提出断言"与"给出反证"是两种叙事功能；
-准备阶段与对抗阶段可以同属一个事件）。
+事件的操作定义：有独立功能的完整发生（叙事单元）。面对镜头的介绍/陈述、
+一场从头到尾的对抗、一组照片或成就的快速罗列，是不同事件；同一事件内部的
+阶段推移（准备→对抗→结果→反应）算事件连续。参与主体配置改变、或一个新的
+独立发生开始，即事件不连续。同主题不等于同事件。
 四个布尔维度必须逐项独立判断，禁止照抄任何示例值；reason 必须具体描述你看到的
 画面差异，不得输出占位文字。只输出一个 JSON 对象（字段取 true 或 false）：
 {"event_continuity": true, "rhetorical_function_continuity": true,
