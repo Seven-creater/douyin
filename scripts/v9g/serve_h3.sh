@@ -11,7 +11,15 @@ if [[ "$variant" != "fl2va" && "$variant" != "ref2va" ]]; then
   exit 2
 fi
 
-exec sglang serve \
+# sglang lives in the h3 conda env; detached launches (setsid/nohup) do not
+# inherit it, so resolve the binary explicitly (overridable via SGLANG_BIN).
+sglang_bin="${SGLANG_BIN:-/data02/usr/wangqihao/miniconda3/envs/h3/bin/sglang}"
+if [[ ! -x "$sglang_bin" ]]; then
+  echo "sglang binary not found: $sglang_bin" >&2
+  exit 3
+fi
+
+exec "$sglang_bin" serve \
   --model-path MiniMaxAI/MiniMax-H3 \
   --model-variant "$variant" \
   --num-gpus 4 \
