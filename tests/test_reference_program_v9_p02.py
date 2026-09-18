@@ -591,3 +591,46 @@ def test_snippet_range_aligns_to_observed_shot_count(tmp_path: Path) -> None:
     assert edit["editorial_patterns"][1]["snippet_count_range"] == [2, 2]
     fields = {row["field"] for row in edit["programmatic_mode_alignment"]}
     assert "snippet_count_range" in fields
+
+
+def test_dense_cut_completion_fills_missing_assessments(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """整段 watch 漏判的密集切点由逐对帧补判；补判不完整则 BLOCKED。"""
+    import src.agentic_video.reference_program_v9 as module
+
+    bank = _cut_section_bank()
+    # 模拟整段 watch 只交了 cut_a 的作业，cut_b/cut_c 缺席
+    bank["sections"][0]["cut_assessments"] = [
+        {"boundary_id": "cut_a", "status": "real_cut", "reason": "image change"}]
+    bank["sections"][0]["pending_cut_assessments"] = ["cut_b", "cut_c"]
+    monkeypatch.setattr(
+        module, "_boundary_frames",
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    monkeypatch.setattr(module.common, "run_ffmpeg", lambda *args, **kwargs: None)
+    runner = FakeRunner(inspect=[
+        {"assessments": [
+            {"boundary_id": "cut_b", "status": "real_cut",
+             "reason": "内容切换"},
+            {"boundary_id": "cut_c", "status": "not_cut",
+             "reason": "同一画面微小变化"}]}])
+    row = module._complete_dense_cut_assessments(
+        tmp_path / "reference.mp4", _cut_ledger(), bank["sections"][0],
+        tmp_path, runner=runner, ffmpeg_bin="ffmpeg")
+    assessed = {item["boundary_id"]: item for item in row["cut_assessments"]}
+    assert assessed["cut_b"]["status"] == "real_cut"
+    assert assessed["cut_c"]["status"] == "not_cut"
+    assert "[dense-frame-check]" in assessed["cut_b"]["reason"]
+
+    # 补判不完整 → BLOCKED
+    runner2 = FakeRunner(inspect=[
+        {"assessments": [
+            {"boundary_id": "cut_b", "status": "real_cut", "reason": "ok"}]}])
+    bank["sections"][0]["cut_assessments"] = [
+        {"boundary_id": "cut_a", "status": "real_cut", "reason": "image change"}]
+    bank["sections"][0]["pending_cut_assessments"] = ["cut_b", "cut_c"]
+    with pytest.raises(V9Blocked) as excinfo:
+        module._complete_dense_cut_assessments(
+            tmp_path / "reference.mp4", _cut_ledger(), bank["sections"][0],
+            tmp_path, runner=runner2, ffmpeg_bin="ffmpeg")
+    assert excinfo.value.reason_code == "cut_assessment_missing"
