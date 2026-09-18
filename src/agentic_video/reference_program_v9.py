@@ -787,13 +787,96 @@ DENSE_CUT_PROMPT = """每两帧一组（before/after）是一个候选切点两�
 输入："""
 
 
+def _split_shots_at_assessed_real_cuts(row: dict[str, Any],
+                                       ledger: dict[str, Any]) -> dict[str, Any]:
+    """P0.4：评估为 real_cut 的切点由代码直接拆 shot（继承父镜头描述）。
+
+    p04c 实测：移动边界后的重看段，模型 9 个 shot 只覆盖到 cut_018，而密集
+    补判把 cut_019-022 判为 real_cut——"detector 知道、模型没逐刀交作业"
+    再度触发必需 gap 并卡死 probe。确定性信号（real_cut 评估）有权威：
+    直接按切点拆 shot，子镜头标记 split_basis，不赌模型逐刀枚举。
+    """
+    pts_by_id = _boundary_map(ledger)
+    assessments = {str(item.get("boundary_id")): str(item.get("status"))
+                   for item in row.get("cut_assessments") or []}
+    real_cuts = sorted(
+        (bid for bid, status in assessments.items() if status == "real_cut"
+         and bid in pts_by_id), key=lambda bid: pts_by_id[bid])
+    new_shots: list[dict[str, Any]] = []
+    changed = False
+    for shot in row.get("shots") or []:
+        start_pts = pts_by_id.get(str(shot.get("start_boundary_id")))
+        end_pts = pts_by_id.get(str(shot.get("end_boundary_id")))
+        if start_pts is None or end_pts is None:
+            new_shots.append(shot)
+            continue
+        interior = [bid for bid in real_cuts
+                    if start_pts < pts_by_id[bid] < end_pts]
+        if not interior:
+            new_shots.append(shot)
+            continue
+        changed = True
+        edges = [str(shot["start_boundary_id"]), *interior,
+                 str(shot["end_boundary_id"])]
+        for index, (left, right) in enumerate(zip(edges, edges[1:]), 1):
+            child = dict(shot)
+            child["shot_id"] = f"{shot.get('shot_id')}_s{index:02d}"
+            child["start_boundary_id"] = left
+            child["end_boundary_id"] = right
+            child["interval"] = [pts_by_id[left], pts_by_id[right]]
+            child["split_basis"] = "assessed_real_cut"
+            new_shots.append(child)
+    if changed:
+        row["shots"] = new_shots
+    # 补齐覆盖（p04b/p04c 实测）：模型 shot 可能没铺满 Section（尾部/头部
+    # 缺 shot）。沿 real_cut 链程序化补齐到 Section 首末边界；子镜头继承
+    # 相邻 shot 的描述并标记来源，逐镜头内容随后由蒙太奇逐镜头补看覆盖。
+    interval = row.get("source_interval") or row.get("interval")
+    shots = row.get("shots") or []
+    if interval and shots:
+        span_start, span_end = float(interval[0]), float(interval[1])
+        start_id = min(
+            pts_by_id, key=lambda bid: abs(pts_by_id[bid] - span_start))
+        end_id = min(pts_by_id, key=lambda bid: abs(pts_by_id[bid] - span_end))
+        first = shots[0]
+        first_start = pts_by_id.get(str(first.get("start_boundary_id")))
+        if first_start is not None and span_start < first_start - 0.05:
+            head_cuts = [bid for bid in real_cuts
+                         if span_start - 0.05 < pts_by_id[bid] < first_start]
+            chain = [start_id, *head_cuts, str(first["start_boundary_id"])]
+            for index, (left, right) in enumerate(zip(chain, chain[1:]), 1):
+                child = dict(first)
+                child["shot_id"] = f"{first.get('shot_id')}_t{index:02d}"
+                child["start_boundary_id"] = left
+                child["end_boundary_id"] = right
+                child["interval"] = [pts_by_id[left], pts_by_id[right]]
+                child["split_basis"] = "assessed_real_cut_tiling"
+                shots.insert(0, child)
+        last = shots[-1]
+        last_end = pts_by_id.get(str(last.get("end_boundary_id")))
+        if last_end is not None and last_end < span_end - 0.05:
+            tail_cuts = [bid for bid in real_cuts
+                         if last_end < pts_by_id[bid] < span_end + 0.05]
+            chain = [str(last["end_boundary_id"]), *tail_cuts, end_id]
+            for index, (left, right) in enumerate(zip(chain, chain[1:]), 1):
+                child = dict(last)
+                child["shot_id"] = f"{last.get('shot_id')}_t{index:02d}"
+                child["start_boundary_id"] = left
+                child["end_boundary_id"] = right
+                child["interval"] = [pts_by_id[left], pts_by_id[right]]
+                child["split_basis"] = "assessed_real_cut_tiling"
+                shots.append(child)
+        row["shots"] = shots
+    return row
+
+
 def _complete_dense_cut_assessments(
         reference: Path, ledger: dict[str, Any], row: dict[str, Any],
         output_dir: Path, *, runner, ffmpeg_bin: str) -> dict[str, Any]:
     """P0.3：整段 watch 未覆盖的密集候选切点，逐对帧（±0.25s）分批补判。"""
     missing = [str(item) for item in row.pop("pending_cut_assessments", []) or []]
     if not missing:
-        return row
+        return _split_shots_at_assessed_real_cuts(row, ledger)
     if not hasattr(runner, "inspect_media"):
         raise V9Blocked("section_watch", "cut_assessment_missing",
                         f"{row.get('section_id')}:{missing}")
@@ -844,7 +927,7 @@ def _complete_dense_cut_assessments(
         if set(batch) - covered:
             raise V9Blocked("section_watch", "cut_assessment_missing",
                             f"{row.get('section_id')}:{sorted(set(batch) - covered)}")
-    return row
+    return _split_shots_at_assessed_real_cuts(row, ledger)
 
 
 def build_section_observations(
@@ -949,6 +1032,7 @@ def build_section_observations(
                                     output_dir)
         for row in rows:
             row.pop("pending_cut_assessments", None)
+            _split_shots_at_assessed_real_cuts(row, ledger)
     result = {"schema_version": SECTION_OBSERVATIONS_VERSION,
               "reference_sha256": source_hash, "input_sha256": input_hash,
               "sections": rows}

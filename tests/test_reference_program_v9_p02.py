@@ -592,6 +592,30 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     assert edit["operations"][0]["operation_type"] == "hard_cut"
 
 
+def test_assessed_real_cuts_split_shots_and_close_required_gap() -> None:
+    """P0.4（p04c 案例）：real_cut 评估由代码拆 shot，不再赌模型逐刀交作业。"""
+    from src.agentic_video.reference_program_v9 import (
+        _split_shots_at_assessed_real_cuts, collect_reference_gaps)
+
+    bank = _cut_section_bank()
+    # 模型把整段吞成一个 shot，但 cut_a/cut_b 已被评估为 real_cut
+    bank["sections"][0]["shots"] = [{
+        "shot_id": "main.shot_001", "start_boundary_id": "video_start",
+        "end_boundary_id": "video_end", "interval": [0.0, 30.0],
+        "information_added": "visible action", "edit_function": "kept",
+        "event_relation": "same_event", "supporting_deterministic_ids": []}]
+    row = _split_shots_at_assessed_real_cuts(bank["sections"][0], _cut_ledger())
+    edges = [(shot["start_boundary_id"], shot["end_boundary_id"])
+             for shot in row["shots"]]
+    # real_cut 切点成为 shot 边；not_cut（cut_c）不得产生边
+    assert edges == [("video_start", "cut_a"), ("cut_a", "cut_b"),
+                     ("cut_b", "video_end")]
+    assert all(shot.get("split_basis") == "assessed_real_cut"
+               for shot in row["shots"])
+    gaps = collect_reference_gaps(_draft(), {"sections": [row]}, _cut_ledger())
+    assert not any(str(g["id"]).endswith("_cut_structure") for g in gaps)
+
+
 def test_continuity_basis_evidence_backfill_from_section_evidence(
         tmp_path: Path) -> None:
     """P0.4：continuity_basis 漏填 evidence_ids → 确定性回填 Section 级证据。"""

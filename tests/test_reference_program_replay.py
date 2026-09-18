@@ -81,6 +81,26 @@ def test_historical_real_outputs_pass_with_current_code(
 
 @pytest.mark.skipif(not RUNS, reason="no replay artifacts under data/replay")
 @pytest.mark.parametrize("run", RUNS)
+def test_historical_sections_close_cut_structure_gaps_after_split(
+        run: str) -> None:
+    """p04c 案例：历史 section 观察 + 当前拆分逻辑 → 不得再产生 cut_structure
+    必需 gap（probe 阶段因此不再 BLOCKED）。"""
+    from src.agentic_video.reference_program_v9 import (
+        _split_shots_at_assessed_real_cuts, collect_reference_gaps)
+
+    ledger = _load(run, "reference_evidence.json")
+    observations = _load(run, "section_observations.json")
+    draft = _load(run, "reference_understanding_draft.json")
+    for row in observations.get("sections") or []:
+        _split_shots_at_assessed_real_cuts(row, ledger)
+    gaps = collect_reference_gaps(draft, observations, ledger)
+    assert not [gap for gap in gaps
+                if str(gap.get("id", "")).endswith("_cut_structure")], (
+        run, [gap.get("id") for gap in gaps])
+
+
+@pytest.mark.skipif(not RUNS, reason="no replay artifacts under data/replay")
+@pytest.mark.parametrize("run", RUNS)
 def test_boundary_raw_verdicts_are_valid_and_decided_deterministically(
         run: str) -> None:
     """历史边界原始回答：schema 合法；same_event=true 的闭环一票否决必须成立。"""
