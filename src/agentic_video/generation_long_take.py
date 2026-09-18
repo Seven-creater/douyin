@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -82,39 +83,56 @@ def _ffprobe_bin_of(ffmpeg_bin: str) -> str:
 
 
 def detect_active_crop(ffmpeg_bin: str, video: Path, *, samples: int = 5,
-                       duration_s: float | None = None) -> dict[str, int] | None:
+                       duration_s: float | None = None,
+                       dark_limit: int = 24) -> dict[str, int] | None:
     """检测持续黑边（人工审核：参考容器 9:16 但上下各约 130px 黑条，实际
-    画面 ≈0.707≈3:4）。ffmpeg cropdetect 采样取中位，返回 crop 盒或 None。"""
+    画面 ≈0.707≈3:4）。
+
+    服务器 ffmpeg 4.2.7 不打印 cropdetect 逐帧行——改为导出灰度原始帧，
+    纯 Python 逐行判黑（行平均亮度 < dark_limit 记为黑行），多帧采样取
+    中位，左右列不扫（本用例 letterbox 只在上下）。"""
     if duration_s is None:
         duration_s = probe_media_geometry(
             _ffprobe_bin_of(ffmpeg_bin), video)["duration_s"]
-    boxes = []
-    for index in range(samples):
-        timestamp = min(duration_s * (index + 0.5) / samples,
-                        max(duration_s - 0.05, 0.05))
-        result = subprocess.run(
-            [ffmpeg_bin, "-ss", f"{timestamp:.3f}", "-i", str(video),
-             "-frames:v", "1", "-vf", "cropdetect=round=2:limit=24",
-             "-f", "null", "-"],
-            capture_output=True, text=True, timeout=120)
-        for line in result.stderr.splitlines():
-            marker = "crop="
-            if marker in line:
-                # cropdetect 输出形如 crop=w:h:x:y[:aspect]（裸冒号值）
-                values = line.split(marker, 1)[1].strip().split(":")
-                try:
-                    boxes.append({"w": int(values[0]), "h": int(values[1]),
-                                  "x": int(values[2]), "y": int(values[3])})
-                except (IndexError, ValueError):
-                    continue
-                break
-    if not boxes:
+    geometry = probe_media_geometry(_ffprobe_bin_of(ffmpeg_bin), video)
+    width, height = geometry["width"], geometry["height"]
+    tops, bottoms = [], []
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = Path(tmp) / "frame.gray"
+        for index in range(samples):
+            timestamp = min(duration_s * (index + 0.5) / samples,
+                            max(duration_s - 0.05, 0.05))
+            result = subprocess.run(
+                [ffmpeg_bin, "-y", "-loglevel", "error",
+                 "-ss", f"{timestamp:.3f}", "-i", str(video),
+                 "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray",
+                 str(raw)], capture_output=True, timeout=120)
+            if result.returncode or not raw.is_file():
+                continue
+            data = raw.read_bytes()
+            if len(data) < width * height:
+                continue
+            def _row_mean(row: int) -> float:
+                start = row * width
+                return sum(data[start:start + width]) / width
+            top = 0
+            while top < height // 3 and _row_mean(top) < dark_limit:
+                top += 1
+            bottom = height
+            while bottom > height * 2 // 3 and _row_mean(bottom - 1) < dark_limit:
+                bottom -= 1
+            if 0 < top and bottom < height:
+                tops.append(top)
+                bottoms.append(bottom)
+            raw.unlink()
+    if not tops:
         return None
-    median = {}
-    for key in ("w", "h", "x", "y"):
-        values = sorted(box[key] for box in boxes)
-        median[key] = values[len(values) // 2]
-    return median
+    tops.sort()
+    bottoms.sort()
+    top, bottom = tops[len(tops) // 2], bottoms[len(bottoms) // 2]
+    if bottom - top >= height - 8:  # 基本无黑边
+        return None
+    return {"w": width, "h": bottom - top, "x": 0, "y": top}
 
 
 def _composed_crop_filter(active: dict[str, int] | None,

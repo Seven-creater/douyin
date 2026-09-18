@@ -170,28 +170,52 @@ def test_aspect_resolution_maps_active_picture_not_container(
     assert resolve_reference_aspect_ratio(width, height) == expected
 
 
-def test_detect_active_crop_parses_cropdetect(monkeypatch: pytest.MonkeyPatch,
-                                              tmp_path: Path) -> None:
+def test_detect_active_crop_from_pixel_rows(monkeypatch: pytest.MonkeyPatch,
+                                            tmp_path: Path) -> None:
+    """灰度逐行判黑（服务器 ffmpeg 4.2.7 不打印 cropdetect 行）。"""
+    width, height = 720, 1280
+    # 上 129 行黑、中 1019 行内容、下 132 行黑
+    frame = bytes([8]) * (width * 129) + bytes([120]) * (width * 1019) + \
+        bytes([8]) * (width * 132)
     calls = []
 
     class FakeCompleted:
-        def __init__(self, stderr: str) -> None:
-            self.stderr = stderr
-            self.returncode = 0
+        returncode = 0
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        return FakeCompleted(
-            "[Parsed_cropdetect] ... crop=720:1019:0:129:0x0\n")
+        output = Path(cmd[-1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(frame)
+        return FakeCompleted(cmd)
 
     monkeypatch.setattr(lt0.subprocess, "run", fake_run)
     monkeypatch.setattr(
         lt0, "probe_media_geometry",
-        lambda ffprobe, video: {"width": 720, "height": 1280,
+        lambda ffprobe, video: {"width": width, "height": height,
                                 "duration_s": 11.6})
     crop = lt0.detect_active_crop("ffmpeg", tmp_path / "clip.mp4")
     assert crop == {"w": 720, "h": 1019, "x": 0, "y": 129}
     assert len(calls) == 5  # 多帧采样取中位
+
+
+def test_detect_active_crop_returns_none_without_bars(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    width, height = 720, 1280
+    frame = bytes([120]) * (width * height)
+
+    def fake_run(cmd, **kwargs):
+        output = Path(cmd[-1])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(frame)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(lt0.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        lt0, "probe_media_geometry",
+        lambda ffprobe, video: {"width": width, "height": height,
+                                "duration_s": 11.6})
+    assert lt0.detect_active_crop("ffmpeg", tmp_path / "clip.mp4") is None
 
 
 def test_composed_crop_combines_blackbars_and_role_fraction() -> None:
