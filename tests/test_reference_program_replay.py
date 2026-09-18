@@ -73,6 +73,10 @@ def _replay_validation(run: str, tmp_path: Path) -> dict:
 @pytest.mark.parametrize("run", RUNS)
 def test_historical_real_outputs_pass_with_current_code(
         run: str, tmp_path: Path) -> None:
+    for name in ("reference_content_program.json",
+                 "reference_edit_program.json"):
+        if not (REPLAY_ROOT / run / name).is_file():
+            pytest.skip(f"{run} blocked before program stage")
     result = _replay_validation(run, tmp_path)
     assert result["passed"], (run, result["errors"])
     assert all(result["narrative_usability"].values()), (
