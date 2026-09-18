@@ -983,10 +983,11 @@ event（是否同一事件的延续，含准备/对抗/结果/反应阶段）、
 （观众此刻获得的信息是否发生质变）。任一维度不连续即 semantic_change=true。
 注意：同主题不等于同事件（同一活动里"提出断言"与"给出反证"是两种叙事功能；
 准备阶段与对抗阶段可以同属一个事件）。
-只输出一个 JSON 对象：
-{"event_continuity": true, "rhetorical_function_continuity": false,
- "audience_cognition_continuity": false, "semantic_change": true,
- "reason": "画面依据"}
+四个布尔维度必须逐项独立判断，禁止照抄任何示例值；reason 必须具体描述你看到的
+画面差异，不得输出占位文字。只输出一个 JSON 对象（字段取 true 或 false）：
+{"event_continuity": true, "rhetorical_function_continuity": true,
+ "audience_cognition_continuity": true, "semantic_change": true,
+ "reason": "具体描述边界前后画面内容与功能的差异"}
 输入："""
 
 
@@ -1027,6 +1028,10 @@ def _frame_check_boundary(reference: Path, pts: float, ledger: dict[str, Any],
     if not isinstance(verdict.get("semantic_change"), bool):
         raise V9Blocked("boundary_reconciliation", "frame_check_verdict_invalid",
                         slug)
+    if (str(verdict.get("reason") or "").strip() in {"画面依据", "具体描述边界前后画面内容与功能的差异"}
+            or len(str(verdict.get("reason") or "").strip()) < 6):
+        raise V9Blocked("boundary_reconciliation",
+                        "frame_check_verdict_echoed_example", slug)
     return verdict
 
 
