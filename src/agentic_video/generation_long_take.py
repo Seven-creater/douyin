@@ -37,24 +37,33 @@ DEFAULT_SECONDS = 12.0
 DEFAULT_SEEDS = (1001, 1002)
 IDENTITY_SAMPLE_RATIOS = (0.1, 0.3, 0.5, 0.7, 0.9)
 
-# Canonical 候选区间（来自 p04e S2 观测：特写/全身/对手/场地各取可见窗口）。
+# Canonical 候选区间 + 目标裁剪（人工审核 p0510：一张图里太多人不是身份参考，
+# 是污染）。arena 在 LT0 Round 1 不作为 Picture condition——候选帧全是
+# "垫+两人+裁判+观众"的群像，无法当纯场景参考；场景由 prompt/Video 1 定义。
 PACK_ROLES: tuple[dict[str, Any], ...] = (
     {"role": "c0_identity", "interval": [14.2, 16.0],
-     "purpose": "主角面部清晰帧"},
+     "purpose": "主角面部清晰帧",
+     "crop": {"frac_x": [0.15, 0.85], "frac_y": [0.05, 0.75]},
+     "crop_note": "裁成头肩/上半身，去掉背景观众"},
     {"role": "c0_fullbody", "interval": [5.3, 5.9],
-     "purpose": "主角全身（含护具）帧"},
+     "purpose": "主角全身（含护具）帧",
+     "crop": {"frac_x": [0.50, 1.00], "frac_y": [0.0, 1.0]},
+     "crop_note": "只裁右侧 C0（原帧左 C1/中裁判/右 C0）"},
     {"role": "c1_opponent", "interval": [6.4, 7.2],
-     "purpose": "对手清晰帧"},
-    {"role": "arena", "interval": [5.1, 5.5],
-     "purpose": "场地全景帧"},
+     "purpose": "对手清晰帧",
+     "crop": {"frac_x": [0.00, 0.58], "frac_y": [0.0, 1.0]},
+     "crop_note": "只裁左侧 C1"},
 )
-
 # phase → S2 内容镜头序号（0 基）的确定性映射（p04e 归一化 8 镜头）。
 PHASE_SHOT_MAP: dict[str, list[int]] = {
     "initiation": [0],
     "action": [1, 2],
     "resolution": [3],
     "reflection": [4, 5, 6, 7],
+}
+# 12s 的 phase 时间箱（生成 prompt 用最小充分事件结构，不机械拷贝全部 shot）。
+PHASE_TIME_BUDGET_S: dict[str, float] = {
+    "initiation": 2.0, "action": 5.0, "resolution": 2.0, "reflection": 3.0,
 }
 
 
@@ -72,13 +81,68 @@ def _ffprobe_bin_of(ffmpeg_bin: str) -> str:
     return "ffprobe"
 
 
+def detect_active_crop(ffmpeg_bin: str, video: Path, *, samples: int = 5,
+                       duration_s: float | None = None) -> dict[str, int] | None:
+    """检测持续黑边（人工审核：参考容器 9:16 但上下各约 130px 黑条，实际
+    画面 ≈0.707≈3:4）。ffmpeg cropdetect 采样取中位，返回 crop 盒或 None。"""
+    if duration_s is None:
+        duration_s = probe_media_geometry(
+            _ffprobe_bin_of(ffmpeg_bin), video)["duration_s"]
+    boxes = []
+    for index in range(samples):
+        timestamp = min(duration_s * (index + 0.5) / samples,
+                        max(duration_s - 0.05, 0.05))
+        result = subprocess.run(
+            [ffmpeg_bin, "-ss", f"{timestamp:.3f}", "-i", str(video),
+             "-frames:v", "1", "-vf", "cropdetect=round=2:limit=24",
+             "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120)
+        for line in result.stderr.splitlines():
+            marker = "crop="
+            if marker in line:
+                # cropdetect 输出形如 crop=w:h:x:y[:aspect]（裸冒号值）
+                values = line.split(marker, 1)[1].strip().split(":")
+                try:
+                    boxes.append({"w": int(values[0]), "h": int(values[1]),
+                                  "x": int(values[2]), "y": int(values[3])})
+                except (IndexError, ValueError):
+                    continue
+                break
+    if not boxes:
+        return None
+    median = {}
+    for key in ("w", "h", "x", "y"):
+        values = sorted(box[key] for box in boxes)
+        median[key] = values[len(values) // 2]
+    return median
+
+
+def _composed_crop_filter(active: dict[str, int] | None,
+                          frac: dict[str, Any] | None,
+                          full_width: int, full_height: int) -> str | None:
+    """active 黑边盒 + 目标人物分数区域 → 单条 crop=w:h:x:y。"""
+    base_w = active["w"] if active else full_width
+    base_h = active["h"] if active else full_height
+    base_x = active["x"] if active else 0
+    base_y = active["y"] if active else 0
+    if not frac:
+        return f"crop={base_w}:{base_h}:{base_x}:{base_y}" if active else None
+    left = base_x + int(base_w * float(frac["frac_x"][0]))
+    right = base_x + int(base_w * float(frac["frac_x"][1]))
+    top = base_y + int(base_h * float(frac["frac_y"][0]))
+    bottom = base_y + int(base_h * float(frac["frac_y"][1]))
+    return f"crop={max(8, right - left)}:{max(8, bottom - top)}:{left}:{top}"
+
+
 def _extract_frame(ffmpeg_bin: str, reference: Path, timestamp: float,
-                   jpg: Path) -> None:
+                   jpg: Path, *, crop_filter: str | None = None) -> None:
     if not jpg.is_file():
-        common.run_ffmpeg(ffmpeg_bin, [
-            "-y", "-loglevel", "error", "-ss", f"{timestamp:.3f}",
-            "-i", str(reference), "-frames:v", "1", "-q:v", "2",
-            str(jpg)], timeout_s=120)
+        args = ["-y", "-loglevel", "error", "-ss", f"{timestamp:.3f}",
+                "-i", str(reference)]
+        if crop_filter:
+            args += ["-vf", crop_filter]
+        args += ["-frames:v", "1", "-q:v", "2", str(jpg)]
+        common.run_ffmpeg(ffmpeg_bin, args, timeout_s=120)
 
 
 def probe_media_geometry(ffprobe_bin: str, video: Path) -> dict[str, Any]:
@@ -115,8 +179,12 @@ def build_canonical_world_pack(
     人工每 role 选 1 帧（防止八条实验建立在一张糊掉的"身份证照"上）。"""
     output_dir = Path(output_dir)
     geometry = probe_media_geometry(_ffprobe_bin_of(ffmpeg_bin), Path(reference))
+    active = detect_active_crop(ffmpeg_bin, Path(reference),
+                                duration_s=geometry["duration_s"])
     document: dict[str, Any] = {"schema_version": LT0_VERSION,
                                 "reference": str(reference),
+                                "container_geometry": geometry,
+                                "active_crop": active,
                                 "roles": []}
     for spec in PACK_ROLES:
         role_dir = output_dir / "canonical_candidates" / spec["role"]
@@ -124,10 +192,13 @@ def build_canonical_world_pack(
         low, high = spec["interval"]
         times = [round(low + (high - low) * (index + 0.5) / candidate_count, 3)
                  for index in range(candidate_count)]
+        crop_filter = _composed_crop_filter(
+            active, spec.get("crop"), geometry["width"], geometry["height"])
         candidates = []
         for index, timestamp in enumerate(times, 1):
             jpg = role_dir / f"candidate_{index:02d}.jpg"
-            _extract_frame(ffmpeg_bin, Path(reference), timestamp, jpg)
+            _extract_frame(ffmpeg_bin, Path(reference), timestamp, jpg,
+                           crop_filter=crop_filter)
             candidates.append({"time_s": timestamp, "path": str(jpg),
                                "sha256": _file_hash(jpg)})
         contact = role_dir / "contact_sheet.jpg"
@@ -139,7 +210,9 @@ def build_canonical_world_pack(
             f"hstack=inputs={len(candidates)}", str(contact)], timeout_s=120)
         document["roles"].append({
             "role": spec["role"], "purpose": spec["purpose"],
-            "interval": spec["interval"], "candidates": candidates,
+            "interval": spec["interval"],
+            "crop": spec.get("crop"), "crop_note": spec.get("crop_note"),
+            "candidates": candidates,
             "contact_sheet": str(contact)})
     _write_json(output_dir / "canonical_pack_candidates.json", document)
     return document
@@ -157,6 +230,13 @@ def choose_canonical_pack(candidates: dict[str, Any], output_dir: Path,
         rows = role_row.get("candidates") or []
         if not rows:
             raise LT0Blocked("plan", "canonical_candidates_missing", role)
+        if isinstance(chosen, str) and chosen.startswith("candidate_"):
+            # 人工审核按编号选帧（p0510：zip 没带候选时间戳，编号比换算秒方便）
+            index = int(chosen.split("_", 1)[1])
+            if not 1 <= index <= len(rows):
+                raise LT0Blocked("plan", "canonical_pick_out_of_candidates",
+                                 f"{role}:{chosen}")
+            chosen = float(rows[index - 1]["time_s"])
         if chosen is None:
             chosen = sorted(rows, key=lambda row: abs(
                 float(row["time_s"]) - sum(
@@ -181,16 +261,24 @@ def choose_canonical_pack(candidates: dict[str, Any], output_dir: Path,
 
 def prepare_visual_reference(source_video: Path, output_dir: Path, *,
                              ffmpeg_bin: str = "ffmpeg") -> dict[str, Any]:
-    """H3 会把带音轨的 video 参考的音频也当参考——C/D 一律用静音视觉版，
-    第一轮只测视觉参考的作用（音视频对比留后续实验）。"""
+    """H3 会把带音轨的 video 参考的音频也当参考——C/D 一律静音；同时裁掉
+    持续黑边（容器 9:16 但上下各 ~130px 黑条，不裁则参考把 letterbox 也
+    传给生成）。黑边裁剪需重编码（copy 不能裁）。"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / "section_02_visual_ref.mp4"
-    common.run_ffmpeg(ffmpeg_bin, [
-        "-y", "-loglevel", "error", "-i", str(source_video),
-        "-an", "-c:v", "copy", str(target)], timeout_s=180)
+    active = detect_active_crop(ffmpeg_bin, Path(source_video))
+    args = ["-y", "-loglevel", "error", "-i", str(source_video)]
+    if active:
+        args += ["-vf",
+                 f"crop={active['w']}:{active['h']}:{active['x']}:{active['y']}",
+                 "-an", "-c:v", "libx264", "-crf", "18"]
+    else:
+        args += ["-an", "-c:v", "copy"]
+    args.append(str(target))
+    common.run_ffmpeg(ffmpeg_bin, args, timeout_s=300)
     return {"path": str(target), "sha256": _file_hash(target),
-            "source": str(source_video),
+            "source": str(source_video), "active_crop": active,
             "source_sha256": _file_hash(Path(source_video))}
 
 
@@ -245,43 +333,132 @@ def compile_long_take_brief(content_program: dict[str, Any],
     budget = float((req.get("presentation_requirement") or {})
                    .get("target_duration_s") or 11.6)
     fact = str(section.get("reference_specific_fact") or "").strip()
-    event_lines = "\n".join(
-        f"{'-' * 0}{row['phase']}：{('；'.join(row['evidence_text']) or '按参考推进')}"
-        for row in phase_rows)
-    base_event_prompt = (
-        f"人物：两位跆拳道选手（主角 C0 与对手 C1）。服装、发型、护具全程保持一致，"
-        f"不得中途改变外貌或换装。\n"
-        f"场景：整个视频发生在同一跆拳道场馆的同一块比赛垫上，不得更换场地。\n"
-        f"事件：生成一段完整、连贯的跆拳道对抗长镜头，包含以下阶段：\n"
-        f"{event_lines}\n"
-        f"结尾以主角放松、面向镜头的轻松反应收束。\n"
-        f"动作要真实自然，符合竞技跆拳道的身体力学；一个连贯事件，一镜到底。")
+    # 语义 phase 压缩（人工审核 p0510）：Edit Program 保留全部 shot 证据，
+    # 生成 prompt 只保留**最小充分事件结构**——每 phase 一条指令（4 个
+    # reflection shots → 1 行），否则模型以为"最后要花 7 秒连续微笑"。
+    compressed = [{"phase": row["phase"],
+                   "line": (row["evidence_text"][0] if row["evidence_text"]
+                            else f"按参考推进 {row['phase']} 阶段")}
+                  for row in phase_rows]
+    weights = [PHASE_TIME_BUDGET_S.get(row["phase"], 1.0)
+               for row in phase_rows]
+    total_weight = sum(weights) or 1.0
+    timeboxes = []
+    cursor = 0.0
+    for row, weight in zip(compressed, weights):
+        span_end = cursor + weight / total_weight
+        timeboxes.append({"phase": row["phase"],
+                          "span_ratio": [round(cursor, 4),
+                                         round(span_end, 4)],
+                          "line": row["line"]})
+        cursor = span_end
+    subject_text = " ".join(
+        fact.split("。"))[:400] if fact else "两位跆拳道选手：主角与对手。"
+    # 官方 H3-Context-IR 六段结构（人工审核：Ref2VA Prompt Guide 要求
+    # subject_definitions/summary/retention_analysis/detailed_description/
+    # overall_soundscape/non_diegetic_music；角色引用要写 <Subject N>，
+    # 且同一 Subject 可由多个 reference assets 共同定义）。
     brief = {
         "schema_version": LT0_VERSION, "section_id": section_id,
         "interval": section.get("interval"),
         "reference_specific_fact": fact,
+        "subject_textual_definition": subject_text,
         "phases": phase_rows,
+        "compressed_phase_lines": compressed,
+        "phase_timeboxes": timeboxes,
         "required_continuity": continuity,
+        "prompt_fields": {
+            "subject_definitions": "{{SUBJECT_DEFINITIONS}}",
+            "summary": ("Generate one coherent {{SECONDS}}-second taekwondo "
+                        "sparring event clip featuring <Subject 1> (the "
+                        "protagonist) and <Subject 2> (the opponent). "
+                        "Preserve both subjects throughout the entire clip."),
+            "retention_analysis": (
+                "Preserve:\n"
+                "- identity, body proportions, uniforms and protective gear "
+                "of both subjects\n"
+                "- the same indoor taekwondo training-hall setting\n"
+                "{{RETENTION_REFERENCE}}"),
+            "detailed_description": "{{TIMEBOXES}}",
+            "overall_soundscape": (
+                "Natural ambient sound consistent with the depicted activity "
+                "and setting: foot movement, protective-gear impacts, and "
+                "restrained crowd reactions. No dialogue is required."),
+            "non_diegetic_music": "None.",
+        },
+        "continuity_clause": (
+            "Natural camera movement or internal cuts are allowed, but the "
+            "clip must stay one complete, temporally continuous, causally "
+            "coherent event: no switching to a different setting, a "
+            "different match, or different people."),
         "editability_target": {
             "snippet_count_range": snippet_range,
             "moment_duration_range_s": [1.0, 3.0],
             "target_duration_s": budget,
             "composition_mode": (req.get("presentation_requirement") or {})
             .get("composition_mode")},
-        "base_event_prompt": base_event_prompt,
     }
     if output_dir is not None:
         _write_json(Path(output_dir) / "h3_generation_brief.json", brief)
     return brief
 
 
-CANONICAL_REFERENCE_CLAUSE = (
-    "\n参考：<Picture 1> 与 <Picture 2> 是同一主角 C0（面部与全身）；"
-    "<Picture 3> 是对手 C1；<Picture 4> 是场地。人物外观、服装、护具与"
-    "这些参考保持一致。")
-VIDEO_REFERENCE_CLAUSE = (
-    "\n参考：<Video 1> 提供整体动作关系、事件推进、镜头能量和大致拍摄语言；"
-    "不要求复制其精确时间点或逐帧内容。")
+def _wire_prompt(brief: dict[str, Any], *, recipe: str, seconds: float,
+                 pack: dict[str, Any] | None) -> str:
+    """按官方 H3-Context-IR 六段结构组装 wire prompt。
+
+    所有 recipe 共用同一 brief 字段，只有 subject_definitions 与
+    retention 的 reference 段随 conditioning 变化——比较的只有条件本身。
+    <Subject 1> 由 Picture 1+2 共同定义、<Subject 2> 由 Picture 3 定义
+    （官方 Guide：同一 Subject 可由多个 reference assets 联合定义）。
+    """
+    textual = str(brief.get("subject_textual_definition") or "")
+    use_canonical = recipe in {"canonical_only", "canonical_plus_video"}
+    use_video = recipe in {"video_only", "canonical_plus_video"}
+    subject_lines = []
+    if use_canonical:
+        subject_lines.append(
+            "<Subject 1> is the same protagonist, defined jointly by "
+            "<Picture 1> (facial identity and headgear appearance) and "
+            "<Picture 2> (full-body proportions, uniform and protective "
+            "gear).")
+        subject_lines.append(
+            "<Subject 2> is the opponent, defined by <Picture 3>.")
+    else:
+        subject_lines.append(
+            f"<Subject 1> is the protagonist: {textual}")
+        subject_lines.append(
+            "<Subject 2> is the opponent competing against <Subject 1> "
+            "in the same match.")
+    if use_video:
+        subject_lines.append(
+            "<Video 1> provides the overall temporal structure, sparring "
+            "interaction, major motion progression, and camera energy of "
+            "the reference event.")
+    retention_reference = (
+        "Transfer from <Video 1>: " + "; ".join(
+            row["phase"] for row in brief.get("phases") or []) +
+        ".\nDo not require exact source timing, exact source cuts, or "
+        "frame-by-frame reproduction."
+        if use_video else
+        "No reference material; rely on the textual description alone.")
+    timebox_lines = []
+    for box in brief.get("phase_timeboxes") or []:
+        start = box["span_ratio"][0] * seconds
+        end = box["span_ratio"][1] * seconds
+        timebox_lines.append(f"{start:.0f}-{end:.0f}s:\n{box['line']}")
+    timebox_lines.append(str(brief.get("continuity_clause") or ""))
+    fields = dict(brief["prompt_fields"])
+    fields["subject_definitions"] = "\n".join(subject_lines)
+    fields["retention_analysis"] = fields["retention_analysis"].replace(
+        "{{RETENTION_REFERENCE}}", retention_reference)
+    fields["summary"] = fields["summary"].replace(
+        "{{SECONDS}}", f"{seconds:g}")
+    fields["detailed_description"] = "\n\n".join(timebox_lines)
+    sections = [f"{key}:\n{fields[key]}" for key in (
+        "subject_definitions", "summary", "retention_analysis",
+        "detailed_description", "overall_soundscape", "non_diegetic_music")]
+    return "\n\n".join(sections)
 
 
 def build_long_take_request(brief: dict[str, Any], *,
@@ -290,10 +467,9 @@ def build_long_take_request(brief: dict[str, Any], *,
                             recipe: str, seed: int, seconds: float,
                             aspect_ratio: str) -> dict[str, Any]:
     """recipe ∈ {prompt_only, canonical_only, video_only, canonical_plus_video}；
-    prompt 从同一 base 派生，只叠加 reference 子句（比较的只有 conditioning）。"""
+    A 无 references（t2va，跑 fl2va server），B/C/D 走 ref2va。"""
     if recipe not in RECIPES:
         raise LT0Blocked("plan", "recipe_unknown", recipe)
-    prompt = str(brief["base_event_prompt"])
     references: list[dict[str, Any]] = []
     use_canonical = recipe in {"canonical_only", "canonical_plus_video"}
     use_video = recipe in {"video_only", "canonical_plus_video"}
@@ -302,7 +478,6 @@ def build_long_take_request(brief: dict[str, Any], *,
             raise LT0Blocked("plan", "canonical_pack_missing", recipe)
         for entry in pack["entries"]:
             references.append({"type": "image", "uri": entry["uri"]})
-        prompt += CANONICAL_REFERENCE_CLAUSE
     if use_video:
         if not visual_reference:
             raise LT0Blocked("plan", "visual_reference_missing", recipe)
@@ -311,13 +486,16 @@ def build_long_take_request(brief: dict[str, Any], *,
             raise LT0Blocked("plan", "visual_reference_not_absolute",
                              str(visual_path))
         references.append({"type": "video", "uri": visual_path.as_uri()})
-        prompt += VIDEO_REFERENCE_CLAUSE
+    prompt = _wire_prompt(brief, recipe=recipe, seconds=float(seconds),
+                          pack=pack)
     request = build_h3_request(
         prompt=prompt, duration_s=float(seconds),
         references=references or None, first_frame=None, last_frame=None,
         capabilities=None, seed=int(seed), aspect_ratio=aspect_ratio)
     request["_lt0"] = {"recipe": recipe, "seed": int(seed),
-                       "seconds": float(seconds), "version": LT0_VERSION}
+                       "seconds": float(seconds), "version": LT0_VERSION,
+                       "server_variant": "fl2va" if not references
+                       else "ref2va"}
     return request
 
 
@@ -503,11 +681,12 @@ def _endpoint_reachable(endpoint: str, *, timeout_s: float = 5.0) -> bool:
         return False
 
 
-def _ensure_h3_server(endpoint: str, *, manage_server: bool, port: int,
-                      repo_root: Path, log_path: Path
+def _ensure_h3_server(endpoint: str, *, variant: str, manage_server: bool,
+                      port: int, repo_root: Path, log_path: Path
                       ) -> subprocess.Popen | None:
-    """H3 与 Omni 错峰占同一组卡：必要时由实验自起 ref2va server（记录
-    owned 进程组，任务后回收），遵循 scripts/v9g/README 的服务秩序。"""
+    """H3 与 Omni 错峰占同一组卡：必要时由实验自起 server（记录 owned
+    进程组，任务后回收）。variant ∈ fl2va|ref2va——A 无 references 是
+    t2va 任务，必须跑 fl2va server；B/C/D 才是 ref2va（人工审核 p0510）。"""
     if _endpoint_reachable(endpoint):
         return None
     if not manage_server:
@@ -518,7 +697,7 @@ def _ensure_h3_server(endpoint: str, *, manage_server: bool, port: int,
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = open(log_path, "ab")
     process = subprocess.Popen(
-        ["bash", str(script), "ref2va", str(port)], cwd=str(repo_root),
+        ["bash", str(script), variant, str(port)], cwd=str(repo_root),
         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     import time
     deadline = time.monotonic() + 3600.0
@@ -566,6 +745,7 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                        reference: Path,
                        plan_only: bool = False, execute: bool = False,
                        ref2va_endpoint: str = "http://127.0.0.1:30011",
+                       fl2va_endpoint: str = "http://127.0.0.1:30010",
                        gpu_set: str = "0,1,6,7",
                        seconds: float = DEFAULT_SECONDS,
                        seeds: tuple[int, ...] = DEFAULT_SEEDS,
@@ -597,9 +777,13 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
     brief = compile_long_take_brief(
         p04e["content_program"], p04e["edit_program"], p04e["requirement"],
         p04e["section_observations"], output_dir=output_dir)
+    # aspect 按**有效画面**算（人工审核 p0510：容器 9:16 但上下各 ~130px
+    # 黑条，实际 ≈0.707≈3:4；8 条 Take 同一比例，全部像素生成有效内容）。
     geometry = probe_media_geometry(_ffprobe_bin_of(ffmpeg_bin), section_clip)
-    aspect_ratio = resolve_reference_aspect_ratio(
-        geometry["width"], geometry["height"])
+    active = (visual_reference or {}).get("active_crop")
+    active_w = int(active["w"]) if active else geometry["width"]
+    active_h = int(active["h"]) if active else geometry["height"]
+    aspect_ratio = resolve_reference_aspect_ratio(active_w, active_h)
     jobs = []
     for seed in seeds:
         for recipe in RECIPES:
@@ -613,8 +797,15 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
     plan = {"schema_version": LT0_VERSION, "execute_authorized": bool(execute),
             "experiment_note": "LT0 为 H3 能力实验；正式 V9-G license 门另行签署",
             "aspect_ratio": aspect_ratio, "seconds": float(seconds),
-            "reference_geometry": geometry, "seeds": list(seeds),
+            "aspect_basis": {"container": geometry, "active_crop": active,
+                             "active": [active_w, active_h]},
+            "seeds": list(seeds),
             "recipes": list(RECIPES),
+            "server_routing": {"prompt_only": "fl2va (t2va task)",
+                               "others": "ref2va",
+                               "note": "A 为 T2VA baseline，非严格同 "
+                                       "checkpoint ablation；干净的 "
+                                       "ablation 是 B vs C vs D"},
             "canonical_pack": pack, "visual_reference": visual_reference,
             "brief_phases": [row["phase"] for row in brief["phases"]],
             "jobs": [{"take_id": job["take_id"],
@@ -636,49 +827,61 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                                    for row in candidates["roles"]],
                 "take_count": len(jobs)}
 
-    # ---- H3 阶段（错峰占卡：H3 先行，Omni 之后）----
+    # ---- H3 阶段（错峰占卡；A 与 B/C/D 分别跑 fl2va / ref2va server）----
     required_indices = [int(item) for item in gpu_set.split(",") if item.strip()]
     preflight = probe_gpu_preflight(required_indices)
     if preflight["status"] != "READY":
         raise LT0Blocked("h3", "BLOCKED_GPU_BUSY",
                          json.dumps(preflight.get("gpus") or [],
                                     ensure_ascii=False))
-    port = ref2va_endpoint.rsplit(":", 1)[-1].split("/")[0]
     repo_root = Path(__file__).resolve().parents[2]
-    server_process = _ensure_h3_server(
-        ref2va_endpoint, manage_server=manage_server, port=int(port),
-        repo_root=repo_root, log_path=output_dir / "h3_server.log")
-    client = SGLangH3Client(ref2va_endpoint)
     take_results = []
-    try:
-        for job in jobs:
-            job_dir = output_dir / "takes" / job["take_id"]
-            state = {"take_id": job["take_id"], "recipe": job["recipe"],
-                     "seed": job["seed"], "state": "planned"}
-            _write_json(job_dir / "job_state.json", state)
-            try:
-                payload = client.serialize_payload(job["request"])
-                created = client.submit(payload)
-                state.update({"state": "submitted", "job_id": created.get("id"),
-                              "accepted_conditions": created.get(
-                                  "accepted_conditions")})
-                _write_json(job_dir / "backend_response.json", created)
-                completed = client.poll(str(created["id"]))
-                state.update({"state": "completed",
-                              "status_payload": completed})
-                media = client.download(str(created["id"]),
-                                        job_dir / "take.mp4")
-                state.update({"state": "downloaded", **media})
-                state["ffprobe"] = common.run_ffprobe_json(
-                    _ffprobe_bin_of(ffmpeg_bin), Path(media["output_path"]))
-                state["state"] = "transport_validated"
-            except V9GBlocked as exc:
-                state.update({"state": "failed", "reason_code": exc.reason_code,
-                              "detail": str(exc)[:500]})
-            _write_json(job_dir / "job_state.json", state)
-            take_results.append(state)
-    finally:
-        _stop_owned_server(server_process)
+
+    def _run_group(group_jobs: list[dict[str, Any]], endpoint: str,
+                   variant: str) -> None:
+        port = endpoint.rsplit(":", 1)[-1].split("/")[0]
+        server_process = _ensure_h3_server(
+            endpoint, variant=variant, manage_server=manage_server,
+            port=int(port), repo_root=repo_root,
+            log_path=output_dir / f"h3_server_{variant}.log")
+        client = SGLangH3Client(endpoint)
+        try:
+            for job in group_jobs:
+                job_dir = output_dir / "takes" / job["take_id"]
+                state = {"take_id": job["take_id"], "recipe": job["recipe"],
+                         "seed": job["seed"], "variant": variant,
+                         "state": "planned"}
+                _write_json(job_dir / "job_state.json", state)
+                try:
+                    payload = client.serialize_payload(job["request"])
+                    created = client.submit(payload)
+                    state.update({"state": "submitted",
+                                  "job_id": created.get("id"),
+                                  "accepted_conditions": created.get(
+                                      "accepted_conditions")})
+                    _write_json(job_dir / "backend_response.json", created)
+                    completed = client.poll(str(created["id"]))
+                    state.update({"state": "completed",
+                                  "status_payload": completed})
+                    media = client.download(str(created["id"]),
+                                            job_dir / "take.mp4")
+                    state.update({"state": "downloaded", **media})
+                    state["ffprobe"] = common.run_ffprobe_json(
+                        _ffprobe_bin_of(ffmpeg_bin), Path(media["output_path"]))
+                    state["state"] = "transport_validated"
+                except V9GBlocked as exc:
+                    state.update({"state": "failed",
+                                  "reason_code": exc.reason_code,
+                                  "detail": str(exc)[:500]})
+                _write_json(job_dir / "job_state.json", state)
+                take_results.append(state)
+        finally:
+            _stop_owned_server(server_process)
+
+    _run_group([job for job in jobs if job["recipe"] == "prompt_only"],
+               fl2va_endpoint, "fl2va")
+    _run_group([job for job in jobs if job["recipe"] != "prompt_only"],
+               ref2va_endpoint, "ref2va")
 
     # ---- Omni 阶段：盲观察 + 身份锚比对 + 三分离对比 ----
     omni_cfg = (getattr(cfg, "perception", None) or {}).get("omni") or {}
@@ -721,9 +924,12 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
     report = {"schema_version": LT0_VERSION,
               "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
               "experiment": "LT0-Q1 same-world resynthesis",
+              "recipe_labels": {"prompt_only": "T2VA baseline (fl2va "
+                              "server)——非严格同 checkpoint ablation；"
+                              "干净 ablation 是 B vs C vs D"},
               "take_states": [{key: state.get(key) for key in
                                ("take_id", "recipe", "seed", "state",
-                                "reason_code")}
+                                "variant", "reason_code")}
                               for state in take_results],
               "matrix": matrix, "summary": summary,
               "interpretation_hints": [
@@ -731,7 +937,8 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                   "若 D 劣于 C：condition 过多可能互相干扰",
                   "结论仅适用于 same-world resynthesis；跨身份迁移（LT1/Q2）另测"],
               "limits": ["First Frame 归 LT0.1", "音频参考对比归后续",
-                         "12 vs 15 时长退化单独实验"]}
+                         "12 vs 15 时长退化单独实验",
+                         "A 组跑在 fl2va checkpoint 上，只作 T2VA baseline"]}
     _write_json(output_dir / "lt0_report.json", report)
     return {"phase": "complete",
             "report_path": str(output_dir / "lt0_report.json"),

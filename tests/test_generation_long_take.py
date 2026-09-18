@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""H3-LT0：S2 Long-Take 实验模块的回归锚定（v2 矩阵 / 三分离评估 / 静音参考）。"""
+"""H3-LT0：S2 Long-Take 实验模块的回归锚定（v2 矩阵 / 官方六段 prompt /
+黑边归一 / 双 variant 执行 / 三分离评估）。"""
 from __future__ import annotations
 
 import json
@@ -10,10 +11,13 @@ import pytest
 
 from src.agentic_video import generation_long_take as lt0
 from src.agentic_video.generation_long_take import (
-    CANONICAL_REFERENCE_CLAUSE, IDENTITY_CHECK_PROMPT, LT0Blocked,
-    LONG_TAKE_OBSERVE_PROMPT, RECIPES, VIDEO_REFERENCE_CLAUSE,
+    IDENTITY_CHECK_PROMPT, LT0Blocked, LONG_TAKE_OBSERVE_PROMPT, RECIPES,
     build_long_take_request, choose_canonical_pack, compare_take_to_brief,
     compile_long_take_brief, resolve_reference_aspect_ratio)
+
+SIX_SECTIONS = ("subject_definitions", "summary", "retention_analysis",
+                "detailed_description", "overall_soundscape",
+                "non_diegetic_music")
 
 
 def _p04e_fixtures() -> dict:
@@ -29,7 +33,8 @@ def _p04e_fixtures() -> dict:
             "主角赛后近景放松"])]
     content = {"sections": [{
         "section_id": "section_02", "interval": [5.1, 16.7],
-        "reference_specific_fact": "一场跆拳道对抗",
+        "reference_specific_fact": "白色道服红色护具的主角在跆拳道馆与对手对抗，"
+                                    "高踢击倒对手后微笑走向镜头。",
         "transferable_structure": "完整对抗事件反驳成见",
         "audience_takeaway": "主角竞技能力远超预期",
         "continuity": {key: "required" for key in (
@@ -67,70 +72,87 @@ def _brief() -> dict:
 
 
 def _pack() -> dict:
+    # LT0 Round 1 无 arena（群像帧不能当纯场景参考）
     return {"schema_version": "x", "entries": [
         {"role": "c0_identity", "path": "/a.jpg", "sha256": "a", "uri": "file:///a.jpg"},
         {"role": "c0_fullbody", "path": "/b.jpg", "sha256": "b", "uri": "file:///b.jpg"},
         {"role": "c1_opponent", "path": "/c.jpg", "sha256": "c", "uri": "file:///c.jpg"},
-        {"role": "arena", "path": "/d.jpg", "sha256": "d", "uri": "file:///d.jpg"},
     ]}
 
 
-def test_brief_compiles_from_frozen_p0_with_phase_evidence() -> None:
+def test_brief_compiles_official_six_sections_with_compressed_phases() -> None:
     brief = _brief()
-    assert [row["phase"] for row in brief["phases"]] == [
-        "initiation", "action", "resolution", "reflection"]
-    evidence = brief["phases"][1]["evidence_text"]
-    assert any("高踢" in row for row in evidence)
-    # 六维 required 连续性进入结构化 brief
-    assert set(brief["required_continuity"].values()) == {"required"}
-    assert brief["editability_target"]["target_duration_s"] == 11.6
-    # base prompt 只描述事件与约束，不引用任何 Picture/Video 标签（A 无参考）
-    assert "<Picture" not in brief["base_event_prompt"]
-    assert "<Video" not in brief["base_event_prompt"]
+    for key in SIX_SECTIONS:
+        assert key in brief["prompt_fields"], key
+    # 语义 phase 压缩：4 个 reflection shots → 1 行（首条证据文本）
+    reflection = [row for row in brief["compressed_phase_lines"]
+                  if row["phase"] == "reflection"][0]
+    assert reflection["line"] == "主角转身微笑"
+    assert "镜头微笑" not in json.dumps(
+        [row for row in brief["compressed_phase_lines"]
+         if row["phase"] != "reflection"], ensure_ascii=False)
+    # 时间箱比例与官方示例一致（2/5/2/3 → 0-2, 2-7, 7-9, 9-12）
+    spans = [box["span_ratio"] for box in brief["phase_timeboxes"]]
+    assert spans[0][0] == 0.0
+    assert spans[0][1] == pytest.approx(1 / 6, abs=1e-3)
+    assert spans[-1][1] == pytest.approx(1.0)
+    # 不再要求"一镜到底"；允许自然机位变化但锁定同一事件/场景/人物
+    clause = brief["continuity_clause"]
+    assert "一镜到底" not in clause
+    assert "Natural camera movement or internal cuts are allowed" in clause
+    assert "different setting" in clause
+    assert brief["subject_textual_definition"].startswith("白色道服红色护具")
 
 
-@pytest.mark.parametrize("recipe,ref_count,has_video", [
-    ("prompt_only", 0, False),
-    ("canonical_only", 4, False),
-    ("video_only", 1, True),
-    ("canonical_plus_video", 5, True),
+@pytest.mark.parametrize("recipe,ref_count,has_video,variant", [
+    ("prompt_only", 0, False, "fl2va"),
+    ("canonical_only", 3, False, "ref2va"),
+    ("video_only", 1, True, "ref2va"),
+    ("canonical_plus_video", 4, True, "ref2va"),
 ])
-def test_recipes_share_base_prompt_and_differ_only_in_clauses(
-        recipe: str, ref_count: int, has_video: bool) -> None:
+def test_wire_prompt_official_structure_per_recipe(
+        recipe: str, ref_count: int, has_video: bool,
+        variant: str) -> None:
     brief = _brief()
-    visual_path = str(Path("/ref.mp4").resolve())  # file:// URI 须绝对路径
+    visual_path = str(Path("/ref.mp4").resolve())
     request = build_long_take_request(
         brief, pack=_pack(),
         visual_reference={"path": visual_path}, recipe=recipe, seed=1001,
-        seconds=12, aspect_ratio="9:16")
-    assert request["seconds"] == 12
-    assert request["target"]["aspect_ratio"] == "9:16"
+        seconds=12, aspect_ratio="3:4")
+    prompt = request["prompt"]
+    for section in SIX_SECTIONS:
+        assert f"{section}:\n" in prompt, section
     conditions = request["conditions"]
     assert len(conditions) == ref_count
     assert all(row["role"] == "reference" for row in conditions)
     if has_video:
         assert conditions[-1]["type"] == "video"
-    assert all(row["type"] == "image" for row in conditions[:max(0, ref_count - (1 if has_video else 0))])
-    prompt = request["prompt"]
-    base = brief["base_event_prompt"]
-    assert prompt.startswith(base)  # 同一 base，不重写
-    if recipe == "prompt_only":
-        assert prompt == base
-    if "canonical" in recipe:
-        assert prompt.endswith(CANONICAL_REFERENCE_CLAUSE.strip()) or \
-            CANONICAL_REFERENCE_CLAUSE.strip() in prompt
-        assert "<Picture 1>" in prompt and "<Picture 4>" in prompt
+    assert request["_lt0"]["server_variant"] == variant
+    has_pictures = recipe in {"canonical_only", "canonical_plus_video"}
+    assert ("<Picture 1>" in prompt) is has_pictures
+    assert ("<Video 1>" in prompt) is has_video
+    if has_pictures:
+        assert "defined jointly by" in prompt  # Subject 1 = Picture 1+2
+        assert "<Subject 2> is the opponent, defined by <Picture 3>" in prompt
+    else:
+        assert "<Subject 1> is the protagonist:" in prompt
     if has_video:
-        assert VIDEO_REFERENCE_CLAUSE.strip() in prompt
-        assert "<Video 1>" in prompt
-    assert request["_lt0"]["recipe"] == recipe
+        assert "Do not require exact source timing" in prompt
+        assert "Transfer from <Video 1>: initiation; action; " \
+               "resolution; reflection" in prompt
+    else:
+        assert "No reference material" in prompt
+    # 时间箱按秒展开（12s → 0-2 / 2-7 / 7-9 / 9-12）
+    assert "0-2s:" in prompt and "9-12s:" in prompt
+    # 相同 brief 字段派生：summary/detailed 骨架不随 recipe 改写
+    assert "12-second taekwondo sparring event clip" in prompt
 
 
 def test_video_only_without_visual_reference_blocks() -> None:
     with pytest.raises(LT0Blocked) as excinfo:
         build_long_take_request(
             _brief(), pack=_pack(), visual_reference=None,
-            recipe="video_only", seed=1, seconds=12, aspect_ratio="16:9")
+            recipe="video_only", seed=1, seconds=12, aspect_ratio="3:4")
     assert excinfo.value.reason_code == "visual_reference_missing"
 
 
@@ -141,24 +163,63 @@ def test_video_only_without_visual_reference_blocks() -> None:
     (1440, 1080, "4:3"),
     (1920, 1080, "16:9"),
     (2560, 1080, "21:9"),
+    (720, 1019, "3:4"),  # 黑边裁剪后的真实有效画面（人工审核 p0510）
 ])
-def test_aspect_resolution_maps_reference_not_hardcoded(
+def test_aspect_resolution_maps_active_picture_not_container(
         width: int, height: int, expected: str) -> None:
     assert resolve_reference_aspect_ratio(width, height) == expected
 
 
-def test_silent_visual_reference_strips_audio(monkeypatch: pytest.MonkeyPatch,
+def test_detect_active_crop_parses_cropdetect(monkeypatch: pytest.MonkeyPatch,
                                               tmp_path: Path) -> None:
+    calls = []
+
+    class FakeCompleted:
+        def __init__(self, stderr: str) -> None:
+            self.stderr = stderr
+            self.returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeCompleted(
+            "[Parsed_cropdetect] ... crop=720:1019:0:129:0x0\n")
+
+    monkeypatch.setattr(lt0.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        lt0, "probe_media_geometry",
+        lambda ffprobe, video: {"width": 720, "height": 1280,
+                                "duration_s": 11.6})
+    crop = lt0.detect_active_crop("ffmpeg", tmp_path / "clip.mp4")
+    assert crop == {"w": 720, "h": 1019, "x": 0, "y": 129}
+    assert len(calls) == 5  # 多帧采样取中位
+
+
+def test_composed_crop_combines_blackbars_and_role_fraction() -> None:
+    active = {"w": 720, "h": 1019, "x": 0, "y": 129}
+    frac = {"frac_x": [0.5, 1.0], "frac_y": [0.0, 1.0]}
+    crop = lt0._composed_crop_filter(active, frac, 720, 1280)
+    assert crop == "crop=360:1019:360:129"
+    # 无黑边 + 无分数 → 不裁
+    assert lt0._composed_crop_filter(None, None, 720, 1280) is None
+
+
+def test_silent_visual_reference_crops_bars_and_strips_audio(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = []
     monkeypatch.setattr(lt0.common, "run_ffmpeg",
                         lambda ffmpeg_bin, args, **kwargs: calls.append(args))
     monkeypatch.setattr(lt0, "_file_hash", lambda path: "hash")
+    monkeypatch.setattr(
+        lt0, "detect_active_crop",
+        lambda ffmpeg_bin, video: {"w": 720, "h": 1019, "x": 0, "y": 129})
     source = tmp_path / "section_02.mp4"
     source.write_bytes(b"clip")
     row = lt0.prepare_visual_reference(source, tmp_path)
-    assert row["sha256"] == "hash"
+    assert row["active_crop"]["h"] == 1019
     flat = [str(item) for item in calls[0]]
-    assert "-an" in flat and "-c:v" in flat and "copy" in flat
+    assert "-an" in flat
+    assert any("crop=720:1019:0:129" in item for item in flat)
+    assert "libx264" in flat  # 裁剪需重编码，copy 不能裁
 
 
 def _observation(*, artifacts=None, motion="natural", missing_phase=None,
@@ -193,7 +254,6 @@ def test_missing_phase_fails_coverage_but_not_quality() -> None:
         _observation(missing_phase="reflection"), _brief())
     assert result["coverage"]["full_event_coverage_pass"] is False
     assert result["coverage"]["missing_phases"] == ["reflection"]
-    # 质量好但缺 phase 的 Take 仍可进素材库（partial success 不丢）
     assert result["quality"]["take_quality_pass"] is True
     assert result["editability"]["usable_for_editing"] is True
 
@@ -222,7 +282,6 @@ def test_identity_insufficient_visibility_is_not_failure() -> None:
             ["blurred", "back_turned", "clear", "clear", "absent"], 1)]
     payload["identity"]["frames"][2]["c0_match"] = True
     result = compare_take_to_brief(payload, _brief())
-    # 可见性不足不判身份失败（高速运动误杀防护）
     assert result["quality"]["cross_take_identity"] is True
 
 
@@ -251,13 +310,16 @@ class FakeRunner:
 def test_observe_long_take_blind_watch_then_anchored_identity(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lt0, "probe_media_geometry",
-                        lambda ffprobe, video: {"width": 1080, "height": 1920,
+                        lambda ffprobe, video: {"width": 720, "height": 1019,
                                                 "duration_s": 12.0})
     created = []
-    monkeypatch.setattr(
-        lt0, "_extract_frame",
-        lambda ffmpeg_bin, reference, timestamp, jpg:
-        (created.append((timestamp, jpg)), jpg.write_bytes(b"f")) and None)
+
+    def fake_extract(ffmpeg_bin, reference, timestamp, jpg,
+                     crop_filter=None):
+        created.append((timestamp, jpg))
+        jpg.write_bytes(b"f")
+
+    monkeypatch.setattr(lt0, "_extract_frame", fake_extract)
     observation = _observation()["observation"]
     identity = {"frames": [
         {"sample_index": index, "c0_visible": "clear", "c0_match": True}
@@ -267,56 +329,73 @@ def test_observe_long_take_blind_watch_then_anchored_identity(
     video.write_bytes(b"v")
     result = lt0.observe_long_take(
         video, tmp_path, runner=runner, take_id="d_s1001", pack=_pack())
-    # 盲观察不带任何参考
     assert runner.watch_calls[0][1] is LONG_TAKE_OBSERVE_PROMPT
     assert runner.watch_calls[0][2]["stop_after_json_object"] is True
-    # 身份检查对 canonical C0 两图 + 5 采样帧，允许 visibility 不足
     images = runner.inspect_calls[0][0]
-    assert len(images) == 7  # 2 canonical + 5 samples
+    assert len(images) == 7  # C0 两锚图 + 5 采样帧
     assert runner.inspect_calls[0][1] is IDENTITY_CHECK_PROMPT
     assert len(created) == 5
-    assert result["duration_s"] == 12.0
     assert result["identity"]["c0_consistent"] is True
 
 
-def test_choose_canonical_pack_requires_pick_within_candidates(
+def test_choose_canonical_pack_accepts_index_and_seconds_picks(
         tmp_path: Path) -> None:
     candidates = {"roles": [{
-        "role": "c0_identity",
+        "role": "c1_opponent",
         "candidates": [
-            {"time_s": 14.28, "path": str(tmp_path / "a.jpg"), "sha256": "a"},
-            {"time_s": 15.1, "path": str(tmp_path / "b.jpg"), "sha256": "b"}]}]}
-    pack = choose_canonical_pack(candidates, tmp_path, picks={"c0_identity": 15.1})
-    assert pack["entries"][0]["chosen_time_s"] == 15.1
+            {"time_s": 6.44, "path": str(tmp_path / "a.jpg"), "sha256": "a"},
+            {"time_s": 6.6, "path": str(tmp_path / "b.jpg"), "sha256": "b"},
+            {"time_s": 6.76, "path": str(tmp_path / "c.jpg"), "sha256": "c"},
+            {"time_s": 6.92, "path": str(tmp_path / "d.jpg"), "sha256": "d"},
+            {"time_s": 7.08, "path": str(tmp_path / "e.jpg"), "sha256": "e"}]}]}
+    # 人工按编号选（p0510：zip 没带时间戳，编号比换算秒方便）
+    pack = choose_canonical_pack(candidates, tmp_path,
+                                 picks={"c1_opponent": "candidate_05"})
+    assert pack["entries"][0]["chosen_time_s"] == 7.08
     assert pack["entries"][0]["uri"].startswith("file://")
+    # 秒数选法仍可用
+    pack = choose_canonical_pack(candidates, tmp_path,
+                                 picks={"c1_opponent": 6.6})
+    assert pack["entries"][0]["chosen_time_s"] == 6.6
     with pytest.raises(LT0Blocked) as excinfo:
         choose_canonical_pack(candidates, tmp_path,
-                              picks={"c0_identity": 13.0})
+                              picks={"c1_opponent": 13.0})
+    assert excinfo.value.reason_code == "canonical_pick_out_of_candidates"
+    with pytest.raises(LT0Blocked) as excinfo:
+        choose_canonical_pack(candidates, tmp_path,
+                              picks={"c1_opponent": "candidate_09"})
     assert excinfo.value.reason_code == "canonical_pick_out_of_candidates"
 
 
-def test_plan_only_writes_requests_without_http(
+def test_plan_only_writes_all_eight_wire_payloads_without_http(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """plan-only 阶段零 HTTP：只产 contact sheet 候选、pack、静音参考与 8 请求。"""
     p04e = _p04e_fixtures()
     p04e_dir = tmp_path / "p04e"
     p04e_dir.mkdir()
-    for name, value in p04e.items():
-        mapping = {"content_program": "reference_content_program.json",
-                   "edit_program": "reference_edit_program.json",
-                   "requirement": "material_requirements.json",
-                   "section_observations": "section_observations.json"}
-        (p04e_dir / mapping[name]).write_text(
-            json.dumps(value), encoding="utf-8")
+    mapping = {"content_program": "reference_content_program.json",
+               "edit_program": "reference_edit_program.json",
+               "requirement": "material_requirements.json",
+               "section_observations": "section_observations.json"}
+    for key, value in p04e.items():
+        (p04e_dir / mapping[key]).write_text(json.dumps(value),
+                                             encoding="utf-8")
     assets = p04e_dir / "review_assets"
     assets.mkdir()
     (assets / "section_02.mp4").write_bytes(b"clip")
-    monkeypatch.setattr(lt0, "probe_media_geometry",
-                        lambda ffprobe, video: {"width": 1080, "height": 1920,
-                                                "duration_s": 11.6})
     monkeypatch.setattr(
-        lt0, "_extract_frame",
-        lambda ffmpeg_bin, reference, timestamp, jpg: jpg.write_bytes(b"f"))
+        lt0, "probe_media_geometry",
+        lambda ffprobe, video: {"width": 720, "height": 1280,
+                                "duration_s": 11.6})
+    monkeypatch.setattr(
+        lt0, "detect_active_crop",
+        lambda ffmpeg_bin, video, **kwargs: {"w": 720, "h": 1019, "x": 0,
+                                             "y": 129})
+
+    def fake_extract(ffmpeg_bin, reference, timestamp, jpg,
+                     crop_filter=None):
+        jpg.write_bytes(b"f")
+
+    monkeypatch.setattr(lt0, "_extract_frame", fake_extract)
     monkeypatch.setattr(lt0, "_file_hash", lambda path: "hash")
     monkeypatch.setattr(lt0.common, "run_ffmpeg", lambda *args, **kwargs: None)
     import src.agentic_video.generation_long_take as module
@@ -326,17 +405,29 @@ def test_plan_only_writes_requests_without_http(
         reference=tmp_path / "video.mp4", plan_only=True, execute=False)
     assert summary["phase"] == "planned"
     assert summary["take_count"] == 8
-    assert summary["aspect_ratio"] == "9:16"
+    assert summary["aspect_ratio"] == "3:4"  # 有效画面而非容器
     plan = json.loads((tmp_path / "out" / "lt0_plan.json").read_text(
         encoding="utf-8"))
     assert plan["execute_authorized"] is False
-    assert plan["recipes"] == list(RECIPES)
-    take_ids = sorted(row.name for row in (tmp_path / "out" / "takes").iterdir())
-    assert len(take_ids) == 8
-    for take_dir in (tmp_path / "out" / "takes").iterdir():
-        request = json.loads((take_dir / "request.json").read_text(
-            encoding="utf-8"))
-        assert 4 <= request["seconds"] <= 15
+    assert plan["aspect_basis"]["active"] == [720, 1019]
+    assert plan["server_routing"]["prompt_only"].startswith("fl2va")
+    take_dirs = sorted((tmp_path / "out" / "takes").iterdir())
+    assert len(take_dirs) == 8
+    prompt_only = json.loads(
+        (tmp_path / "out" / "takes" / "prompt_only_s1001" / "request.json")
+        .read_text(encoding="utf-8"))
+    canonical_d = json.loads(
+        (tmp_path / "out" / "takes" / "canonical_plus_video_s1002" /
+         "request.json").read_text(encoding="utf-8"))
+    # A：零条件、无 <Picture>/<Video> 引用（t2va）
+    assert prompt_only["conditions"] == []
+    assert "<Picture" not in prompt_only["prompt"]
+    assert "<Video" not in prompt_only["prompt"]
+    # D：3 图（无 arena）+ 1 静音视频，标签与条件顺序对应
+    assert [row["type"] for row in canonical_d["conditions"]] == [
+        "image", "image", "image", "video"]
+    assert canonical_d["prompt"].count("<Picture") == 3
+    for take_dir in take_dirs:
         assert (take_dir / "prompt.txt").is_file()
 
 

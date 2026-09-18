@@ -354,6 +354,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference", default="data/videos/7682719919410072847/video.mp4")
     long_take.add_argument("--ref2va-endpoint",
                            default="http://127.0.0.1:30011")
+    long_take.add_argument("--fl2va-endpoint",
+                           default="http://127.0.0.1:30010",
+                           help="prompt_only (t2va) baseline server")
     long_take.add_argument("--gpu-set", default="0,1,6,7")
     long_take.add_argument("--gpu-pairs", default="0,1;6,7",
                            help="Omni observation pairs (H3 stopped first)")
@@ -2242,6 +2245,7 @@ def _long_take_lt0(args, cfg) -> dict:
         cfg, Path(args.p04e_output), Path(args.output),
         reference=Path(args.reference), plan_only=args.plan_only,
         execute=args.execute, ref2va_endpoint=args.ref2va_endpoint,
+        fl2va_endpoint=args.fl2va_endpoint,
         gpu_set=args.gpu_set, seconds=float(args.seconds), seeds=seeds,
         pack_picks=picks, gpu_pairs=args.gpu_pairs,
         manage_server=not args.no_manage_server,
