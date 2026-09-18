@@ -2119,6 +2119,23 @@ REPAIR_HEADER = """上一版输出违反契约校验，未通过。错误清单�
 """
 
 
+def _sanitize_repair_hint(errors: list[str]) -> list[str]:
+    """修复提示去毒：泄漏类错误原文含参考专有词，回喂即教模型照抄。
+
+    p04d 实测：hint 带 ['双手','废人','跆拳道'] → 重写的 requirements 原样
+    出现这三个词。凡泄漏类错误，词表替换为计数描述。
+    """
+    sanitized: list[str] = []
+    for error in errors:
+        if "leaked into requirements" in error:
+            sanitized.append(re.sub(
+                r"\[.*\]", "(若干参考专有事实词，此处隐去，不得在重写中出现任何参考专有事实)",
+                error))
+        else:
+            sanitized.append(error)
+    return sanitized
+
+
 def build_reference_content_program(
         draft: dict[str, Any], resolved: dict[str, Any], ledger: dict[str, Any],
         output_dir: Path, *, runner,
@@ -2193,6 +2210,38 @@ def build_reference_content_program(
                     "basis": "section_level_evidence"})
     if evidence_backfills:
         value["programmatic_evidence_backfill"] = evidence_backfills
+    # P0.4：Section 边界以对账结果为权威（p04d 实测：模型重写时抄回旧草稿
+    # 边界）。section_id 匹配时程序侧直接覆盖 interval/边界引用，记录对齐。
+    observed_by_id = {
+        str(row.get("section_id")): row
+        for row in (section_observations or {}).get("sections") or []}
+    section_alignments: list[dict[str, Any]] = []
+    for section in value.get("sections") or []:
+        row = observed_by_id.get(str(section.get("section_id") or ""))
+        if not row or not isinstance(row.get("source_interval"), list):
+            continue
+        target = [float(row["source_interval"][0]),
+                  float(row["source_interval"][1])]
+        current = section.get("interval")
+        try:
+            same = (len(current) == 2 and
+                    round(float(current[0]), 3) == round(target[0], 3) and
+                    round(float(current[1]), 3) == round(target[1], 3))
+        except (TypeError, ValueError):
+            same = False
+        if same:
+            continue
+        section["interval"] = target
+        shots = row.get("shots") or []
+        if shots:
+            section["start_boundary_id"] = shots[0].get("start_boundary_id")
+            section["end_boundary_id"] = shots[-1].get("end_boundary_id")
+        section_alignments.append({
+            "section_id": section.get("section_id"),
+            "from": current, "to": target,
+            "basis": "reconciliation_authority"})
+    if section_alignments:
+        value["programmatic_section_alignment"] = section_alignments
     value.update({
         "schema_version": CONTENT_VERSION,
         "input_sha256": input_hash,
@@ -3482,7 +3531,9 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
         if not validation["passed"]:
             # P0.2：一轮有界契约修复——把错误清单回喂模型各重问一次（extract_template 同款）。
             # 修复后两版候选择优：取契约错误更少的一版（防“修好A弄坏B”，全程留档）。
-            repair_hint = list(validation["errors"])
+            # p04d 实测：泄漏类错误的原文含参考专有词，直接回喂等于教模型照抄——
+            # 先把禁词泛化成计数再进 hint。
+            repair_hint = _sanitize_repair_hint(list(validation["errors"]))
             first_candidate = (content, edit, requirements, validation)
             content = build_reference_content_program(
                 draft, resolved, ledger, output_dir, runner=runner,

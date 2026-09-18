@@ -639,6 +639,55 @@ def test_continuity_basis_evidence_backfill_from_section_evidence(
             assert support["evidence_ids"], dimension
 
 
+def test_repair_hint_never_carries_leak_terms() -> None:
+    """p04d 实测：泄漏错误原文回喂 → 模型把禁词抄进重写。hint 必须去毒。"""
+    from src.agentic_video.reference_program_v9 import _sanitize_repair_hint
+
+    raw = ["reference or target fact leaked into requirements: "
+           "['双手', '废人', '跆拳道']",
+           "content sections[1].continuity_basis.spatial_orientation reason missing"]
+    sanitized = _sanitize_repair_hint(raw)
+    joined = "".join(sanitized)
+    for term in ("双手", "废人", "跆拳道"):
+        assert term not in joined
+    assert "参考专有事实词" in joined
+    assert "reason missing" in sanitized[1]  # 非泄漏错误原样保留
+
+
+def test_content_sections_clamped_to_reconciliation_authority(
+        tmp_path: Path) -> None:
+    """p04d 实测：模型重写抄回旧草稿边界 → 程序侧按对账权威覆盖 interval。"""
+    from src.agentic_video.reference_program_v9 import (
+        build_reference_content_program)
+
+    drifted = _content()
+    drifted["sections"][0]["interval"] = [0.0, 20.0]  # 旧草稿边界
+    drifted["sections"][0]["end_boundary_id"] = "cut_002"
+    resolved = {"questions": [], "probe_history": [],
+                "required_unresolved_ids": []}
+    value = build_reference_content_program(
+        _draft(), resolved, _ledger(), tmp_path, runner=FakeRunner(ask=[drifted]),
+        section_observations=_section_bank())
+    section = value["sections"][0]
+    assert section["interval"] == [0.0, 20.0]  # 与观察一致（观察即 [0,20]）
+    # 观察与模型一致时不应产生对齐记录
+    assert not value.get("programmatic_section_alignment")
+
+    drifted2 = _content()
+    # 模型抄回旧边界引用（_attach_intervals 会据此算出 [0,10] 的漂移区间）
+    drifted2["sections"][0]["end_boundary_id"] = "cut_001"
+    value2 = build_reference_content_program(
+        _draft(), resolved, _ledger(), tmp_path / "b",
+        runner=FakeRunner(ask=[drifted2]),
+        section_observations=_section_bank(), force=True)
+    assert value2["sections"][0]["interval"] == [0.0, 20.0]
+    assert value2["sections"][0]["end_boundary_id"] == "cut_002"
+    rows = value2["programmatic_section_alignment"]
+    assert rows[0]["from"] == [0.0, 10.0]
+    assert rows[0]["to"] == [0.0, 20.0]
+    assert rows[0]["basis"] == "reconciliation_authority"
+
+
 def test_narrative_usability_block_gates_p0_exit_criteria(
         tmp_path: Path) -> None:
     """P0.4：五条放行标准（生成可用性）进 validation，任一 False = error。"""
