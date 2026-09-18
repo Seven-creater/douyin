@@ -187,7 +187,7 @@ def test_detect_active_crop_from_pixel_rows(monkeypatch: pytest.MonkeyPatch,
         output = Path(cmd[-1])
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(frame)
-        return FakeCompleted(cmd)
+        return FakeCompleted()
 
     monkeypatch.setattr(lt0.subprocess, "run", fake_run)
     monkeypatch.setattr(
