@@ -34,7 +34,7 @@ NORMALIZATION_VERSION = "shot_normalization_v9_p03"
 RECONCILIATION_VERSION = "boundary_reconciliation_v9_p04"
 CONFLICT_GATE_VERSION = "semantic_conflicts_v9_p03"
 MONTAGE_WATCH_VERSION = "montage_shot_observations_v9_p03"
-REQUIREMENTS_VERSION = "material_requirements_v9_p0"
+REQUIREMENTS_VERSION = "material_requirements_v9_p04f"
 HUMAN_REVIEW_VERSION = "reference_program_human_review_v9_p01"
 CONTINUITY_LEVELS = {"required", "preferred", "not_required", "unknown"}
 CONTINUITY_DIMENSIONS = (
@@ -2453,6 +2453,20 @@ def compile_material_requirements(content: dict[str, Any], edit: dict[str, Any],
         pattern = patterns.get(section_id) or {}
         mode = str(pattern.get("composition_mode") or "continuous_clip")
         phases = _semantic_phases(pattern)
+        # P0.4F 修复 1：终段笑点强制进合同（人工审核 p04e：感知有
+        # final_text_quote，Requirement 却把 humorous_punchline 编译丢了，
+        # 生成端会产出标准励志片而非反差笑点）。
+        final_quote = str(section.get("final_text_quote") or "").strip()
+        if final_quote and "humorous_punchline" not in phases:
+            phases = [*phases, "humorous_punchline"]
+        # P0.4F 修复 2：转场风格编译进合同（识别出 zoom_blur/whip_pan 却
+        # 只传 count=6，剪辑手法信息在编译层丢失）。
+        transition_sequence = [
+            str(row.get("transition_type"))
+            for row in (normalized_by_section.get(section_id) or {})
+            .get("transition_segments") or []
+            if str(row.get("transition_type") or "") not in {
+                "", "None", "unclassified"}]
         requirement = {
             "requirement_id": f"req_{len(requirements) + 1:02d}",
             "section_id": section_id,
@@ -2517,6 +2531,26 @@ def compile_material_requirements(content: dict[str, Any], edit: dict[str, Any],
                 "meaning_and_causality_must_not_change": True,
                 "synthetic_statement_from_unrelated_sentences_disallowed": True,
                 "audio_bridge_allowed": True,
+            }
+        if final_quote:
+            requirement["semantic_requirement"]["punchline_requirement"] = {
+                "required": True,
+                "function": "humorous_contrast",
+                "reference_text": final_quote,
+                # 迁移的是"能力展示后用小限制做幽默反差"的结构，
+                # 不是这句字面文本（换人物后不必复述同一句话）。
+                "literal_text_transfer_required": False,
+            }
+        if transition_sequence:
+            transition_count = len(transition_sequence)
+            requirement["presentation_requirement"][
+                "transition_requirement"] = {
+                "style_family": sorted(set(transition_sequence)),
+                "reference_sequence": list(transition_sequence),
+                "count_range": [max(2, math.ceil(0.6 * transition_count)),
+                                transition_count + 1],
+                "exact_sequence_required": False,
+                "reuse_policy": "approximate_pattern",
             }
         requirements.append(requirement)
     result = {
@@ -2863,10 +2897,59 @@ def validate_reference_programs(content: dict[str, Any], edit: dict[str, Any],
     for key, value in usability.items():
         if value is False:
             errors.append(f"narrative_usability:{key}")
+    transfer = validate_material_transfer(requirements, content)
+    for key, value in transfer.items():
+        if value is False:
+            errors.append(f"material_transfer:{key}")
     return {
         "schema_version": "reference_program_validation_v9",
         "passed": not errors, "errors": errors, "warnings": warnings,
         "narrative_usability": usability,
+        "material_transfer": transfer,
+    }
+
+
+def validate_material_transfer(requirements: dict[str, Any],
+                               content: dict[str, Any]) -> dict[str, bool]:
+    """P0.4F 修复 3：匿名合同自足性（Material Transfer Validator）。
+
+    不再问"参考视频理解对不对"，问：**没看过参考视频的人只读匿名
+    Requirement，能不能生成一条结构相似的视频？**任一关键结构信息
+    （意义/蒙太奇下限/转场风格/笑点/连续性）没编译进合同即 False。
+    """
+    rows = requirements.get("requirements") or []
+    sections = content.get("sections") or []
+    by_id = {str(row.get("section_id")): row for row in rows}
+    meaning_ok = bool(rows) and len(rows) == len(sections) and all(
+        str((row.get("semantic_requirement") or {}).get("meaning_to_prove")
+            or "").strip() for row in rows)
+    snippet_ok = True
+    for row in rows:
+        presentation = row.get("presentation_requirement") or {}
+        if ((presentation.get("reference_content_shot_count") or 0) >= 2 and
+                (presentation.get("snippet_count_range") or [2])[0] < 2):
+            snippet_ok = False
+    transitions_ok = all(
+        ((row.get("presentation_requirement") or {}).get(
+            "transition_requirement") or {}).get("reference_sequence")
+        for row in rows
+        if (row.get("presentation_requirement") or {}).get(
+                "reference_transition_count"))
+    punchline_ok = all(
+        (((by_id.get(str(section.get("section_id")) or "") or {})
+          .get("semantic_requirement") or {}).get("punchline_requirement")
+         or {}).get("required") is True
+        for section in sections
+        if str(section.get("final_text_quote") or "").strip())
+    continuity_ok = all(
+        set((row.get("continuity_requirement") or {}).get("levels") or []) >=
+        set(CONTINUITY_DIMENSIONS) for row in rows) if rows else False
+    return {
+        "sections_have_meaning_to_prove": meaning_ok,
+        "montage_sections_keep_snippet_floor": snippet_ok,
+        "transitions_compiled_with_style": transitions_ok,
+        "punchline_compiled": punchline_ok,
+        "continuity_levels_recorded": continuity_ok,
     }
 
 
@@ -3030,6 +3113,17 @@ def _validate_p02_structure(
                         f"{first['section_id']} hook takeaway does not present "
                         "the quoted proposition (reads as introduction)")
             break
+    # P0.4F：非末段的 cognition_change 不得提前剧透全片结论（人工审核
+    # p04e：S1 的 after 写了"实现自我价值"，把 S2/S3 的结论提前到 Hook 段）。
+    # 影响中等且属模型文字层——只警告不阻断，冻结前人工确认。
+    conclusion_markers = ("自我价值", "社会贡献", "积极贡献者", "证明自己成功")
+    for section in sections[:-1]:
+        after = str(((section.get("cognition_change") or {}).get("after"))
+                    or "")
+        if any(marker in after for marker in conclusion_markers):
+            warnings.append(
+                f"{section['section_id']} cognition_change.after spoils the "
+                "full-video conclusion in an early section")
     # P0.3：蒙太奇类模式 snippet 下限必须 >=2，与参考镜头结构一致。
     patterns_by_section = {
         str(row.get("section_id")): row

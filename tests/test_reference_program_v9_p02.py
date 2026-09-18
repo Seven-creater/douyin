@@ -688,6 +688,123 @@ def test_content_sections_clamped_to_reconciliation_authority(
     assert rows[0]["basis"] == "reconciliation_authority"
 
 
+def test_punchline_and_transition_style_compiled_into_requirements(
+        tmp_path: Path) -> None:
+    """P0.4F：终段笑点与转场风格必须编译进 Material Requirements。"""
+    ledger = _ledger()
+    ledger["ocr"]["normalized_claim_events"] = [
+        {"claim_id": "ocr_001", "interval": [1.0, 3.0],
+         "text": "人们常常觉得失去了双手就会变成一个废人",
+         "evidence_type": "observed_textual_claim"},
+        {"claim_id": "ocr_002", "interval": [21.0, 21.9],
+         "text": "但不会剪脚指甲", "evidence_type": "observed_textual_claim"},
+    ]
+    content = _content()
+    content["sections"][0]["hook_text_quote"] = "失去了双手就会变成一个废人"
+    content["sections"][-1]["final_text_quote"] = "不会剪脚指甲"
+    edit = _edit()
+    normalization = {"sections": [
+        {"section_id": "competition", "content_shots": [], "transition_segments": []},
+        {"section_id": "proofs", "content_shots": [
+            {"shot_id": f"proofs.shot_C{i:02d}", "interval": [i, i + 1],
+             "duration_s": 1.0, "information_added": "x", "edit_function": "y",
+             "event_relation": "different_event", "interior_real_cuts": []}
+            for i in range(1, 9)],
+         "transition_segments": [
+             {"transition_id": f"transition_T{i:02d}", "interval": [i, i + 0.1],
+              "duration_s": 0.1,
+              "transition_type": kind}
+             for i, kind in enumerate(
+                 ["zoom_blur", "whip_pan", "whip_pan", "whip_pan",
+                  "zoom_blur", "whip_pan"], 1)]},
+    ]}
+    req = compile_material_requirements(content, edit, tmp_path,
+                                        normalization=normalization)
+    result = validate_reference_programs(content, edit, req, ledger,
+                                         _section_bank(),
+                                         reconciliation=_reconciliation(),
+                                         normalization=normalization)
+    proofs = req["requirements"][-1]
+    # 修复 1：punchline 进 phase + 合同块（字面文本不要求迁移）
+    assert "humorous_punchline" in proofs["semantic_requirement"][
+        "required_semantic_phases"]
+    punch = proofs["semantic_requirement"]["punchline_requirement"]
+    assert punch["required"] is True
+    assert punch["function"] == "humorous_contrast"
+    assert punch["reference_text"] == "不会剪脚指甲"
+    assert punch["literal_text_transfer_required"] is False
+    # 修复 2：转场风格进合同（序列、风格族、近似复用策略）
+    transition = proofs["presentation_requirement"]["transition_requirement"]
+    assert transition["reference_sequence"] == [
+        "zoom_blur", "whip_pan", "whip_pan", "whip_pan", "zoom_blur",
+        "whip_pan"]
+    assert transition["style_family"] == ["whip_pan", "zoom_blur"]
+    assert transition["count_range"] == [4, 7]
+    assert transition["exact_sequence_required"] is False
+    assert transition["reuse_policy"] == "approximate_pattern"
+    # 修复 3：Material Transfer Validator 全过
+    assert result["material_transfer"] == {
+        "sections_have_meaning_to_prove": True,
+        "montage_sections_keep_snippet_floor": True,
+        "transitions_compiled_with_style": True,
+        "punchline_compiled": True,
+        "continuity_levels_recorded": True,
+    }
+
+
+def test_transfer_validator_fails_when_punchline_or_transitions_dropped(
+        tmp_path: Path) -> None:
+    """编译层丢信息 = 放行前拦下（p04e 人工审核发现的两类丢失）。"""
+    content = _content()
+    content["sections"][-1]["final_text_quote"] = "不会剪脚指甲"
+    edit = _edit()
+    normalization = {"sections": [
+        {"section_id": "competition", "content_shots": [], "transition_segments": []},
+        {"section_id": "proofs", "content_shots": [
+            {"shot_id": "proofs.shot_C01", "interval": [20.0, 30.0],
+             "duration_s": 10.0, "information_added": "x", "edit_function": "y",
+             "event_relation": "different_event", "interior_real_cuts": []}],
+         "transition_segments": [
+             {"transition_id": "transition_T01", "interval": [22.0, 22.1],
+              "duration_s": 0.1, "transition_type": "whip_pan"}]},
+    ]}
+    req = compile_material_requirements(content, edit, tmp_path,
+                                        normalization=normalization)
+    # 模拟编译丢失：删掉 punchline 与 transition 合同块
+    last = req["requirements"][-1]
+    last["semantic_requirement"].pop("punchline_requirement")
+    last["semantic_requirement"]["required_semantic_phases"] = [
+        p for p in last["semantic_requirement"]["required_semantic_phases"]
+        if p != "humorous_punchline"]
+    last["presentation_requirement"].pop("transition_requirement")
+    result = validate_reference_programs(content, edit, req, _ledger(),
+                                         _section_bank(),
+                                         reconciliation=_reconciliation(),
+                                         normalization=normalization)
+    assert result["material_transfer"]["punchline_compiled"] is False
+    assert result["material_transfer"]["transitions_compiled_with_style"] is False
+    assert any("material_transfer:punchline_compiled" in error
+               for error in result["errors"])
+    assert any("material_transfer:transitions_compiled_with_style" in error
+               for error in result["errors"])
+
+
+def test_early_section_conclusion_spoiler_warns_without_blocking(
+        tmp_path: Path) -> None:
+    content = _content()
+    content["sections"][0]["cognition_change"] = {
+        "before": "观众还不了解人物",
+        "after": "观众认识到她实现自我价值，成为社会的积极贡献者。"}
+    edit = _edit()
+    req = compile_material_requirements(content, edit, tmp_path)
+    result = validate_reference_programs(content, edit, req, _ledger(),
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert any("spoils the full-video conclusion" in warning
+               for warning in result["warnings"])
+    assert not any("spoils" in error for error in result["errors"])
+
+
 def test_narrative_usability_block_gates_p0_exit_criteria(
         tmp_path: Path) -> None:
     """P0.4：五条放行标准（生成可用性）进 validation，任一 False = error。"""
