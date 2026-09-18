@@ -2004,6 +2004,8 @@ EDIT_PROGRAM_PROMPT = """根据 Content Program、确定性时间线和逐 Secti
 shot_refs 只能引用输入 normalized_shots 的内容镜头 id（shot_C..）；转场段引用
 transition_refs（transition_T..），不得把转场段当内容镜头。两个数组的 id 只能来自
 输入中实际存在的 id，没有对应元素就留空数组，禁止按命名规律编造 id。
+operation_type 与 composition_mode 是两套枚举：蒙太奇属于 composition_mode，
+operation_type 里不得出现任何 *_montage 值，蒙太奇段的拼接操作就写 hard_cut。
 composition_mode 必须与镜头结构一致：内容镜头多于 1 个或有内部真切点的 Section 不得
 用 continuous_clip；单一内容镜头且无转场的 Section 不得声称蒙太奇类模式。
 同一连续事件多角度快速切换用 multi_angle_action；以屏幕文字/照片卡为主体的快速罗列
@@ -2163,6 +2165,17 @@ def build_reference_edit_program(
         str(row.get("section_id")): row
         for row in (normalization or {}).get("sections") or []}
     programmatic_alignments: list[dict[str, Any]] = []
+    # P0.4：operation_type 误填 composition_mode 枚举（如 text_led_montage）
+    # 是两套枚举的类别错误；蒙太奇在 operation 层就是 hard_cut 拼接。
+    for index, operation in enumerate(value.get("operations") or []):
+        op_type = str(operation.get("operation_type") or "")
+        if op_type in COMPOSITION_MODES:
+            operation["operation_type"] = "hard_cut"
+            programmatic_alignments.append({
+                "section_id": str(operation.get("section_id") or ""),
+                "field": f"operations[{index}].operation_type",
+                "from": op_type, "to": "hard_cut",
+                "basis": "composition_mode_misused_as_operation_type"})
     for pattern in value.get("editorial_patterns") or []:
         section_id = str(pattern.get("section_id") or "")
         mode = str(pattern.get("composition_mode") or "")

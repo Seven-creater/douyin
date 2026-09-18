@@ -548,9 +548,11 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     _attach_intervals(content, _ledger(),
                       keys=("meaningful_units", "sections"), stage="edit_program")
     raw_edit = _edit()
-    # 模型错误一：多镜头段标 continuous_clip；错误二：event_compression 缺模式常量
+    # 模型错误一：多镜头段标 continuous_clip；错误二：event_compression 缺模式常量；
+    # 错误三：composition_mode 枚举误填进 operation_type
     raw_edit["editorial_patterns"][0]["composition_mode"] = "continuous_clip"
     raw_edit["editorial_patterns"][0]["snippet_count_range"] = [1, 1]
+    raw_edit["operations"][0]["operation_type"] = "text_led_montage"
     raw_edit["editorial_patterns"][1]["composition_mode"] = "event_compression_montage"
     raw_edit["editorial_patterns"][1]["source_continuity"] = "continuous_required"
     raw_edit["editorial_patterns"][1]["ordering_constraint"] = "source_order"
@@ -578,6 +580,11 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     assert aligns["composition_mode"]["from"] == "continuous_clip"
     assert aligns["composition_mode"]["basis"] == "derived_from_shot_sequence"
     assert aligns["source_continuity"]["basis"] == "mode_mandated_constant"
+    # P0.4：composition_mode 误填 operation_type → 确定性矫正为 hard_cut
+    op_align = aligns["operations[0].operation_type"]
+    assert op_align["from"] == "text_led_montage"
+    assert op_align["to"] == "hard_cut"
+    assert edit["operations"][0]["operation_type"] == "hard_cut"
 
 
 def test_narrative_usability_block_gates_p0_exit_criteria(
