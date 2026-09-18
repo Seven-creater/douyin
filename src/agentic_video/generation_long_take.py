@@ -581,9 +581,9 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
     from src.agentic_video.generation_p51 import probe_gpu_preflight
     from src.perception.omni_pool import OmniProcessPool
 
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    p04e = _load_p04e(Path(p04e_dir))
+    p04e = _load_p04e(Path(p04e_dir).resolve())
     section_clip = Path(p04e_dir) / "review_assets" / "section_02.mp4"
     if not section_clip.is_file():
         raise LT0Blocked("plan", "section_clip_missing", str(section_clip))
