@@ -25,14 +25,14 @@ from src.perception.inspect_video import inspect_video
 from src.perception.omni_runner import cut_clip
 
 
-V9_VERSION = "reference_program_v9_p02"
-CONTENT_VERSION = "reference_content_program_v9_p02"
-EDIT_VERSION = "reference_edit_program_v9_p02"
-SECTION_OBSERVATIONS_VERSION = "section_observations_v9_p02"
-NORMALIZATION_VERSION = "shot_normalization_v9_p02"
-RECONCILIATION_VERSION = "boundary_reconciliation_v9_p02"
-CONFLICT_GATE_VERSION = "semantic_conflicts_v9_p02"
-MONTAGE_WATCH_VERSION = "montage_shot_observations_v9_p02"
+V9_VERSION = "reference_program_v9_p03"
+CONTENT_VERSION = "reference_content_program_v9_p03"
+EDIT_VERSION = "reference_edit_program_v9_p03"
+SECTION_OBSERVATIONS_VERSION = "section_observations_v9_p03"
+NORMALIZATION_VERSION = "shot_normalization_v9_p03"
+RECONCILIATION_VERSION = "boundary_reconciliation_v9_p03"
+CONFLICT_GATE_VERSION = "semantic_conflicts_v9_p03"
+MONTAGE_WATCH_VERSION = "montage_shot_observations_v9_p03"
 REQUIREMENTS_VERSION = "material_requirements_v9_p0"
 HUMAN_REVIEW_VERSION = "reference_program_human_review_v9_p01"
 CONTINUITY_LEVELS = {"required", "preferred", "not_required", "unknown"}
@@ -62,6 +62,13 @@ TRANSITION_MAX_S = 0.30
 MONTAGE_SHOT_TRIGGER_COUNT = 4
 MONTAGE_MEDIAN_SHOT_MAX_S = 0.8
 MONTAGE_TRANSITION_TRIGGER_COUNT = 2
+# P0.3：边界对账最大迭代轮数（move 后必须复查新边界，直到真实语义变化）。
+RECONCILE_MAX_ITERATIONS = 4
+# P0.3：蒙太奇类模式的 snippet 数与参考镜头结构对齐（下限≈0.6n）。
+MONTAGE_LIKE_MODES = {
+    "micro_montage", "event_compression_montage", "evidence_montage",
+    "multi_angle_action", "contrast_montage", "text_led_montage",
+}
 OPERATION_TYPES = {
     "hard_cut", "speed_change", "freeze", "text_overlay", "text_animation",
     "bgm", "transition", "crop_reframe", "other",
@@ -644,7 +651,8 @@ SECTION_WATCH_PROMPT = """直接观看这一段参考原视频，只输出一个
 属于同一事件；看不清的地方明确写成未决问题。时间只能引用输入中的 boundary_id。
 首个 shot 的 event_relation 表示它与本 Section 开始之前的画面是否属于同一连续事件；
 若本段开头仍在延续上一段的事件，必须如实写 same_event，不得为了配合分段而改写。
-cut_assessments 只能评估输入 cut_candidates_to_assess 列出的内部切点；Section 起止
+cut_assessments 必须逐一评估输入 cut_candidates_to_assess 列出的**每一个**内部切点
+（real_cut/not_cut/uncertain 三选一，附画面依据），一个都不能遗漏；Section 起止
 boundary 只是时间锚点，未列入该数组时不得当作本段可验证切点。数组为空则输出空数组。
 {
   "section_id":"...",
@@ -737,6 +745,12 @@ def _observe_section(reference: Path, section_id: str, interval: list[float],
                 assessment.get("status") not in {"real_cut", "not_cut", "uncertain"} or
                 not str(assessment.get("reason") or "").strip()):
             raise V9Blocked("section_watch", "cut_assessment_invalid", section_id)
+    # P0.3：每个 Section 内部候选切点必须逐一交作业，不允许"剩下都是同一个镜头"。
+    assessed = {str(row.get("boundary_id")) for row in value.get("cut_assessments") or []}
+    missing_cuts = sorted(valid_cuts - assessed)
+    if missing_cuts:
+        raise V9Blocked("section_watch", "cut_assessment_missing",
+                        f"{section_id}:{missing_cuts}")
     value.update({
         "source_interval": interval,
         "source_sha256": ledger["reference"]["sha256"],
@@ -862,259 +876,202 @@ def normalize_section_shots(section_observations: dict[str, Any],
             "sections": sections_out}
 
 
-def _aligned_montage_for_payload(normalization: dict[str, Any],
-                                 montage: dict[str, Any] | None) -> dict[str, Any]:
-    """把逐镜头观察对齐到最终归一化：升回内容镜头的段改标 content 并换成新 shot id。
-
-    否则 payload 里残留已被升回的 transition_T.. 旧 id，模型会引用不存在的转场段。
-    """
-    if not montage:
-        return montage or {}
-    promote_map: dict[str, str] = {}
-    for section in normalization.get("sections") or []:
-        for shot in section.get("content_shots") or []:
-            if shot.get("reclassified_from"):
-                promote_map[str(shot["reclassified_from"])] = str(shot["shot_id"])
-    final_transition_ids = {
-        str(row.get("transition_id"))
-        for section in normalization.get("sections") or []
-        for row in section.get("transition_segments") or []}
-    aligned = dict(montage)
-    aligned["sections"] = []
-    for section in montage.get("sections") or []:
-        rows = []
-        for row in section.get("segments") or []:
-            row = dict(row)
-            segment_id = str(row.get("segment_id"))
-            if segment_id in promote_map:
-                row["segment_id"] = promote_map[segment_id]
-                row["segment_kind"] = "content_promoted"
-            rows.append(row)
-        aligned["sections"].append({**section, "segments": rows})
-    return aligned
-
-
 def apply_montage_reclassification(normalization: dict[str, Any],
                                    montage: dict[str, Any] | None) -> dict[str, Any]:
-    """快速蒙太奇逐镜头观察可把带实义屏幕文字的转场段升回内容镜头（附依据）。"""
+    """P0.3：转场段永远保持 transition 身份；逐镜头观察只补充类型与叠加文字。
+
+    转场期间画面上挂着字幕不代表它是内容镜头——文字记为 overlay_text 属性。
+    """
     if not montage:
         return normalization
-    by_transition = {
+    by_segment = {
         str(row.get("segment_id")): row
         for section in montage.get("sections") or []
         for row in section.get("segments") or []}
     for section in normalization.get("sections") or []:
-        promoted = []
-        kept_transitions = []
         for transition in section.get("transition_segments") or []:
-            observed = by_transition.get(str(transition.get("transition_id")))
-            text = str((observed or {}).get("on_screen_text") or "").strip()
-            if observed and text:
-                promoted.append({
-                    "shot_id": f"{section['section_id']}.shot_C{99 - len(promoted):02d}_promoted",
-                    "interval": transition["interval"],
-                    "duration_s": transition["duration_s"],
-                    "information_added": str(observed.get("visible_content") or ""),
-                    "edit_function": "on_screen_text_present",
-                    "event_relation": "uncertain",
-                    "carried_model_shot_id": transition.get("carried_model_shot_id"),
-                    "interior_real_cuts": [],
-                    "reclassified_from": transition["transition_id"],
-                    "reclassification_basis": "montage_on_screen_text",
-                })
-            else:
-                if observed and str(observed.get("transition_type") or "") in TRANSITION_TYPES:
-                    transition["transition_type"] = str(observed["transition_type"])
-                    transition["classification_basis"] = ["montage_observation"]
-                kept_transitions.append(transition)
-        section["transition_segments"] = kept_transitions
-        # 升回的内容镜头按区间顺序并入并重新编号
-        merged = sorted((section.get("content_shots") or []) + promoted,
-                        key=lambda row: float(row["interval"][0]))
-        for index, shot in enumerate(merged, 1):
-            shot["shot_id"] = f"{section['section_id']}.shot_C{index:02d}"
-        section["content_shots"] = merged
+            observed = by_segment.get(str(transition.get("transition_id")))
+            if not observed:
+                continue
+            if str(observed.get("transition_type") or "") in TRANSITION_TYPES:
+                transition["transition_type"] = str(observed["transition_type"])
+                transition["classification_basis"] = ["montage_observation"]
+            overlay = str(observed.get("on_screen_text") or "").strip()
+            if overlay:
+                transition["overlay_text"] = overlay
+                transition["overlay_basis"] = "montage_observation"
     return normalization
 
 
-RECONCILIATION_PROMPT = """你是分段边界审计器。给你每个相邻 Section 边界两侧已观察到的
-镜头描述（含区间与 event_relation）。判断：该边界处是否真实发生了语义变化
-（新事件/新场景/新人物关系/新叙事功能）？若没有，从 candidate_boundary_ids 中选出
-第一个真实语义变化点；两侧都没有变化时 recommended_boundary_id 填 null。
+BOUNDARY_FRAME_CHECK_PROMPT = """判断视频边界两侧是否发生语义变化。输入是边界前后
+各三帧（按时间顺序：before_1 约-2.0s、before_2 约-1.0s、before_3 约-0.4s、
+after_1 约+0.4s、after_2 约+1.0s、after_3 约+2.0s）。从三个维度分别判断连续性：
+event（是否同一事件的延续，含准备/对抗/结果/反应阶段）、rhetorical_function
+（叙事功能是否改变：提出命题/提供反证/扩展证据/收尾打趣等）、audience_cognition
+（观众此刻获得的信息是否发生质变）。任一维度不连续即 semantic_change=true。
+注意：同主题不等于同事件（都属跆拳道也可以是"提出偏见"与"反驳偏见"两种功能）。
 只输出一个 JSON 对象：
-{"boundaries":[{"boundary_id":"...","semantic_change":false,"change_types":["event|scene|subject_config|narrative_function|none"],
-  "reason":"画面依据","recommended_boundary_id":null}]}
+{"event_continuity": true, "rhetorical_function_continuity": false,
+ "audience_cognition_continuity": false, "semantic_change": true,
+ "reason": "画面依据"}
 输入："""
+
+
+def _boundary_frames(ffmpeg_bin: str, reference: Path, pts: float,
+                      out_dir: Path, span: tuple[float, float]) -> list[Path]:
+    """边界前后各三帧（before/after 各 -2/-1/-0.4 与 +0.4/+1/+2 秒）。"""
+    offsets = (-2.0, -1.0, -0.4, 0.4, 1.0, 2.0)
+    names = ("before_1", "before_2", "before_3", "after_1", "after_2", "after_3")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frames = []
+    for name, offset in zip(names, offsets):
+        timestamp = min(max(pts + offset, span[0] + 0.02), span[1] - 0.02)
+        jpg = out_dir / f"{name}.jpg"
+        if not jpg.is_file():
+            common.run_ffmpeg(ffmpeg_bin, [
+                "-y", "-ss", f"{timestamp:.3f}", "-i", str(reference),
+                "-frames:v", "1", "-q:v", "3", str(jpg)], timeout_s=60)
+        frames.append(jpg)
+    return frames
+
+
+def _frame_check_boundary(reference: Path, pts: float, ledger: dict[str, Any],
+                          output_dir: Path, *, runner, ffmpeg_bin: str,
+                          attempt: int, slug: str) -> dict[str, Any]:
+    duration = float(ledger["reference"]["duration_s"])
+    images = _boundary_frames(ffmpeg_bin, Path(reference), pts,
+                              output_dir / "boundary_frames" /
+                              f"{slug}_a{attempt}", (0.0, duration))
+    answer = runner.inspect_media(
+        images, BOUNDARY_FRAME_CHECK_PROMPT,
+        max_new_tokens=768, stop_after_json_object=True)
+    raw = _answer_text(answer)
+    raw_path = (output_dir / "raw_responses" /
+                f"boundary_{slug}_a{attempt}.txt")
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text(raw, encoding="utf-8")
+    verdict = _parse_one_object(raw, stage="boundary_reconciliation")
+    if not isinstance(verdict.get("semantic_change"), bool):
+        raise V9Blocked("boundary_reconciliation", "frame_check_verdict_invalid",
+                        slug)
+    return verdict
 
 
 def reconcile_section_boundaries(
         reference: Path, ledger: dict[str, Any],
         section_observations: dict[str, Any], output_dir: Path, *, runner,
-        force: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
-    """P0.2 Section Boundary Reconciliation.
+        ffmpeg_bin: str = "ffmpeg", force: bool = False
+        ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """P0.3 迭代式 Section Boundary Reconciliation（reconcile-until-stable）。
 
-    Direct Rewatch 之后审计每个内部 Section 边界：若边界两侧仍属同一事件且无语义
-    变化，则把边界移动到模型指定的第一个真实语义变化点（必须是既有 boundary），
-    并对区间变化的 Section 重新观察。一次有界对账，不做多轮搜索。
+    每个内部边界：先用确定性规则（下一 Section 首 shot 报 same_event 即事件内部），
+    否则用边界前后各三帧直接做画面级三维度判定（event / rhetorical_function /
+    audience cognition）。不成立则移动到下一个候选边界并复查新边界，
+    直到真实语义变化或候选耗尽（BLOCKED）。
     """
     output_dir = Path(output_dir)
-    output_path = output_dir / "boundary_reconciliation.json"
-    rows = list(section_observations.get("sections") or [])
+    rows = [dict(row) for row in section_observations.get("sections") or []]
     source_hash = ledger["reference"]["sha256"]
-    input_hash = json_hash({"observations": section_observations,
-                            "prompt": RECONCILIATION_PROMPT})
-    if output_path.is_file() and not force:
-        cached = json.loads(output_path.read_text(encoding="utf-8"))
-        if cached.get("input_sha256") == input_hash and cached.get(
-                "sections_after") is not None:
-            observations_path = output_dir / "section_observations.json"
-            current = json.loads(observations_path.read_text(encoding="utf-8")) \
-                if observations_path.is_file() else {}
-            if (current.get("reference_sha256") == source_hash and
-                    current.get("reconciled") is True):
-                return cached, current
-    if len(rows) < 2:
-        result = {"schema_version": RECONCILIATION_VERSION,
-                  "input_sha256": input_hash, "boundaries": [],
-                  "sections_after": [
-                      {"section_id": str(row.get("section_id")),
-                       "interval": row.get("source_interval")} for row in rows],
-                  "rewatched": []}
-        _write_json(output_path, result)
-        return result, section_observations
-
     boundary_pts = _boundary_map(ledger)
 
-    def _nearest_boundary_id(pts: float) -> str:
-        return min(boundary_pts, key=lambda bid: abs(boundary_pts[bid] - pts))
+    def _nearest_boundary_id(pts_value: float) -> str:
+        return min(boundary_pts, key=lambda bid: abs(
+            boundary_pts[bid] - pts_value))
 
-    # P0.2 修复 A：same_event 确定性规则——下一 Section 首 shot 与段前属同一事件时，
-    # 边界处于事件内部，不得保留；强制移动到 same_event 连跑结束处。
-    forced_moves: dict[str, str] = {}
-    for index in range(len(rows) - 1):
-        next_row = rows[index + 1]
-        head_shots = next_row.get("shots") or []
-        if not head_shots or head_shots[0].get("event_relation") != "same_event":
-            continue
-        boundary_id = _nearest_boundary_id(float(next_row["source_interval"][0]))
-        target_id = None
-        for shot in head_shots:
-            if shot.get("event_relation") != "same_event":
-                target_id = _nearest_boundary_id(float(shot["interval"][0]))
-                break
-        if target_id is not None and target_id != boundary_id:
-            forced_moves[boundary_id] = target_id
-
-    payload = []
+    records: list[dict[str, Any]] = []
+    rewatched: list[str] = []
     for index in range(len(rows) - 1):
         previous_row, next_row = rows[index], rows[index + 1]
-        previous_interval = [float(v) for v in previous_row["source_interval"]]
-        next_interval = [float(v) for v in next_row["source_interval"]]
-        boundary_id = min(
-            boundary_pts, key=lambda bid: abs(
-                boundary_pts[bid] - next_interval[0]))
-        if abs(boundary_pts[boundary_id] - next_interval[0]) > 1e-6:
-            raise V9Blocked("boundary_reconciliation", "boundary_not_in_registry",
-                            f"{previous_row.get('section_id')}/{next_row.get('section_id')}")
+        section_span = (float(previous_row["source_interval"][0]),
+                        float(next_row["source_interval"][1]))
+        original_id = _nearest_boundary_id(float(next_row["source_interval"][0]))
         candidates = sorted(
-            ({"boundary_id": bid, "pts_s": pts} for bid, pts in boundary_pts.items()
-             if previous_interval[0] + 1e-6 < pts < next_interval[1] - 1e-6 and
-             bid != boundary_id),
-            key=lambda item: item["pts_s"])
-        payload.append({
-            "boundary_id": boundary_id,
+            (bid for bid, pts_value in boundary_pts.items()
+             if section_span[0] + 1e-6 < pts_value < section_span[1] - 1e-6
+             and bid not in {"video_start", "video_end"}),
+            key=lambda bid: boundary_pts[bid])
+        current_id = original_id
+        attempts: list[dict[str, Any]] = []
+        accepted_id = None
+        for _attempt in range(RECONCILE_MAX_ITERATIONS):
+            current_pts = boundary_pts[current_id]
+            head_shots = next_row.get("shots") or []
+            head_same_event = bool(
+                head_shots and
+                head_shots[0].get("event_relation") == "same_event" and
+                abs(float(head_shots[0]["interval"][0]) - current_pts) < 0.5)
+            if head_same_event:
+                attempts.append({
+                    "boundary_id": current_id, "method": "same_event_rule",
+                    "semantic_change": False,
+                    "reason": "next section head shot continues the same event"})
+            else:
+                verdict = _frame_check_boundary(
+                    reference, current_pts, ledger, output_dir, runner=runner,
+                    ffmpeg_bin=ffmpeg_bin, attempt=_attempt,
+                    slug=_safe_id(f"{previous_row.get('section_id')}_"
+                                  f"{next_row.get('section_id')}"))
+                attempts.append({
+                    "boundary_id": current_id, "method": "frame_check",
+                    "semantic_change": verdict["semantic_change"],
+                    "detail": {key: verdict.get(key) for key in (
+                        "event_continuity", "rhetorical_function_continuity",
+                        "audience_cognition_continuity", "reason")}})
+                if verdict["semantic_change"]:
+                    accepted_id = current_id
+                    break
+            forward = [bid for bid in candidates
+                       if boundary_pts[bid] > current_pts + 0.05]
+            if not forward:
+                break
+            current_id = forward[0]
+        record = {
+            "boundary_id": original_id,
             "between": [str(previous_row.get("section_id")),
                         str(next_row.get("section_id"))],
-            "previous_section_tail_shots": [
-                {key: shot.get(key) for key in ("shot_id", "interval",
-                                                "information_added", "event_relation")}
-                for shot in (previous_row.get("shots") or [])[-2:]],
-            "next_section_head_shots": [
-                {key: shot.get(key) for key in ("shot_id", "interval",
-                                                "information_added", "event_relation")}
-                for shot in (next_row.get("shots") or [])[:2]],
-            "candidate_boundary_ids": candidates,
-        })
-    value, audit = _ask_object(
-        runner, RECONCILIATION_PROMPT + json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":")),
-        output_dir / "raw_responses" / "boundary_reconciliation.txt",
-        stage="boundary_reconciliation", max_new_tokens=2048)
-    verdicts = {str(row.get("boundary_id")): row
-                for row in value.get("boundaries") or []}
-    records, moves = [], {}
-    for item in payload:
-        boundary_id = item["boundary_id"]
-        verdict = verdicts.get(boundary_id) or {}
-        semantic_change = verdict.get("semantic_change") is True
-        record = {
-            "boundary_id": boundary_id, "between": item["between"],
-            "semantic_change": semantic_change,
-            "change_types": verdict.get("change_types") or [],
-            "reason": str(verdict.get("reason") or ""),
-            "action": "kept", "moved_to": None,
+            "attempts": attempts, "action": "kept", "moved_to": None,
+            "semantic_change": accepted_id is not None,
         }
-        if boundary_id in forced_moves:
-            target = forced_moves[boundary_id]
-            record.update({
-                "action": "moved", "moved_to": target,
-                "semantic_change": False,
-                "change_types": ["event"],
-                "reason": ("deterministic override: next section head shot "
-                           "continues the same event (same_event)"),
-                "deterministic_override": True,
-            })
-            moves[boundary_id] = target
-        elif not semantic_change:
-            target = str(verdict.get("recommended_boundary_id") or "")
-            valid_ids = {row["boundary_id"] for row in item["candidate_boundary_ids"]}
-            if target not in valid_ids:
-                raise V9Blocked(
-                    "boundary_reconciliation", "unjustified_section_boundary",
-                    f"{boundary_id}: no valid semantic change point "
-                    f"(recommended={target!r})")
-            moves[boundary_id] = target
-            record.update({"action": "moved", "moved_to": target})
+        if accepted_id is None:
+            raise V9Blocked(
+                "boundary_reconciliation", "unjustified_section_boundary",
+                f"{original_id}: no semantic change point within "
+                f"{section_span}")
+        if accepted_id != original_id:
+            record.update({"action": "moved", "moved_to": accepted_id})
         records.append(record)
+        final_pts = boundary_pts[accepted_id]
+        if (abs(float(previous_row["source_interval"][1]) - final_pts) > 1e-6 or
+                abs(float(next_row["source_interval"][0]) - final_pts) > 1e-6):
+            pairs = (
+                (index, str(previous_row.get("section_id")),
+                 float(previous_row["source_interval"][0]), final_pts),
+                (index + 1, str(next_row.get("section_id")), final_pts,
+                 float(next_row["source_interval"][1])),
+            )
+            for row_index, section_id, start, end in pairs:
+                rows[row_index] = _observe_section(
+                    Path(reference), section_id, [start, end], ledger,
+                    output_dir, runner=runner,
+                    raw_name=(f"section_{_safe_id(section_id)}_reconciled.txt"))
+                rewatched.append(section_id)
+            previous_row, next_row = rows[index], rows[index + 1]
 
-    new_rows = []
-    rewatched = []
-    for index, row in enumerate(rows):
-        section_id = str(row.get("section_id"))
-        start = float(row["source_interval"][0])
-        end = float(row["source_interval"][1])
-        if index > 0:
-            prev_row = rows[index - 1]
-            prev_boundary = min(
-                boundary_pts, key=lambda bid: abs(boundary_pts[bid] - start))
-            if prev_boundary in moves:
-                start = boundary_pts[moves[prev_boundary]]
-        own_boundary = min(
-            boundary_pts, key=lambda bid: abs(boundary_pts[bid] - end))
-        if own_boundary in moves:
-            end = boundary_pts[moves[own_boundary]]
-        interval = [round(start, 6), round(end, 6)]
-        if interval != [round(float(v), 6) for v in row["source_interval"]]:
-            new_rows.append(_observe_section(
-                Path(reference), section_id, interval, ledger, output_dir,
-                runner=runner, raw_name=f"section_{_safe_id(section_id)}_reconciled.txt"))
-            rewatched.append(section_id)
-        else:
-            new_rows.append(row)
     reconciled = {"schema_version": SECTION_OBSERVATIONS_VERSION,
                   "reference_sha256": source_hash,
-                  "input_sha256": json_hash({"sections": new_rows,
+                  "input_sha256": json_hash({"sections": rows,
                                              "prompt": SECTION_WATCH_PROMPT,
                                              "reconciled": True}),
-                  "reconciled": True, "sections": new_rows}
+                  "reconciled": True, "sections": rows}
     _write_json(output_dir / "section_observations.json", reconciled)
     result = {"schema_version": RECONCILIATION_VERSION,
-              "input_sha256": input_hash, "boundaries": records,
+              "input_sha256": json_hash({"observations": section_observations}),
+              "boundaries": records,
               "sections_after": [{"section_id": str(row.get("section_id")),
                                   "interval": row.get("source_interval")}
-                                 for row in new_rows],
-              "rewatched": rewatched, "provenance": audit}
-    _write_json(output_path, result)
+                                 for row in rows],
+              "rewatched": rewatched}
+    _write_json(output_dir / "boundary_reconciliation.json", result)
     return result, reconciled
 
 
@@ -1790,7 +1747,8 @@ boundary_id；参考片事实和可迁移结构必须分层。
       "actor_role":{"reason":"画面依据","evidence_ids":[]},
       "spatial_orientation":{"reason":"画面依据","evidence_ids":[]}
     },
-    "final_text_quote":""
+    "final_text_quote":"",
+    "hook_text_quote":""
   }]
 }
 primary_focus 必须是对象，type 取 subject|event|theme|place|contrast|mixed 之一。
@@ -1810,7 +1768,10 @@ sections 的数量、顺序与区间必须与输入 section_observations 的分�
 一条收尾文字，并据此判断其修辞功能（幽默/反差/抒情/宣告等），理由要引用原文。
 final_text_quote 非空时，audience_takeaway 与 cognition_change.after 必须直接解释这句
 收尾文字对观众的效果（例如自嘲/反差/轻松收尾），不得只写抽象抒情。
-其余 Section 的 final_text_quote 留空字符串。
+第一个含屏幕文字的 Section，若该文字提出断言/立场/命题（如社会偏见），hook_text_quote
+必须逐字引用，并在 audience_takeaway 中把它呈现为全片待检验/待反驳的命题——
+不得把 Hook 段降级为人物或场景介绍。
+其余 Section 的 final_text_quote 与 hook_text_quote 留空字符串。
 输入："""
 
 
@@ -2026,6 +1987,19 @@ def build_reference_edit_program(
                      "basis": "derived_from_observed_content_shots"})
         if mode == "dialogue_compression":
             pattern["semantic_continuity"] = "required"
+        if mode in MONTAGE_LIKE_MODES:
+            shot_count = len(row.get("content_shots") or [])
+            low = max(2, math.ceil(0.6 * shot_count)) if shot_count else 2
+            high = max(low, shot_count)
+            current = pattern.get("snippet_count_range")
+            if not (isinstance(current, list) and len(current) == 2 and
+                    isinstance(current[0], int) and current[0] >= 2 and
+                    isinstance(current[1], int) and current[1] >= current[0]):
+                pattern["snippet_count_range"] = [low, high]
+                programmatic_alignments.append({
+                    "section_id": section_id, "field": "snippet_count_range",
+                    "from": current, "to": [low, high],
+                    "basis": "aligned_to_observed_content_shot_count"})
         content_shot_count = len(row.get("content_shots") or [])
         has_real_cuts = bool(row.get("real_cut_pts"))
         if mode == "continuous_clip" and (content_shot_count > 1 or has_real_cuts):
@@ -2092,10 +2066,15 @@ def _semantic_phases(pattern: dict[str, Any]) -> list[str]:
 
 
 def compile_material_requirements(content: dict[str, Any], edit: dict[str, Any],
-                                  output_dir: Path) -> dict[str, Any]:
+                                  output_dir: Path,
+                                  normalization: dict[str, Any] | None = None
+                                  ) -> dict[str, Any]:
     """Compile source-agnostic requirements; never copy reference-specific facts."""
     patterns = {str(row.get("section_id")): row
                 for row in edit.get("editorial_patterns") or []}
+    normalized_by_section = {
+        str(row.get("section_id")): row
+        for row in (normalization or {}).get("sections") or []}
     requirements = []
     for section in content.get("sections") or []:
         section_id = str(section.get("section_id") or "")
@@ -2121,6 +2100,12 @@ def compile_material_requirements(content: dict[str, Any], edit: dict[str, Any],
                                             section["interval"][0])),
                 "composition_mode": mode,
                 "snippet_count_range": pattern.get("snippet_count_range") or [1, 1],
+                "reference_content_shot_count": (
+                    len((normalized_by_section.get(section_id) or {})
+                        .get("content_shots") or [])),
+                "reference_transition_count": (
+                    len((normalized_by_section.get(section_id) or {})
+                        .get("transition_segments") or [])),
                 "individual_duration_policy": "minimum_sufficient_duration",
                 "source_continuity": pattern.get("source_continuity") or
                                      "continuous_required",
@@ -2497,9 +2482,9 @@ def validate_reference_programs(content: dict[str, Any], edit: dict[str, Any],
     _validate_edit(edit, content, ledger, section_observations, errors,
                    recomputed=recomputed, warnings=warnings)
     _validate_requirements(requirements, content, edit, errors)
-    _validate_p02_structure(content, requirements, ledger, section_observations,
-                            recomputed, reconciliation, conflicts,
-                            normalization, errors, warnings)
+    _validate_p02_structure(content, edit, requirements, ledger,
+                            section_observations, recomputed, reconciliation,
+                            conflicts, normalization, errors, warnings)
     return {
         "schema_version": "reference_program_validation_v9",
         "passed": not errors, "errors": errors, "warnings": warnings,
@@ -2511,7 +2496,8 @@ def _normalized_text(value: str) -> str:
 
 
 def _validate_p02_structure(
-        content: dict[str, Any], requirements: dict[str, Any],
+        content: dict[str, Any], edit_program: dict[str, Any],
+        requirements: dict[str, Any],
         ledger: dict[str, Any],
         section_observations: dict[str, Any] | None,
         recomputed: dict[str, Any] | None,
@@ -2591,6 +2577,41 @@ def _validate_p02_structure(
                 errors.append(
                     f"{last['section_id']} final_text_quote not verbatim "
                     "on-screen text")
+    # P0.3：第一个含屏幕文字的 Section 必须保留 Hook 命题（逐字引用）。
+    for first in sections:
+        first_ocr = [str(row.get("text") or "") for row in
+                     _section_evidence(ledger, first["interval"])[
+                         "ocr_text_events"]
+                     if str(row.get("text") or "").strip()]
+        if first_ocr:
+            quote = _normalized_text(first.get("hook_text_quote"))
+            if not quote:
+                errors.append(
+                    f"{first['section_id']} hook_text_quote missing despite "
+                    "on-screen assertion text")
+            elif not any(quote in _normalized_text(text) or
+                         _normalized_text(text) in quote
+                         for text in first_ocr):
+                errors.append(
+                    f"{first['section_id']} hook_text_quote not verbatim "
+                    "on-screen text")
+            break
+    # P0.3：蒙太奇类模式 snippet 下限必须 >=2，与参考镜头结构一致。
+    patterns_by_section = {
+        str(row.get("section_id")): row
+        for row in (edit_program or {}).get("editorial_patterns") or []}
+    for section in sections:
+        pattern = patterns_by_section.get(str(section["section_id"]))
+        if pattern is None:
+            continue
+        mode = str(pattern.get("composition_mode") or "")
+        count = pattern.get("snippet_count_range") or []
+        if (mode in MONTAGE_LIKE_MODES and
+                (not isinstance(count, list) or len(count) != 2 or
+                 not isinstance(count[0], int) or count[0] < 2)):
+            errors.append(
+                f"{section['section_id']} montage snippet_count_range min "
+                "must be >= 2")
     for section in sections:
         row = by_section.get(str(section["section_id"])) or {}
         content_shots = row.get("content_shots") or []
@@ -2861,7 +2882,8 @@ def accept_reference_programs(output_dir: Path, human_review: Path) -> dict[str,
         if not amendment_errors:
             edit["content_program_sha256"] = json_hash(content)
             proposed = compile_material_requirements(
-                content, edit, output_dir / "human_review_draft")
+                content, edit, output_dir / "human_review_draft",
+                normalization=p02.get("normalization"))
             checked = validate_reference_programs(content, edit, proposed, ledger,
                                                   sections, **p02)
             if checked["passed"]:
@@ -3006,7 +3028,6 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             reference, ledger, normalization, output_dir, runner=runner,
             ffmpeg_bin=ffmpeg_bin, force=force)
         normalization = apply_montage_reclassification(normalization, montage)
-        montage_payload = _aligned_montage_for_payload(normalization, montage)
         _write_json(output_dir / "shot_normalization.json", normalization)
         manifest["stages"]["shot_normalization"] = {
             "status": "complete",
@@ -3055,13 +3076,14 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
             draft, resolved, ledger, output_dir, runner=runner,
             section_observations=section_observations,
             normalization=normalization, reconciliation=reconciliation,
-            conflicts=conflicts, montage=montage_payload, force=force)
+            conflicts=conflicts, montage=montage, force=force)
         edit = build_reference_edit_program(
             content, ledger, output_dir, runner=runner,
             section_observations=section_observations,
-            normalization=normalization, conflicts=conflicts, montage=montage_payload,
+            normalization=normalization, conflicts=conflicts, montage=montage,
             force=force)
-        requirements = compile_material_requirements(content, edit, output_dir)
+        requirements = compile_material_requirements(
+            content, edit, output_dir, normalization=normalization)
         validation = validate_reference_programs(
             content, edit, requirements, ledger, section_observations,
             reconciliation=reconciliation, conflicts=conflicts, montage=montage,
@@ -3075,14 +3097,15 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
                 draft, resolved, ledger, output_dir, runner=runner,
                 section_observations=section_observations,
                 normalization=normalization, reconciliation=reconciliation,
-                conflicts=conflicts, montage=montage_payload,
+                conflicts=conflicts, montage=montage,
                 repair_hint=repair_hint, force=True)
             edit = build_reference_edit_program(
                 content, ledger, output_dir, runner=runner,
                 section_observations=section_observations,
                 normalization=normalization, conflicts=conflicts,
-                montage=montage_payload, repair_hint=repair_hint, force=True)
-            requirements = compile_material_requirements(content, edit, output_dir)
+                montage=montage, repair_hint=repair_hint, force=True)
+            requirements = compile_material_requirements(
+            content, edit, output_dir, normalization=normalization)
             validation = validate_reference_programs(
                 content, edit, requirements, ledger, section_observations,
                 reconciliation=reconciliation, conflicts=conflicts,
@@ -3092,7 +3115,8 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
                     len(validation["errors"]) > len(first_candidate[3]["errors"])):
                 content, edit, requirements, validation = first_candidate
                 selection = "first_pass_fewer_errors"
-                compile_material_requirements(content, edit, output_dir)
+                compile_material_requirements(
+                    content, edit, output_dir, normalization=normalization)
                 _write_json(output_dir / "reference_content_program.json", content)
                 _write_json(output_dir / "reference_edit_program.json", edit)
             manifest["stages"]["program_repair"] = {

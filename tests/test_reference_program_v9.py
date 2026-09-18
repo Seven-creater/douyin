@@ -218,7 +218,8 @@ def _section_watch(section_id: str, start: str, end: str, cut: str | None = None
                    "interval": [boundary_pts[left], boundary_pts[right]],
                    "information_added": "a visible action changes another subject's state",
                    "edit_function": "establishes a new stage",
-                   "event_relation": "same_event",
+                   "event_relation": ("different_event" if index == 1
+                                      else "same_event"),
                    "supporting_deterministic_ids": []}
                   for index, (left, right) in enumerate(pairs, 1)],
         "cut_assessments": ([{"boundary_id": cut, "status": "real_cut",
@@ -561,13 +562,20 @@ def test_program_validation_accepts_event_compression_and_evidence_montage(
         tmp_path: Path) -> None:
     content = _content()
     edit = _edit()
-    requirements = compile_material_requirements(content, edit, tmp_path)
+    requirements = compile_material_requirements(
+        content, edit, tmp_path,
+        normalization=normalize_section_shots(_section_bank(), _ledger()))
     validation = validate_reference_programs(content, edit, requirements, _ledger(),
                                              _section_bank(),
                                              reconciliation=_reconciliation())
     assert validation["passed"], validation["errors"]
     event = requirements["requirements"][0]
-    assert event["presentation_requirement"] == {
+    presentation = event["presentation_requirement"]
+    assert {key: presentation[key] for key in (
+        "target_duration_s", "composition_mode", "snippet_count_range",
+        "individual_duration_policy", "source_continuity",
+        "semantic_continuity", "ordering_constraint",
+        "audience_requirement")} == {
         "target_duration_s": 5.0,
         "composition_mode": "event_compression_montage",
         "snippet_count_range": [2, 4],
@@ -577,6 +585,8 @@ def test_program_validation_accepts_event_compression_and_evidence_montage(
         "ordering_constraint": "preserve_event_progression",
         "audience_requirement": "blind viewer understands progression",
     }
+    assert presentation["reference_content_shot_count"] == 2
+    assert presentation["reference_transition_count"] == 0
     assert event["semantic_requirement"]["required_event_understanding"].startswith(
         "understand_full_source_event")
     assert requirements["requirements"][1]["continuity_requirement"][
@@ -713,12 +723,12 @@ def test_fake_runner_full_v9_orchestration_stops_pending_human(
         _section_watch("competition", "video_start", "cut_002", "cut_001"),
         _section_watch("proofs", "cut_002", "video_end"),
     ], ask=[
-        {"boundaries": [{"boundary_id": "cut_002", "semantic_change": True,
-                         "change_types": ["event"], "reason": "new event",
-                         "recommended_boundary_id": None}]},
         _conflicts_clean(),
         _content(), _edit(),
-    ])
+    ], inspect=[{"event_continuity": False,
+                 "rhetorical_function_continuity": False,
+                 "audience_cognition_continuity": False,
+                 "semantic_change": True, "reason": "new event begins"}])
     def fake_ledger(_reference, output_dir, **_kwargs):
         ledger = _ledger()
         (Path(output_dir) / "reference_evidence.json").write_text(
@@ -728,6 +738,9 @@ def test_fake_runner_full_v9_orchestration_stops_pending_human(
                         fake_ledger)
     monkeypatch.setattr(module, "_build_review_assets",
                         lambda *args, **kwargs: [])
+    monkeypatch.setattr(module, "_boundary_frames",
+                        lambda ffmpeg_bin, reference, pts, out_dir, span:
+                        [out_dir / f"f{index}.jpg" for index in range(6)])
     cfg = SimpleNamespace(perception={"ffmpeg_bin": "ffmpeg", "ffprobe_bin": "ffprobe"})
     result = run_reference_program_v9(cfg, video, tmp_path / "run",
                                       runner=runner, force=True)

@@ -81,7 +81,8 @@ def test_shot_normalizer_splits_real_cuts_and_resolves_short_transitions() -> No
                        for edge in shot["interval"]]
 
 
-def test_montage_reclassification_promotes_text_transitions() -> None:
+def test_montage_transitions_keep_identity_with_overlay_text() -> None:
+    """P0.3：带文字的转场保持 transition 身份，文字记 overlay 属性。"""
     normalization = normalize_section_shots(_cut_section_bank(), _cut_ledger())
     transition_id = \
         normalization["sections"][0]["transition_segments"][0]["transition_id"]
@@ -92,11 +93,10 @@ def test_montage_reclassification_promotes_text_transitions() -> None:
     ]}]}
     result = apply_montage_reclassification(normalization, montage)
     section = result["sections"][0]
-    promoted = [shot for shot in section["content_shots"]
-                if shot.get("reclassified_from") == transition_id]
-    assert len(promoted) == 1
-    assert promoted[0]["information_added"] == "冠军奖杯照片"
-    assert not section["transition_segments"]
+    transitions = section["transition_segments"]
+    assert len(transitions) == 1
+    assert transitions[0]["overlay_text"] == "跆拳道全国冠军"
+    assert len(section["content_shots"]) == 2  # 不因文字升级
 
     normalization = normalize_section_shots(_cut_section_bank(), _cut_ledger())
     montage = {"sections": [{"section_id": "main", "segments": [
@@ -107,43 +107,118 @@ def test_montage_reclassification_promotes_text_transitions() -> None:
     result = apply_montage_reclassification(normalization, montage)
     assert result["sections"][0]["transition_segments"][0][
         "transition_type"] == "zoom_blur"
-    assert len(result["sections"][0]["content_shots"]) == 2
+    assert "overlay_text" not in result["sections"][0]["transition_segments"][0]
 
 
-def test_boundary_reconciliation_moves_unjustified_boundary_and_rewatches(
+def _full_watch(section_id: str, boundary_names: list[str],
+                *, head_relation: str = "different_event") -> dict:
+    pts = {"video_start": 0.0, "cut_001": 10.0, "cut_002": 20.0,
+           "cut_003": 25.0, "video_end": 30.0}
+    shots = []
+    for index, (left, right) in enumerate(
+            zip(boundary_names, boundary_names[1:]), 1):
+        shots.append({
+            "shot_id": f"{section_id}.shot_{index:03d}",
+            "start_boundary_id": left, "end_boundary_id": right,
+            "interval": [pts[left], pts[right]],
+            "information_added": "a visible action changes state",
+            "edit_function": "establishes a new stage",
+            "event_relation": head_relation if index == 1 else "same_event",
+            "supporting_deterministic_ids": []})
+    assessments = [{"boundary_id": name, "status": "real_cut",
+                    "reason": "visible image change"}
+                   for name in boundary_names[1:-1]]
+    return {"section_id": section_id, "shots": shots,
+            "cut_assessments": assessments,
+            "rhythm_claimed": False, "rhythm_evidence_ids": [],
+            "unresolved_questions": []}
+
+
+def test_frame_check_keeps_justified_boundary_without_rewatch(
         tmp_path: Path) -> None:
-    bank = _section_bank()
-    runner = FakeRunner(
-        watch=[_section_watch("competition", "video_start", "cut_001"),
-               _section_watch("proofs", "cut_001", "video_end", "cut_002")],
-        ask=[{"boundaries": [
-            {"boundary_id": "cut_002", "semantic_change": False,
-             "change_types": ["none"], "reason": "同一事件仍在延续",
-             "recommended_boundary_id": "cut_001"}]}])
+    """首 shot 为 different_event 时走帧级三维度判定；语义变化成立则保留。"""
+    runner = FakeRunner(inspect=[
+        {"event_continuity": False, "rhetorical_function_continuity": False,
+         "audience_cognition_continuity": False, "semantic_change": True,
+         "reason": "提出偏见 vs 开始反驳"}])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
-    result, reconciled = reconcile_section_boundaries(
-        video, _ledger(), bank, tmp_path, runner=runner)
-    assert result["boundaries"][0]["action"] == "moved"
-    assert result["boundaries"][0]["moved_to"] == "cut_001"
-    assert result["rewatched"] == ["competition", "proofs"]
-    intervals = {row["section_id"]: row["source_interval"]
-                 for row in reconciled["sections"]}
-    assert intervals == {"competition": [0.0, 10.0], "proofs": [10.0, 30.0]}
-    assert reconciled["reconciled"] is True
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        result, reconciled = reconcile_section_boundaries(
+            video, _ledger(), _section_bank(), tmp_path, runner=runner)
+    finally:
+        module._boundary_frames = original
+    record = result["boundaries"][0]
+    assert record["action"] == "kept"
+    assert record["attempts"][0]["method"] == "frame_check"
+    assert result["rewatched"] == []
+    assert reconciled["sections"][0]["source_interval"] == [0.0, 20.0]
+
+
+def test_iterative_frame_check_moves_until_semantic_change(
+        tmp_path: Path) -> None:
+    """首次帧判定不成立→移动→复查新边界→第二次成立（reconcile-until-stable）。"""
+    ledger = _ledger()
+    ledger["boundaries"].insert(3, {
+        "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
+        "kind": "cut_candidate"})
+    bank = _section_bank()
+    # proofs 首 shot 为 different_event，避开 same_event 直移路径
+    bank["sections"][1]["shots"][0]["event_relation"] = "different_event"
+    runner = FakeRunner(
+        watch=[_full_watch("competition", ["video_start", "cut_001", "cut_002",
+                                           "cut_003"]),
+               _full_watch("proofs", ["cut_003", "video_end"])],
+        inspect=[
+            {"event_continuity": True, "rhetorical_function_continuity": True,
+             "audience_cognition_continuity": True, "semantic_change": False,
+             "reason": "仍是比赛反应近景"},
+            {"event_continuity": False, "rhetorical_function_continuity": False,
+             "audience_cognition_continuity": False, "semantic_change": True,
+             "reason": "比赛结束，照片蒙太奇开始"}])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        result, _reconciled = reconcile_section_boundaries(
+            video, ledger, bank, tmp_path, runner=runner)
+    finally:
+        module._boundary_frames = original
+    record = result["boundaries"][0]
+    assert record["action"] == "moved"
+    assert record["moved_to"] == "cut_003"
+    assert len(record["attempts"]) == 2
+    assert record["attempts"][1]["semantic_change"] is True
 
 
 def test_unjustified_boundary_without_valid_recommendation_blocks(
         tmp_path: Path) -> None:
-    runner = FakeRunner(ask=[{"boundaries": [
-        {"boundary_id": "cut_002", "semantic_change": False,
-         "change_types": ["none"], "reason": "同一事件仍在延续",
-         "recommended_boundary_id": None}]}])
+    runner = FakeRunner(inspect=[
+        {"event_continuity": True, "rhetorical_function_continuity": True,
+         "audience_cognition_continuity": True, "semantic_change": False,
+         "reason": "同主题被误判为同事件"}])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
-    with pytest.raises(V9Blocked) as excinfo:
-        reconcile_section_boundaries(video, _ledger(), _section_bank(),
-                                     tmp_path, runner=runner)
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        with pytest.raises(V9Blocked) as excinfo:
+            reconcile_section_boundaries(video, _ledger(), _section_bank(),
+                                          tmp_path, runner=runner)
+    finally:
+        module._boundary_frames = original
     assert excinfo.value.reason_code == "unjustified_section_boundary"
 
 
@@ -238,7 +313,7 @@ def test_edit_prompt_uses_finite_ontology_and_transition_refs() -> None:
     assert "transition_refs" in EDIT_PROGRAM_PROMPT
     assert "shot_C01" in EDIT_PROGRAM_PROMPT
     assert "zoom_blur" in TRANSITION_TYPES
-    assert EDIT_VERSION.endswith("_p02")
+    assert EDIT_VERSION.endswith("_p03")
 
 
 def test_montage_watch_stops_after_json_and_parses_per_shot(
@@ -294,13 +369,13 @@ def test_contract_repair_round_reasks_programs_once(
             _section_watch("proofs", "cut_002", "video_end"),
         ],
         ask=[
-            {"boundaries": [{"boundary_id": "cut_002", "semantic_change": True,
-                             "change_types": ["event"], "reason": "new event",
-                             "recommended_boundary_id": None}]},
             _conflicts_clean(),
             _broken_content(), _edit(),
             _content(), _edit(),
-        ])
+        ], inspect=[{"event_continuity": False,
+                     "rhetorical_function_continuity": False,
+                     "audience_cognition_continuity": False,
+                     "semantic_change": True, "reason": "new event"}])
     def fake_ledger(_reference, output_dir, **_kwargs):
         ledger = _ledger()
         (Path(output_dir) / "reference_evidence.json").write_text(
@@ -310,6 +385,9 @@ def test_contract_repair_round_reasks_programs_once(
     monkeypatch.setattr(module, "build_reference_evidence_ledger", fake_ledger)
     monkeypatch.setattr(module, "_build_review_assets",
                         lambda *args, **kwargs: [])
+    monkeypatch.setattr(module, "_boundary_frames",
+                        lambda ffmpeg_bin, reference, pts, out_dir, span:
+                        [out_dir / f"f{index}.jpg" for index in range(6)])
     from types import SimpleNamespace
     cfg = SimpleNamespace(perception={"ffmpeg_bin": "ffmpeg",
                                       "ffprobe_bin": "ffprobe"})
@@ -348,9 +426,9 @@ def test_moved_boundary_satisfies_justification_via_moved_to(tmp_path: Path) -> 
     assert not any("unjustified" in error for error in result["errors"])
 
 
-def test_same_event_head_shot_forces_boundary_move_over_model_verdict(
+def test_same_event_head_shot_forces_boundary_move_without_ask(
         tmp_path: Path) -> None:
-    """下一 Section 首 shot 报 same_event 时，模型判 semantic_change=True 也必须被覆盖。"""
+    """下一 Section 首 shot 报 same_event 时确定性前移，不再依赖模型判定。"""
     ledger = _ledger()
     ledger["boundaries"].insert(3, {
         "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
@@ -367,20 +445,32 @@ def test_same_event_head_shot_forces_boundary_move_over_model_verdict(
          "end_boundary_id": "video_end", "interval": [25.0, 30.0], **fresh},
     ]
     runner = FakeRunner(
-        watch=[_section_watch("competition", "video_start", "cut_002"),
-               _section_watch("proofs", "cut_003", "video_end")],
-        ask=[{"boundaries": [
-            {"boundary_id": "cut_002", "semantic_change": True,
-             "change_types": ["scene"], "reason": "模型误判：随后切换到照片",
-             "recommended_boundary_id": None}]}])
+        watch=[_full_watch("competition", ["video_start", "cut_001", "cut_002",
+                                           "cut_003"]),
+               _full_watch("proofs", ["cut_003", "video_end"])],
+        inspect=[{"event_continuity": False,
+                  "rhetorical_function_continuity": False,
+                  "audience_cognition_continuity": False,
+                  "semantic_change": True,
+                  "reason": "照片蒙太奇开始"}])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
-    result, _reconciled = reconcile_section_boundaries(
-        video, ledger, bank, tmp_path, runner=runner)
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        result, _reconciled = reconcile_section_boundaries(
+            video, ledger, bank, tmp_path, runner=runner)
+    finally:
+        module._boundary_frames = original
     record = result["boundaries"][0]
     assert record["action"] == "moved"
     assert record["moved_to"] == "cut_003"
-    assert record["deterministic_override"] is True
+    assert record["attempts"][0]["method"] == "same_event_rule"
+    assert record["attempts"][1]["method"] == "frame_check"
+    assert not runner.ask_calls
 
 
 def test_content_sections_must_match_reconciled_observed_sections(
@@ -413,6 +503,8 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     raw_edit["editorial_patterns"][1]["ordering_constraint"] = "source_order"
     raw_edit["editorial_patterns"][1]["source_semantics"] = "one_long_event"
     bank = _section_bank()
+    for shot in bank["sections"][0]["shots"]:
+        shot["event_relation"] = "same_event"
     normalization = normalize_section_shots(bank, _ledger())
     runner = FakeRunner(ask=[raw_edit])
     video = tmp_path / "reference.mp4"
@@ -429,3 +521,73 @@ def test_edit_builder_aligns_mode_constants_deterministically(
     aligns = {row["field"]: row for row in edit["programmatic_mode_alignment"]}
     assert aligns["composition_mode"]["from"] == "continuous_clip"
     assert aligns["source_continuity"]["basis"] == "mode_mandated_constant"
+
+
+def test_first_section_on_screen_assertion_must_be_hook_quoted(
+        tmp_path: Path) -> None:
+    """P0.3：第一个含屏幕文字的 Section 必须以 hook_text_quote 保留待反驳命题。"""
+    ledger = _ledger()
+    ledger["ocr"]["normalized_claim_events"] = [
+        {"claim_id": "ocr_001", "interval": [1.0, 3.0],
+         "text": "人们常常觉得失去了双手就会变成一个废人",
+         "evidence_type": "observed_textual_claim"},
+    ]
+    content = _content()
+    edit = _edit()
+    req = compile_material_requirements(content, edit, tmp_path)
+    result = validate_reference_programs(content, edit, req, ledger,
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert any("hook_text_quote missing" in error for error in result["errors"])
+    content["sections"][0]["hook_text_quote"] = "专业跆拳道运动员"
+    result = validate_reference_programs(content, edit, req, ledger,
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert any("hook_text_quote not verbatim" in error
+               for error in result["errors"])
+    content["sections"][0]["hook_text_quote"] = "失去了双手就会变成一个废人"
+    result = validate_reference_programs(content, edit, req, ledger,
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert not any("hook_text_quote" in error for error in result["errors"])
+
+
+def test_montage_modes_require_snippet_floor(tmp_path: Path) -> None:
+    """P0.3：蒙太奇类模式 snippet_count_range 下限必须 >=2。"""
+    content = _content()
+    edit = _edit()
+    edit["editorial_patterns"][1]["composition_mode"] = "evidence_montage"
+    edit["editorial_patterns"][1]["snippet_count_range"] = [1, 1]
+    req = compile_material_requirements(content, edit, tmp_path)
+    result = validate_reference_programs(content, edit, req, _ledger(),
+                                         _section_bank(),
+                                         reconciliation=_reconciliation())
+    assert any("snippet_count_range min must be >= 2" in error
+               for error in result["errors"])
+
+
+def test_snippet_range_aligns_to_observed_shot_count(tmp_path: Path) -> None:
+    from src.agentic_video.reference_program_v9 import (
+        build_reference_edit_program, normalize_section_shots)
+
+    content = _content()
+    from src.agentic_video.reference_program_v9 import _attach_intervals
+    _attach_intervals(content, _ledger(),
+                      keys=("meaningful_units", "sections"), stage="edit_program")
+    raw_edit = _edit()
+    raw_edit["editorial_patterns"][1]["composition_mode"] = "evidence_montage"
+    raw_edit["editorial_patterns"][1]["snippet_count_range"] = [1, 1]
+    bank = _section_bank()
+    for shot in bank["sections"][0]["shots"]:
+        shot["event_relation"] = "same_event"
+    normalization = normalize_section_shots(bank, _ledger())
+    runner = FakeRunner(ask=[raw_edit])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    edit = build_reference_edit_program(
+        content, _ledger(), tmp_path, runner=runner,
+        section_observations=bank, normalization=normalization, force=True)
+    # proofs 段 1 个内容镜头：evidence_montage → 下限 max(2, ceil(0.6)) = 2
+    assert edit["editorial_patterns"][1]["snippet_count_range"] == [2, 2]
+    fields = {row["field"] for row in edit["programmatic_mode_alignment"]}
+    assert "snippet_count_range" in fields
