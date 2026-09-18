@@ -282,25 +282,38 @@ def worker():
                     height=height, width=width, num_frames=num_frames,
                     num_inference_steps=params["num_inference_steps"],
                     seed=params["seed"])
-            else:
-                # t2va / fl2va（keyframe）走原统一图路径
+            elif first_image is not None or last_image is not None:
+                # fl2va（keyframe）：与原 minimax_serve 相同的 prep→cond→rest
                 prep = engine._prep(image=first_image, last_image=last_image,
                                     height=height, width=width)
                 keyframes = _field(prep, "keyframes")
                 anchors = _field(prep, "keyframe_anchors")
-                state = (engine._cond(prompt=params["prompt"], keyframes=keyframes)
-                         if keyframes else
-                         engine._cond(prompt=params["prompt"]))
+                out_h = _field(prep, "height") or height
+                out_w = _field(prep, "width") or width
+                state = engine._cond(prompt=params["prompt"],
+                                     keyframes=keyframes)
                 t0 = time.time()
                 results = engine._rest(
-                    state=state, keyframes=keyframes or None,
-                    keyframe_anchors=anchors or (),
-                    height=height, width=width, num_frames=num_frames,
+                    state=state, keyframes=keyframes,
+                    keyframe_anchors=anchors,
+                    height=out_h, width=out_w, num_frames=num_frames,
                     generator=torch.Generator().manual_seed(params["seed"]),
                     num_inference_steps=params["num_inference_steps"],
                     output=["videos", "audio", "sampling_rate"])
-                timings = {"encode_s": round(t0 % 1, 1),
-                           "denoise_decode_s": 0.0}
+                timings = {"encode_s": round(time.time() - t0, 1)}
+            else:
+                # t2va：无媒体输入，不调 before_encode（块会跳过导致
+                # PipelineState 无 keyframes 输出）——照原 serve 直接
+                # cond→rest。
+                state = engine._cond(prompt=params["prompt"])
+                t0 = time.time()
+                results = engine._rest(
+                    state=state, height=height, width=width,
+                    num_frames=num_frames,
+                    generator=torch.Generator().manual_seed(params["seed"]),
+                    num_inference_steps=params["num_inference_steps"],
+                    output=["videos", "audio", "sampling_rate"])
+                timings = {"encode_s": round(time.time() - t0, 1)}
             out_dir = Path(OUTDIR)
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / f"{job_id}.mp4"
