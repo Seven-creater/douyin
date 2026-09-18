@@ -344,6 +344,30 @@ def build_parser() -> argparse.ArgumentParser:
     reference_v9g_accept.add_argument("--output", required=True)
     reference_v9g_accept.add_argument("--human-review", required=True)
 
+    long_take = sub.add_parser(
+        "long-take-lt0",
+        help="H3-LT0: S2 long-take quality experiment (4 recipes x 2 seeds)")
+    long_take.add_argument("--p04e-output", required=True,
+                           help="green P0 run directory (p04e)")
+    long_take.add_argument("--output", required=True)
+    long_take.add_argument(
+        "--reference", default="data/videos/7682719919410072847/video.mp4")
+    long_take.add_argument("--ref2va-endpoint",
+                           default="http://127.0.0.1:30011")
+    long_take.add_argument("--gpu-set", default="0,1,6,7")
+    long_take.add_argument("--gpu-pairs", default="0,1;6,7",
+                           help="Omni observation pairs (H3 stopped first)")
+    long_take.add_argument("--seconds", type=float, default=12.0)
+    long_take.add_argument("--seeds", default="1001,1002")
+    long_take.add_argument("--pack-picks", default=None,
+                           help="JSON file mapping role -> chosen time_s")
+    long_take.add_argument("--plan-only", action="store_true",
+                           help="CPU plan + contact sheets for human review")
+    long_take.add_argument("--execute", action="store_true",
+                           help="run real H3 takes (LT0 capability experiment)")
+    long_take.add_argument("--no-manage-server", action="store_true",
+                           help="assume the ref2va server is already up")
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -2204,6 +2228,26 @@ def _reference_generate_v9g_accept(args, _cfg) -> dict:
     return accept_v9g(Path(args.output), Path(args.human_review))
 
 
+def _long_take_lt0(args, cfg) -> dict:
+    import json as _json
+
+    from src.agentic_video.generation_long_take import run_lt0_experiment
+
+    picks = None
+    if args.pack_picks:
+        picks = _json.loads(Path(args.pack_picks).read_text(encoding="utf-8"))
+    seeds = tuple(int(item) for item in str(args.seeds).split(",")
+                  if item.strip())
+    return run_lt0_experiment(
+        cfg, Path(args.p04e_output), Path(args.output),
+        reference=Path(args.reference), plan_only=args.plan_only,
+        execute=args.execute, ref2va_endpoint=args.ref2va_endpoint,
+        gpu_set=args.gpu_set, seconds=float(args.seconds), seeds=seeds,
+        pack_picks=picks, gpu_pairs=args.gpu_pairs,
+        manage_server=not args.no_manage_server,
+        ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -2274,6 +2318,7 @@ def main(argv: list[str] | None = None) -> int:
                 "reference-program-v9-accept": _reference_program_v9_accept,
                 "reference-generate-v9g": _reference_generate_v9g,
                 "reference-generate-v9g-accept": _reference_generate_v9g_accept,
+                "long-take-lt0": _long_take_lt0,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
