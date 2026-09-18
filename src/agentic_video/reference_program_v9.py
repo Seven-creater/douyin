@@ -1092,22 +1092,36 @@ def apply_montage_reclassification(normalization: dict[str, Any],
     return normalization
 
 
-BOUNDARY_FRAME_CHECK_PROMPT = """判断视频边界两侧是否发生语义变化。输入是边界前后
-各三帧（按时间顺序：before_1 约-2.0s、before_2 约-1.0s、before_3 约-0.4s、
-after_1 约+0.4s、after_2 约+1.0s、after_3 约+2.0s）。从三个维度分别判断连续性：
-event（是否同一事件的延续，含准备/对抗/结果/反应阶段）、rhetorical_function
-（叙事功能是否改变：提出命题/提供反证/扩展证据/收尾打趣等）、audience_cognition
-（观众此刻获得的信息是否发生质变）。任一维度不连续即 semantic_change=true。
-事件的操作定义：有独立功能的完整发生（叙事单元）。面对镜头的介绍/陈述、
-一场从头到尾的对抗、一组照片或成就的快速罗列，是不同事件；同一事件内部的
-阶段推移（准备→对抗→结果→反应）算事件连续。参与主体配置改变、或一个新的
-独立发生开始，即事件不连续。同主题不等于同事件。
-四个布尔维度必须逐项独立判断，禁止照抄任何示例值；reason 必须具体描述你看到的
-画面差异，不得输出占位文字。只输出一个 JSON 对象（字段取 true 或 false）：
-{"event_continuity": true, "rhetorical_function_continuity": true,
- "audience_cognition_continuity": true, "semantic_change": true,
- "reason": "具体描述边界前后画面内容与功能的差异"}
-输入："""
+HIERARCHICAL_BOUNDARY_PROMPT = """判断候选边界两侧的层级关系。输入是整条视频的
+全局表达目的（供参照，不含任何边界信息）与边界前后各三帧（按时间顺序：
+before_1 约-2.0s、before_2 约-1.0s、before_3 约-0.4s、after_1 约+0.4s、
+after_2 约+1.0s、after_3 约+2.0s）。
+
+目标层级（GEBD one-level-deeper 协议）：只判断"整条视频表达目的下的**一级叙事
+单元**"之间的转换，不是找所有动作/画面变化。叙事单元定义：承担一个相对稳定
+叙事功能的最小连续区间；其内部可包含多个镜头、动作阶段乃至多个局部事件，
+只要它们共同服务于同一表达目的。
+
+三级认知分类（NarraScene）：physical（独立发生的事件是否更替）、character
+（参与主体配置是否改变）、narrative（叙事/修辞功能是否变化）。**有效边界必须
+有叙事层变化**；同一事件内部的阶段推进（如准备→对抗→结果→反应）不是边界；
+一组并列的证据罗列即使各自是不同事件，只要叙事功能相同就同属一个叙事单元。
+
+分别描述边界前后，再给出关系布尔值（逐项独立判断，禁止照抄示例值）：
+{
+  "before": {"episode": "这一段是什么独立发生", "phase": "该发生内部的阶段",
+             "rhetorical_role": "这一段的叙事功能"},
+  "after": {"episode": "...", "phase": "...", "rhetorical_role": "..."},
+  "relations": {"same_session": true, "same_episode": true,
+                "phase_progression": false, "rhetorical_shift": false},
+  "reason": "具体描述边界前后画面内容与叙事功能的差异"
+}
+same_session：是否仍属同一大活动/主题环境；same_episode：前后是否同一独立发生；
+phase_progression：是否只是同一发生内部推进到下一阶段；rhetorical_shift：叙事
+功能是否变化。reason 必须具体，不得输出占位文字。输入："""
+
+
+BOUNDARY_FRAME_CHECK_PROMPT = HIERARCHICAL_BOUNDARY_PROMPT
 
 
 def _boundary_frames(ffmpeg_bin: str, reference: Path, pts: float,
@@ -1128,26 +1142,71 @@ def _boundary_frames(ffmpeg_bin: str, reference: Path, pts: float,
     return frames
 
 
+def _hierarchical_boundary_decision(verdict: dict[str, Any]) -> str:
+    """确定性终判（用户拍板决策树 + NarraScene 叙事层硬规则）。
+
+    keep = 有效叙事边界；reject = 事件内部阶段/仅物理变化；unresolved = 证据
+    不足，移动到下一候选继续。
+    """
+    relations = verdict.get("relations") or {}
+    before_role = str((verdict.get("before") or {}).get("rhetorical_role") or "").strip()
+    after_role = str((verdict.get("after") or {}).get("rhetorical_role") or "").strip()
+    role_changed = bool(before_role and after_role and before_role != after_role)
+    if relations.get("rhetorical_shift") is True:
+        return "keep"
+    if relations.get("same_episode") is False and role_changed:
+        return "keep"
+    if relations.get("phase_progression") is True:
+        return "reject"
+    if relations.get("same_episode") is True:
+        return "reject"
+    return "unresolved"
+
+
 def _frame_check_boundary(reference: Path, pts: float, ledger: dict[str, Any],
                           output_dir: Path, *, runner, ffmpeg_bin: str,
-                          attempt: int, slug: str) -> dict[str, Any]:
+                          attempt: int, slug: str,
+                          global_outline: dict[str, Any] | None = None
+                          ) -> dict[str, Any]:
     duration = float(ledger["reference"]["duration_s"])
     images = _boundary_frames(ffmpeg_bin, Path(reference), pts,
                               output_dir / "boundary_frames" /
                               f"{slug}_a{attempt}", (0.0, duration))
+    prompt = HIERARCHICAL_BOUNDARY_PROMPT
+    if global_outline:
+        prompt += json.dumps({"global_narrative_outline": global_outline},
+                             ensure_ascii=False, separators=(",", ":"))
     answer = runner.inspect_media(
-        images, BOUNDARY_FRAME_CHECK_PROMPT,
-        max_new_tokens=768, stop_after_json_object=True)
+        images, prompt, max_new_tokens=1024, stop_after_json_object=True)
     raw = _answer_text(answer)
     raw_path = (output_dir / "raw_responses" /
                 f"boundary_{slug}_a{attempt}.txt")
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_text(raw, encoding="utf-8")
     verdict = _parse_one_object(raw, stage="boundary_reconciliation")
-    if not isinstance(verdict.get("semantic_change"), bool):
-        raise V9Blocked("boundary_reconciliation", "frame_check_verdict_invalid",
-                        slug)
-    if (str(verdict.get("reason") or "").strip() in {"画面依据", "具体描述边界前后画面内容与功能的差异"}
+    relations = verdict.get("relations") or {}
+    for key in ("same_session", "same_episode", "phase_progression",
+                "rhetorical_shift"):
+        if not isinstance(relations.get(key), bool):
+            raise V9Blocked("boundary_reconciliation",
+                            "frame_check_verdict_invalid", f"{slug}:{key}")
+    placeholders = {"这一段是什么独立发生", "该发生内部的阶段",
+                    "这一段的叙事功能", "..."}
+    for side in ("before", "after"):
+        block = verdict.get(side) or {}
+        for key in ("episode", "phase", "rhetorical_role"):
+            value = str(block.get(key) or "").strip()
+            if not value:
+                raise V9Blocked("boundary_reconciliation",
+                                "frame_check_verdict_invalid",
+                                f"{slug}:{side}.{key}")
+            if value in placeholders:
+                raise V9Blocked("boundary_reconciliation",
+                                "frame_check_verdict_echoed_example",
+                                f"{slug}:{side}.{key}")
+    if (str(verdict.get("reason") or "").strip() in {
+            "画面依据", "具体描述边界前后画面内容与功能的差异",
+            "具体描述边界前后画面内容与叙事功能的差异"}
             or len(str(verdict.get("reason") or "").strip()) < 6):
         raise V9Blocked("boundary_reconciliation",
                         "frame_check_verdict_echoed_example", slug)
@@ -1157,19 +1216,30 @@ def _frame_check_boundary(reference: Path, pts: float, ledger: dict[str, Any],
 def reconcile_section_boundaries(
         reference: Path, ledger: dict[str, Any],
         section_observations: dict[str, Any], output_dir: Path, *, runner,
-        ffmpeg_bin: str = "ffmpeg", force: bool = False
+        ffmpeg_bin: str = "ffmpeg", force: bool = False,
+        draft: dict[str, Any] | None = None
         ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """P0.3 迭代式 Section Boundary Reconciliation（reconcile-until-stable）。
+    """P0.3F 迭代式 Section Boundary Reconciliation（层级叙事边界分类）。
 
-    每个内部边界：先用确定性规则（下一 Section 首 shot 报 same_event 即事件内部），
-    否则用边界前后各三帧直接做画面级三维度判定（event / rhetorical_function /
-    audience cognition）。不成立则移动到下一个候选边界并复查新边界，
-    直到真实语义变化或候选耗尽（BLOCKED）。
+    每个内部边界：下一 Section 首 shot 报 same_event 时记为确定性信号（不单独
+    放行），抽边界前后各三帧，让模型只**描述**四层关系（session/episode/phase/
+    narrative-role），keep/reject 由 `_hierarchical_boundary_decision` 确定性
+    拍板。reject/unresolved → 移动到下一候选并复查新边界，直到叙事层真实变化
+    或候选耗尽（BLOCKED）。全局叙事纲要（来自粗读草稿，不含边界信息）作为
+    local-to-global 上下文随帧一起下发。
     """
     output_dir = Path(output_dir)
     rows = [dict(row) for row in section_observations.get("sections") or []]
     source_hash = ledger["reference"]["sha256"]
     boundary_pts = _boundary_map(ledger)
+    global_outline = None
+    if isinstance(draft, dict):
+        global_outline = {
+            "core_expression": draft.get("core_expression_draft") or {},
+            "unit_purposes": [
+                {"unit_id": unit.get("unit_id"), "purpose": unit.get("purpose")}
+                for unit in draft.get("meaningful_units") or []],
+        }
 
     def _nearest_boundary_id(pts_value: float) -> str:
         return min(boundary_pts, key=lambda bid: abs(
@@ -1201,22 +1271,27 @@ def reconcile_section_boundaries(
                 reference, current_pts, ledger, output_dir, runner=runner,
                 ffmpeg_bin=ffmpeg_bin, attempt=_attempt,
                 slug=_safe_id(f"{previous_row.get('section_id')}_"
-                              f"{next_row.get('section_id')}"))
-            # P0.3d：事件维度是边界硬闸——同一事件内部的阶段变化（准备/对抗/
-            # 结果/反应）属于 semantic_phases，不是 Section 边界；边界只在新
-            # 事件开始处成立。修辞/认知维度记录在案但不单独放行。
-            event_discontinuity = verdict.get("event_continuity") is False
+                              f"{next_row.get('section_id')}"),
+                global_outline=global_outline)
+            # P0.3F：LLM 只描述四层关系，keep/reject 由确定性决策树拍板
+            # （NarraScene：有效边界必须有叙事层变化；同一事件内部的
+            # phase 推进与并列证据罗列都不是 Section 边界）。
+            decision = _hierarchical_boundary_decision(verdict)
             attempts.append({
                 "boundary_id": current_id,
                 "method": ("frame_check+same_event_signal" if head_same_event
                            else "frame_check"),
                 "same_event_signal": head_same_event,
-                "semantic_change": verdict["semantic_change"],
-                "accepted_by_event_gate": event_discontinuity,
-                "detail": {key: verdict.get(key) for key in (
-                    "event_continuity", "rhetorical_function_continuity",
-                    "audience_cognition_continuity", "reason")}})
-            if event_discontinuity:
+                "decision": decision,
+                "narrative_shift": bool(
+                    (verdict.get("relations") or {}).get("rhetorical_shift")),
+                "semantic_change": decision == "keep",
+                "accepted_by_narrative_gate": decision == "keep",
+                "detail": {"before": verdict.get("before"),
+                           "after": verdict.get("after"),
+                           "relations": verdict.get("relations"),
+                           "reason": verdict.get("reason")}})
+            if decision == "keep":
                 accepted_id = current_id
                 break
             forward = [bid for bid in candidates
@@ -3230,7 +3305,7 @@ def run_reference_program_v9(cfg: Any, reference: Path, output_dir: Path, *,
                             (output_dir / "raw_responses").glob("section_*.txt"))])
         reconciliation, section_observations = reconcile_section_boundaries(
             reference, ledger, section_observations, output_dir,
-            runner=runner, force=force)
+            runner=runner, force=force, draft=draft)
         manifest["stages"]["boundary_reconciliation"] = {
             "status": "complete",
             "moved": [row["boundary_id"] for row in reconciliation["boundaries"]

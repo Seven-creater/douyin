@@ -134,13 +134,60 @@ def _full_watch(section_id: str, boundary_names: list[str],
             "unresolved_questions": []}
 
 
+def _hier_verdict(*, same_session: bool = True, same_episode: bool = True,
+                  phase_progression: bool = False,
+                  rhetorical_shift: bool = False,
+                  before_role: str = "呈现核心事件的关键阶段",
+                  after_role: str | None = None,
+                  reason: str = "边界前后画面与叙事功能发生了可见变化"
+                  ) -> dict:
+    """P0.3F 层级叙事边界判定的合法输出形状（LLM 只描述，代码终判）。"""
+    return {
+        "before": {"episode": "核心能力事件", "phase": "进行中",
+                   "rhetorical_role": before_role},
+        "after": {"episode": "核心能力事件", "phase": "收束",
+                  "rhetorical_role": after_role if after_role is not None
+                  else before_role},
+        "relations": {"same_session": same_session,
+                      "same_episode": same_episode,
+                      "phase_progression": phase_progression,
+                      "rhetorical_shift": rhetorical_shift},
+        "reason": reason}
+
+
+def test_hierarchical_decision_tree_matches_canonical_boundaries() -> None:
+    """用户拍板决策树：叙事层变化=keep；phase 推进=reject；并列新事件但
+    叙事功能相同=unresolved（S3 证据蒙太奇内部不得单独成段）。"""
+    from src.agentic_video.reference_program_v9 import (
+        _hierarchical_boundary_decision as decide)
+
+    # 5.1s：前提→反证，叙事功能变化
+    assert decide(_hier_verdict(same_episode=False, rhetorical_shift=True,
+                                before_role="提出待检验的偏见",
+                                after_role="用行动反驳")) == "keep"
+    # 16.7s：新事件 + 叙事功能变化（relations 未直接给出 shift 的兜底分支）
+    assert decide(_hier_verdict(same_episode=False, rhetorical_shift=False,
+                                before_role="呈现核心事件的结果",
+                                after_role="扩展独立证据")) == "keep"
+    # 13.0s：action→result 只是 phase 推进，叙事功能稳定
+    assert decide(_hier_verdict(same_episode=True, phase_progression=True,
+                                )) == "reject"
+    # 同一事件内仅有画面/镜头变化
+    assert decide(_hier_verdict(same_episode=True)) == "reject"
+    # S3 内部：新事件但并列证据、叙事功能相同 → 不得放行也不得直接否掉
+    assert decide(_hier_verdict(same_episode=False, same_session=True,
+                                before_role="扩展独立证据",
+                                after_role="扩展独立证据")) == "unresolved"
+
+
 def test_frame_check_keeps_justified_boundary_without_rewatch(
         tmp_path: Path) -> None:
-    """首 shot 为 different_event 时走帧级三维度判定；语义变化成立则保留。"""
+    """首 shot 为 different_event 时走层级帧判定；叙事层变化成立则保留。"""
     runner = FakeRunner(inspect=[
-        {"event_continuity": False, "rhetorical_function_continuity": False,
-         "audience_cognition_continuity": False, "semantic_change": True,
-         "reason": "提出偏见 vs 开始反驳"}])
+        _hier_verdict(same_episode=False, rhetorical_shift=True,
+                      before_role="提出待反驳的偏见",
+                      after_role="用行动直接反驳",
+                      reason="边界前字幕立论，边界后人物开始用行动反驳")])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
@@ -162,7 +209,7 @@ def test_frame_check_keeps_justified_boundary_without_rewatch(
 
 def test_iterative_frame_check_moves_until_semantic_change(
         tmp_path: Path) -> None:
-    """首次帧判定不成立→移动→复查新边界→第二次成立（reconcile-until-stable）。"""
+    """首次帧判定 reject→移动→复查新边界→第二次 keep（reconcile-until-stable）。"""
     ledger = _ledger()
     ledger["boundaries"].insert(3, {
         "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
@@ -175,12 +222,12 @@ def test_iterative_frame_check_moves_until_semantic_change(
                                            "cut_003"]),
                _full_watch("proofs", ["cut_003", "video_end"])],
         inspect=[
-            {"event_continuity": True, "rhetorical_function_continuity": True,
-             "audience_cognition_continuity": True, "semantic_change": False,
-             "reason": "仍是比赛反应近景"},
-            {"event_continuity": False, "rhetorical_function_continuity": False,
-             "audience_cognition_continuity": False, "semantic_change": True,
-             "reason": "比赛结束，照片蒙太奇开始"}])
+            _hier_verdict(same_episode=True, phase_progression=True,
+                          reason="边界前后仍是同一事件的收束阶段，无叙事功能变化"),
+            _hier_verdict(same_episode=False, rhetorical_shift=True,
+                          before_role="呈现核心事件的结果",
+                          after_role="扩展独立证据",
+                          reason="核心事件结束，并列证据单元从零开始")])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
@@ -203,9 +250,8 @@ def test_iterative_frame_check_moves_until_semantic_change(
 def test_unjustified_boundary_without_valid_recommendation_blocks(
         tmp_path: Path) -> None:
     runner = FakeRunner(inspect=[
-        {"event_continuity": True, "rhetorical_function_continuity": True,
-         "audience_cognition_continuity": True, "semantic_change": False,
-         "reason": "同主题被误判为同事件"}])
+        _hier_verdict(same_episode=True, phase_progression=True,
+                      reason="候选耗尽前始终没有出现叙事层变化")])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
@@ -372,10 +418,8 @@ def test_contract_repair_round_reasks_programs_once(
             _conflicts_clean(),
             _broken_content(), _edit(),
             _content(), _edit(),
-        ], inspect=[{"event_continuity": False,
-                     "rhetorical_function_continuity": False,
-                     "audience_cognition_continuity": False,
-                     "semantic_change": True, "reason": "new event"}])
+        ], inspect=[_hier_verdict(same_episode=False, rhetorical_shift=True,
+                                  reason="一个叙事功能不同的事件单元在此开始")])
     def fake_ledger(_reference, output_dir, **_kwargs):
         ledger = _ledger()
         (Path(output_dir) / "reference_evidence.json").write_text(
@@ -449,14 +493,12 @@ def test_same_event_head_shot_forces_boundary_move_without_ask(
                                            "cut_003"]),
                _full_watch("proofs", ["cut_003", "video_end"])],
         inspect=[
-            {"event_continuity": True, "rhetorical_function_continuity": True,
-             "audience_cognition_continuity": True, "semantic_change": False,
-             "reason": "同属准备阶段"},
-            {"event_continuity": False,
-             "rhetorical_function_continuity": False,
-             "audience_cognition_continuity": False,
-             "semantic_change": True,
-             "reason": "照片蒙太奇开始"}])
+            _hier_verdict(same_episode=True, phase_progression=True,
+                          reason="仍属同一事件的反应阶段，无叙事功能变化"),
+            _hier_verdict(same_episode=False, rhetorical_shift=True,
+                          before_role="呈现核心事件的结果",
+                          after_role="扩展独立证据",
+                          reason="照片类并列证据单元从这里开始")])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
@@ -668,9 +710,10 @@ def test_hook_takeaway_must_present_quoted_proposition(tmp_path: Path) -> None:
     assert not any("hook takeaway" in error for error in result["errors"])
 
 
-def test_rhetorical_change_inside_event_does_not_split_section(
+def test_phase_progression_inside_event_does_not_split_section(
         tmp_path: Path) -> None:
-    """事件内部的阶段变化（如决胜时刻）不得成为 Section 边界。"""
+    """P0.3F：事件内部 phase 推进（如关键一击→结果呈现）不是叙事层变化，
+    不得成为 Section 边界；边界必须等叙事功能真正切换。"""
     ledger = _ledger()
     ledger["boundaries"].insert(3, {
         "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
@@ -682,12 +725,12 @@ def test_rhetorical_change_inside_event_does_not_split_section(
                                            "cut_003"]),
                _full_watch("proofs", ["cut_003", "video_end"])],
         inspect=[
-            {"event_continuity": True, "rhetorical_function_continuity": False,
-             "audience_cognition_continuity": False, "semantic_change": True,
-             "reason": "决胜时刻，修辞功能变化但仍是同一场比赛"},
-            {"event_continuity": False, "rhetorical_function_continuity": False,
-             "audience_cognition_continuity": False, "semantic_change": True,
-             "reason": "照片蒙太奇开始，新事件"}])
+            _hier_verdict(same_episode=True, phase_progression=True,
+                          reason="同一事件从对抗推进到结果，叙事功能仍是证明能力"),
+            _hier_verdict(same_episode=False, rhetorical_shift=True,
+                          before_role="呈现核心事件的结果",
+                          after_role="扩展独立证据",
+                          reason="核心事件结束，并列证据单元开始")])
     video = tmp_path / "reference.mp4"
     video.write_bytes(b"fake")
     import src.agentic_video.reference_program_v9 as module
@@ -703,5 +746,120 @@ def test_rhetorical_change_inside_event_does_not_split_section(
     record = result["boundaries"][0]
     assert record["action"] == "moved"
     assert record["moved_to"] == "cut_003"
-    assert record["attempts"][0]["accepted_by_event_gate"] is False
-    assert record["attempts"][1]["accepted_by_event_gate"] is True
+    assert record["attempts"][0]["decision"] == "reject"
+    assert record["attempts"][0]["accepted_by_narrative_gate"] is False
+    assert record["attempts"][1]["decision"] == "keep"
+    assert record["attempts"][1]["accepted_by_narrative_gate"] is True
+
+
+def test_parallel_new_events_with_stable_role_move_not_keep(
+        tmp_path: Path) -> None:
+    """S3 证据蒙太奇内部：换事件但叙事功能不变 → unresolved，继续前移，
+    不得把每个并列证据都立成 Section。"""
+    ledger = _ledger()
+    ledger["boundaries"].insert(3, {
+        "boundary_id": "cut_003", "frame_id": "f000750", "pts_s": 25.0,
+        "kind": "cut_candidate"})
+    bank = _section_bank()
+    bank["sections"][1]["shots"][0]["event_relation"] = "different_event"
+    runner = FakeRunner(
+        watch=[_full_watch("competition", ["video_start", "cut_001", "cut_002",
+                                           "cut_003"]),
+               _full_watch("proofs", ["cut_003", "video_end"])],
+        inspect=[
+            _hier_verdict(same_episode=False, same_session=True,
+                          phase_progression=False, rhetorical_shift=False,
+                          before_role="扩展独立证据",
+                          after_role="扩展独立证据",
+                          reason="并列的新证据事件，叙事功能没有变化"),
+            _hier_verdict(same_episode=False, rhetorical_shift=True,
+                          before_role="扩展独立证据",
+                          after_role="收尾点题",
+                          reason="证据罗列结束，进入收尾功能")])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        result, _reconciled = reconcile_section_boundaries(
+            video, ledger, bank, tmp_path, runner=runner)
+    finally:
+        module._boundary_frames = original
+    record = result["boundaries"][0]
+    assert record["action"] == "moved"
+    assert record["moved_to"] == "cut_003"
+    assert record["attempts"][0]["decision"] == "unresolved"
+    assert record["attempts"][0]["accepted_by_narrative_gate"] is False
+    assert record["attempts"][1]["accepted_by_narrative_gate"] is True
+
+
+def test_frame_check_rejects_echoed_placeholder_fields(
+        tmp_path: Path) -> None:
+    """模型照抄 prompt 占位字段/reason → BLOCKED，不吃进对账记录。"""
+    import src.agentic_video.reference_program_v9 as module
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        echoed_reason = _hier_verdict(
+            reason="具体描述边界前后画面内容与叙事功能的差异")
+        with pytest.raises(V9Blocked) as excinfo:
+            module._frame_check_boundary(
+                video, 20.0, _ledger(), tmp_path, runner=FakeRunner(
+                    inspect=[echoed_reason]), ffmpeg_bin="ffmpeg",
+                attempt=0, slug="a_b")
+        assert excinfo.value.reason_code == "frame_check_verdict_echoed_example"
+
+        echoed_field = _hier_verdict()
+        echoed_field["before"]["rhetorical_role"] = "这一段的叙事功能"
+        with pytest.raises(V9Blocked) as excinfo:
+            module._frame_check_boundary(
+                video, 20.0, _ledger(), tmp_path, runner=FakeRunner(
+                    inspect=[echoed_field]), ffmpeg_bin="ffmpeg",
+                attempt=0, slug="a_b")
+        assert excinfo.value.reason_code == "frame_check_verdict_echoed_example"
+
+        missing = _hier_verdict()
+        del missing["relations"]["rhetorical_shift"]
+        with pytest.raises(V9Blocked) as excinfo:
+            module._frame_check_boundary(
+                video, 20.0, _ledger(), tmp_path, runner=FakeRunner(
+                    inspect=[missing]), ffmpeg_bin="ffmpeg",
+                attempt=0, slug="a_b")
+        assert excinfo.value.reason_code == "frame_check_verdict_invalid"
+    finally:
+        module._boundary_frames = original
+
+
+def test_global_outline_rides_with_frames_without_boundary_answers(
+        tmp_path: Path) -> None:
+    """local-to-global：全局叙事纲要随帧下发，但不得携带任何边界信息。"""
+    runner = FakeRunner(inspect=[
+        _hier_verdict(same_episode=False, rhetorical_shift=True,
+                      before_role="提出待检验的偏见",
+                      after_role="用行动反驳",
+                      reason="叙事功能从立论切换为反驳")])
+    video = tmp_path / "reference.mp4"
+    video.write_bytes(b"fake")
+    import src.agentic_video.reference_program_v9 as module
+    original = module._boundary_frames
+    module._boundary_frames = (
+        lambda ffmpeg_bin, reference, pts, out_dir, span:
+        [out_dir / f"f{index}.jpg" for index in range(6)])
+    try:
+        reconcile_section_boundaries(
+            video, _ledger(), _section_bank(), tmp_path, runner=runner,
+            draft=_draft())
+    finally:
+        module._boundary_frames = original
+    prompt = runner.inspect_calls[0][1]
+    assert '"global_narrative_outline"' in prompt
+    assert "establish condition then prove capability" in prompt
+    # 纲要只含全局理解，不含候选边界清单/时间点
+    assert '"cut_00' not in prompt.split('"global_narrative_outline"')[1]

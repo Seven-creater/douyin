@@ -735,10 +735,14 @@ def test_fake_runner_full_v9_orchestration_stops_pending_human(
     ], ask=[
         _conflicts_clean(),
         _content(), _edit(),
-    ], inspect=[{"event_continuity": False,
-                 "rhetorical_function_continuity": False,
-                 "audience_cognition_continuity": False,
-                 "semantic_change": True, "reason": "new event begins"}])
+    ], inspect=[{
+        "before": {"episode": "opening", "phase": "start",
+                   "rhetorical_role": "establishes premise"},
+        "after": {"episode": "capability demonstration", "phase": "start",
+                  "rhetorical_role": "proves capability"},
+        "relations": {"same_session": True, "same_episode": False,
+                      "phase_progression": False, "rhetorical_shift": True},
+        "reason": "a different event with a new narrative role begins"}])
     def fake_ledger(_reference, output_dir, **_kwargs):
         ledger = _ledger()
         (Path(output_dir) / "reference_evidence.json").write_text(
