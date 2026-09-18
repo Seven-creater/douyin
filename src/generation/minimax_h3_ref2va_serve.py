@@ -138,8 +138,10 @@ class Engine:
                  num_inference_steps, seed):
         t0 = time.time()
         generator = torch.Generator().manual_seed(int(seed))
+        # Ref2VASetupStep 要求 num_frames（参考重采样/音轨截断按目标时长）
         prep_out = self._prep(
-            references=references, height=height, width=width)
+            references=references, height=height, width=width,
+            num_frames=num_frames)
         normalized = _field(prep_out, "normalized_references")
         out_h = _field(prep_out, "height") or height
         out_w = _field(prep_out, "width") or width

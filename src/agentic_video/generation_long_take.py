@@ -930,6 +930,7 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                        fl2va_endpoint: str = "http://127.0.0.1:30011",
                        gpu_set: str = "0,1,6,7",
                        seconds: float = DEFAULT_SECONDS,
+                       recipes: tuple[str, ...] = RECIPES,
                        seeds: tuple[int, ...] = DEFAULT_SEEDS,
                        pack_picks: dict[str, float] | None = None,
                        gpu_pairs: str = "0,1;6,7",
@@ -970,7 +971,7 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
     aspect_ratio = resolve_reference_aspect_ratio(active_w, active_h)
     jobs = []
     for seed in seeds:
-        for recipe in RECIPES:
+        for recipe in recipes if recipes else RECIPES:
             take_id = f"{recipe}_s{seed}"
             request = build_long_take_request(
                 brief, pack=pack, visual_reference=visual_reference,
@@ -985,7 +986,7 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
             "aspect_basis": {"container": geometry, "active_crop": active,
                              "active": [active_w, active_h]},
             "seeds": list(seeds),
-            "recipes": list(RECIPES),
+            "recipes": list(recipes or RECIPES),
             "server_routing": {"prompt_only": "fl2va (t2va task)",
                                "others": "ref2va",
                                "note": "A 为 T2VA baseline，非严格同 "
@@ -1034,6 +1035,21 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
         try:
             for job in group_jobs:
                 job_dir = output_dir / "takes" / job["take_id"]
+                # resume：已 transport_validated 且成片在盘的 take 直接复用
+                # （重跑失败配方时不重烧已完成的 t2va 基线）
+                prior_path = job_dir / "job_state.json"
+                if prior_path.is_file():
+                    try:
+                        prior = json.loads(
+                            prior_path.read_text(encoding="utf-8"))
+                    except ValueError:
+                        prior = {}
+                    if (prior.get("state") == "transport_validated" and
+                            Path(str(prior.get("output_path") or "")
+                                 ).is_file()):
+                        prior["variant"] = variant
+                        take_results.append(prior)
+                        continue
                 state = {"take_id": job["take_id"], "recipe": job["recipe"],
                          "seed": job["seed"], "variant": variant,
                          "state": "planned"}
@@ -1065,9 +1081,9 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
             if stop_after:
                 _stop_owned_server(server_process)
 
-    if fl2va_endpoint.rstrip("/") == ref2va_endpoint.rstrip("/"):
+    if fl2va_endpoint.rstrip("/") == ref2va_endpoint.rstrip("/") or             "prompt_only" not in recipes:
         # 统一 diffusers serve 同时服务 t2va 与 ref2va：单进程一次跑完，
-        # 不在两组之间重启（模型加载 ~10 分钟）。
+        # 不在两组之间重启（模型加载 ~10 分钟）；定点重跑（无 A）同理。
         _run_group(jobs, ref2va_endpoint, "unified", stop_after=True)
     else:
         _run_group([job for job in jobs if job["recipe"] == "prompt_only"],

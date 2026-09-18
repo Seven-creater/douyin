@@ -370,6 +370,9 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Omni observation pairs (H3 stopped first)")
     long_take.add_argument("--seconds", type=float, default=12.0)
     long_take.add_argument("--seeds", default="1001,1002")
+    long_take.add_argument("--recipes", default=None,
+                           help="comma-filter of recipes for targeted reruns "
+                                "(e.g. video_only,canonical_plus_video)")
     long_take.add_argument("--pack-picks", default=None,
                            help="JSON file mapping role -> chosen time_s")
     long_take.add_argument("--plan-only", action="store_true",
@@ -2249,12 +2252,15 @@ def _long_take_lt0(args, cfg) -> dict:
         picks = _json.loads(Path(args.pack_picks).read_text(encoding="utf-8"))
     seeds = tuple(int(item) for item in str(args.seeds).split(",")
                   if item.strip())
+    recipes = (tuple(item.strip() for item in str(args.recipes).split(",")
+                     if item.strip()) if args.recipes else None)
     return run_lt0_experiment(
         cfg, Path(args.p04e_output), Path(args.output),
         reference=Path(args.reference), plan_only=args.plan_only,
         execute=args.execute, ref2va_endpoint=args.ref2va_endpoint,
         fl2va_endpoint=args.fl2va_endpoint,
         gpu_set=args.gpu_set, seconds=float(args.seconds), seeds=seeds,
+        recipes=recipes,
         pack_picks=picks, gpu_pairs=args.gpu_pairs,
         manage_server=not args.no_manage_server,
         h3_backend=args.h3_backend, h3_python_bin=args.h3_python_bin,
