@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from src.agentic_video.manifest import git_sha, json_hash
+from src.agentic_video import narrative_boundary
 from src.agentic_video.recipe_v2 import sha256_file
 from src.perception import common
 from src.perception.detect_shots import detect_shots
@@ -25,12 +26,12 @@ from src.perception.inspect_video import inspect_video
 from src.perception.omni_runner import cut_clip
 
 
-V9_VERSION = "reference_program_v9_p03"
+V9_VERSION = "reference_program_v9_p04"
 CONTENT_VERSION = "reference_content_program_v9_p03"
 EDIT_VERSION = "reference_edit_program_v9_p03"
 SECTION_OBSERVATIONS_VERSION = "section_observations_v9_p03"
 NORMALIZATION_VERSION = "shot_normalization_v9_p03"
-RECONCILIATION_VERSION = "boundary_reconciliation_v9_p03"
+RECONCILIATION_VERSION = "boundary_reconciliation_v9_p04"
 CONFLICT_GATE_VERSION = "semantic_conflicts_v9_p03"
 MONTAGE_WATCH_VERSION = "montage_shot_observations_v9_p03"
 REQUIREMENTS_VERSION = "material_requirements_v9_p0"
@@ -1092,36 +1093,7 @@ def apply_montage_reclassification(normalization: dict[str, Any],
     return normalization
 
 
-HIERARCHICAL_BOUNDARY_PROMPT = """判断候选边界两侧的层级关系。输入是整条视频的
-全局表达目的（供参照，不含任何边界信息）与边界前后各三帧（按时间顺序：
-before_1 约-2.0s、before_2 约-1.0s、before_3 约-0.4s、after_1 约+0.4s、
-after_2 约+1.0s、after_3 约+2.0s）。
-
-目标层级（GEBD one-level-deeper 协议）：只判断"整条视频表达目的下的**一级叙事
-单元**"之间的转换，不是找所有动作/画面变化。叙事单元定义：承担一个相对稳定
-叙事功能的最小连续区间；其内部可包含多个镜头、动作阶段乃至多个局部事件，
-只要它们共同服务于同一表达目的。
-
-三级认知分类（NarraScene）：physical（独立发生的事件是否更替）、character
-（参与主体配置是否改变）、narrative（叙事/修辞功能是否变化）。**有效边界必须
-有叙事层变化**；同一事件内部的阶段推进（如准备→对抗→结果→反应）不是边界；
-一组并列的证据罗列即使各自是不同事件，只要叙事功能相同就同属一个叙事单元。
-
-分别描述边界前后，再给出关系布尔值（逐项独立判断，禁止照抄示例值）：
-{
-  "before": {"episode": "这一段是什么独立发生", "phase": "该发生内部的阶段",
-             "rhetorical_role": "这一段的叙事功能"},
-  "after": {"episode": "...", "phase": "...", "rhetorical_role": "..."},
-  "relations": {"same_session": true, "same_episode": true,
-                "phase_progression": false, "rhetorical_shift": false},
-  "reason": "具体描述边界前后画面内容与叙事功能的差异"
-}
-same_session：是否仍属同一大活动/主题环境；same_episode：前后是否同一独立发生；
-phase_progression：是否只是同一发生内部推进到下一阶段；rhetorical_shift：叙事
-功能是否变化。reason 必须具体，不得输出占位文字。输入："""
-
-
-BOUNDARY_FRAME_CHECK_PROMPT = HIERARCHICAL_BOUNDARY_PROMPT
+BOUNDARY_FRAME_CHECK_PROMPT = narrative_boundary.NARRATIVE_BOUNDARY_PROMPT
 
 
 def _boundary_frames(ffmpeg_bin: str, reference: Path, pts: float,
@@ -1142,74 +1114,29 @@ def _boundary_frames(ffmpeg_bin: str, reference: Path, pts: float,
     return frames
 
 
-def _hierarchical_boundary_decision(verdict: dict[str, Any]) -> str:
-    """确定性终判（用户拍板决策树 + NarraScene 叙事层硬规则）。
-
-    keep = 有效叙事边界；reject = 事件内部阶段/仅物理变化；unresolved = 证据
-    不足，移动到下一候选继续。
-    """
-    relations = verdict.get("relations") or {}
-    before_role = str((verdict.get("before") or {}).get("rhetorical_role") or "").strip()
-    after_role = str((verdict.get("after") or {}).get("rhetorical_role") or "").strip()
-    role_changed = bool(before_role and after_role and before_role != after_role)
-    if relations.get("rhetorical_shift") is True:
-        return "keep"
-    if relations.get("same_episode") is False and role_changed:
-        return "keep"
-    if relations.get("phase_progression") is True:
-        return "reject"
-    if relations.get("same_episode") is True:
-        return "reject"
-    return "unresolved"
-
-
 def _frame_check_boundary(reference: Path, pts: float, ledger: dict[str, Any],
                           output_dir: Path, *, runner, ffmpeg_bin: str,
                           attempt: int, slug: str,
                           global_outline: dict[str, Any] | None = None
                           ) -> dict[str, Any]:
+    """P0.4 叙事功能边界判定：LLM 只选功能枚举，决策在代码里。"""
     duration = float(ledger["reference"]["duration_s"])
     images = _boundary_frames(ffmpeg_bin, Path(reference), pts,
                               output_dir / "boundary_frames" /
                               f"{slug}_a{attempt}", (0.0, duration))
-    prompt = HIERARCHICAL_BOUNDARY_PROMPT
+    prompt = narrative_boundary.NARRATIVE_BOUNDARY_PROMPT
     if global_outline:
         prompt += json.dumps({"global_narrative_outline": global_outline},
                              ensure_ascii=False, separators=(",", ":"))
     answer = runner.inspect_media(
-        images, prompt, max_new_tokens=1024, stop_after_json_object=True)
+        images, prompt, max_new_tokens=768, stop_after_json_object=True)
     raw = _answer_text(answer)
     raw_path = (output_dir / "raw_responses" /
                 f"boundary_{slug}_a{attempt}.txt")
     raw_path.parent.mkdir(parents=True, exist_ok=True)
     raw_path.write_text(raw, encoding="utf-8")
     verdict = _parse_one_object(raw, stage="boundary_reconciliation")
-    relations = verdict.get("relations") or {}
-    for key in ("same_session", "same_episode", "phase_progression",
-                "rhetorical_shift"):
-        if not isinstance(relations.get(key), bool):
-            raise V9Blocked("boundary_reconciliation",
-                            "frame_check_verdict_invalid", f"{slug}:{key}")
-    placeholders = {"这一段是什么独立发生", "该发生内部的阶段",
-                    "这一段的叙事功能", "..."}
-    for side in ("before", "after"):
-        block = verdict.get(side) or {}
-        for key in ("episode", "phase", "rhetorical_role"):
-            value = str(block.get(key) or "").strip()
-            if not value:
-                raise V9Blocked("boundary_reconciliation",
-                                "frame_check_verdict_invalid",
-                                f"{slug}:{side}.{key}")
-            if value in placeholders:
-                raise V9Blocked("boundary_reconciliation",
-                                "frame_check_verdict_echoed_example",
-                                f"{slug}:{side}.{key}")
-    if (str(verdict.get("reason") or "").strip() in {
-            "画面依据", "具体描述边界前后画面内容与功能的差异",
-            "具体描述边界前后画面内容与叙事功能的差异"}
-            or len(str(verdict.get("reason") or "").strip()) < 6):
-        raise V9Blocked("boundary_reconciliation",
-                        "frame_check_verdict_echoed_example", slug)
+    narrative_boundary.validate_narrative_verdict(verdict)
     return verdict
 
 
@@ -1219,14 +1146,15 @@ def reconcile_section_boundaries(
         ffmpeg_bin: str = "ffmpeg", force: bool = False,
         draft: dict[str, Any] | None = None
         ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """P0.3F 迭代式 Section Boundary Reconciliation（层级叙事边界分类）。
+    """P0.4 迭代式 Section Boundary Reconciliation（叙事功能边界）。
 
     每个内部边界：下一 Section 首 shot 报 same_event 时记为确定性信号（不单独
-    放行），抽边界前后各三帧，让模型只**描述**四层关系（session/episode/phase/
-    narrative-role），keep/reject 由 `_hierarchical_boundary_decision` 确定性
-    拍板。reject/unresolved → 移动到下一候选并复查新边界，直到叙事层真实变化
-    或候选耗尽（BLOCKED）。全局叙事纲要（来自粗读草稿，不含边界信息）作为
-    local-to-global 上下文随帧一起下发。
+    放行），抽边界前后各三帧，让模型只从**有限功能表**选 before/after 功能
+    枚举，keep/move 由 `narrative_boundary.decide_narrative_boundary` 做
+    字符串不等比较（纯确定性）。功能相同 → 移动到下一候选并复查新边界，
+    直到功能真正切换或候选耗尽（BLOCKED）。全局叙事纲要（来自粗读草稿，
+    不含边界信息）作为 local-to-global 上下文随帧一起下发。
+    边界精度要求是"功能不混"，不是精确秒点（GEBD 粒度宽容原则）。
     """
     output_dir = Path(output_dir)
     rows = [dict(row) for row in section_observations.get("sections") or []]
@@ -1273,25 +1201,22 @@ def reconcile_section_boundaries(
                 slug=_safe_id(f"{previous_row.get('section_id')}_"
                               f"{next_row.get('section_id')}"),
                 global_outline=global_outline)
-            # P0.3F：LLM 只描述四层关系，keep/reject 由确定性决策树拍板
-            # （NarraScene：有效边界必须有叙事层变化；同一事件内部的
-            # phase 推进与并列证据罗列都不是 Section 边界）。
-            decision = _hierarchical_boundary_decision(verdict)
+            # P0.4：LLM 只从有限功能表选枚举；keep/move = 枚举不等比较。
+            boundary_needed = narrative_boundary.decide_narrative_boundary(
+                verdict.get("before_function"), verdict.get("after_function"))
             attempts.append({
                 "boundary_id": current_id,
                 "method": ("frame_check+same_event_signal" if head_same_event
                            else "frame_check"),
                 "same_event_signal": head_same_event,
-                "decision": decision,
-                "narrative_shift": bool(
-                    (verdict.get("relations") or {}).get("rhetorical_shift")),
-                "semantic_change": decision == "keep",
-                "accepted_by_narrative_gate": decision == "keep",
-                "detail": {"before": verdict.get("before"),
-                           "after": verdict.get("after"),
-                           "relations": verdict.get("relations"),
-                           "reason": verdict.get("reason")}})
-            if decision == "keep":
+                "decision": "keep" if boundary_needed else "move",
+                "before_function": verdict.get("before_function"),
+                "after_function": verdict.get("after_function"),
+                "same_event": verdict.get("same_event"),
+                "boundary_needed": boundary_needed,
+                "semantic_change": boundary_needed,
+                "detail": {"reason": verdict.get("reason")}})
+            if boundary_needed:
                 accepted_id = current_id
                 break
             forward = [bid for bid in candidates
@@ -2270,14 +2195,16 @@ def build_reference_edit_program(
             same_event_majority = sum(
                 1 for shot in row.get("content_shots") or []
                 if shot.get("event_relation") == "same_event") > content_shot_count / 2
-            replacement = ("multi_angle_action" if same_event_majority
-                           else "micro_montage")
+            # P0.4（用户规则）：同一事件多镜头关键瞬间 = event_compression_montage；
+            # 并列不同事件 = evidence_montage。模式由镜头结构派生，不信 LLM 直判。
+            replacement = ("event_compression_montage" if same_event_majority
+                           else "evidence_montage")
             pattern["composition_mode"] = replacement
             mode = replacement
             programmatic_alignments.append({
                 "section_id": section_id, "field": "composition_mode",
                 "from": "continuous_clip", "to": replacement,
-                "basis": "contradicts observed real cuts/shots"})
+                "basis": "derived_from_shot_sequence"})
         if mode in MONTAGE_LIKE_MODES:
             shot_count = len(row.get("content_shots") or [])
             low = max(2, math.ceil(0.6 * shot_count)) if shot_count else 2
@@ -2763,9 +2690,59 @@ def validate_reference_programs(content: dict[str, Any], edit: dict[str, Any],
     _validate_p02_structure(content, edit, requirements, ledger,
                             section_observations, recomputed, reconciliation,
                             conflicts, normalization, errors, warnings)
+    usability = _validate_narrative_usability(content, edit, requirements,
+                                              reconciliation, conflicts,
+                                              normalization, errors)
+    for key, value in usability.items():
+        if value is False:
+            errors.append(f"narrative_usability:{key}")
     return {
         "schema_version": "reference_program_validation_v9",
         "passed": not errors, "errors": errors, "warnings": warnings,
+        "narrative_usability": usability,
+    }
+
+
+def _validate_narrative_usability(
+        content: dict[str, Any], edit_program: dict[str, Any],
+        requirements: dict[str, Any],
+        reconciliation: dict[str, Any] | None,
+        conflicts: dict[str, Any] | None,
+        normalization: dict[str, Any] | None,
+        errors: list[str]) -> dict[str, bool]:
+    """P0.4 Narrative Usability Validation（用户放行标准）。
+
+    边界秒点精度不设门（GEBD 粒度宽容）；只回答"这份理解能不能指导生成"：
+    每条对应 P0 人工放行的五条硬线之一。
+    """
+    functions = [str(section.get("content_function") or "").strip()
+                 for section in content.get("sections") or []]
+    boundaries_justified = True
+    for record in (reconciliation or {}).get("boundaries") or []:
+        if record.get("action") in {"kept", "moved"} and not (
+                record.get("semantic_change") is True or any(
+                    attempt.get("boundary_needed")
+                    for attempt in record.get("attempts") or [])):
+            boundaries_justified = False
+    segments_typed = all(
+        isinstance(pattern.get("transition_refs"), list)
+        for pattern in edit_program.get("editorial_patterns") or [])
+    if normalization:
+        segments_typed = segments_typed and all(
+            isinstance(section.get("transition_segments"), list) and
+            isinstance(section.get("content_shots"), list)
+            for section in normalization.get("sections") or [])
+    return {
+        "sections_have_narrative_purpose": (
+            bool(functions) and all(functions) and boundaries_justified),
+        "montage_not_misread_as_continuous": not any(
+            "continuous_clip contradicts" in error for error in errors),
+        "segments_typed_content_transition_overlay": segments_typed,
+        "facts_reconciled_no_open_contradiction": not bool(
+            (conflicts or {}).get("unresolved_topics")),
+        "material_requirements_searchable": bool(
+            requirements.get("requirements")) and not any(
+            "leaked" in error for error in errors),
     }
 
 
@@ -2970,11 +2947,16 @@ def _write_review_pack(output_dir: Path, content: dict[str, Any],
         "# V9 Reference Program 人工审核表", "",
         "自动验证通过不等于交付通过。请逐段观看片段与关键帧，再填写 human_review.template.json。",
         "",
-        "## P0.2 审核辅助", "",
-        "- 边界对账：" + json.dumps(
-            [{ "boundary": row.get("boundary_id"),
-               "semantic_change": row.get("semantic_change"),
-               "action": row.get("action"), "moved_to": row.get("moved_to")}
+        "## P0.4 审核辅助（放行标准=生成可用，非边界秒点精度）", "",
+        "- 边界叙事功能对账：" + json.dumps(
+            [{"boundary": row.get("boundary_id"),
+              "action": row.get("action"), "moved_to": row.get("moved_to"),
+              "functions": [
+                  {"candidate": attempt.get("boundary_id"),
+                   "before": attempt.get("before_function"),
+                   "after": attempt.get("after_function"),
+                   "boundary_needed": attempt.get("boundary_needed")}
+                  for attempt in row.get("attempts") or []]}
              for row in (reconciliation or {}).get("boundaries") or []],
             ensure_ascii=False),
         "- 语义冲突门：" + json.dumps(
