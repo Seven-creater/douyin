@@ -68,8 +68,30 @@ ASSET_STORY_PROMPT = """你是故事创作者。输入是一份**叙事迁移契
 故事的核心反证段（counter_evidence/S2）。你的任务：创造 **3 个互不相同**
 的完整故事外壳，每个外壳为这段素材设计一个新的 S1 前提（被这段素材直接
 推翻）和一个新的 S3（继续支持修正后的认知并以轻松方式收尾）。只输出一个
-JSON 对象：{"stories": [同 creative 模式的单故事 schema ×3]}，其中：
-- counter_evidence.event 固定写 "USE_EXISTING_FOOTAGE"，
+JSON 对象：
+{"stories": [{
+  "story_id": "wrapper_a",
+  "logline": "一句话故事",
+  "initial_belief": {"claim": "他人对主人公的具体判断（含低估来源）",
+                     "capability": "被低估的具体能力领域",
+                     "source_of_underestimation": "低估来源"},
+  "counter_evidence": {"demonstrated_capability": "素材展示的具体能力领域",
+                       "event": "USE_EXISTING_FOOTAGE",
+                       "outcome": "素材的决定性结果"},
+  "reinforcement": [{"event": "S3 的补充证据事件",
+                     "supports_corrected_belief": true}],
+  "ending": {"statement": "S3 收尾小反差", "function": "人格化幽默收束",
+             "cancels_corrected_belief": false},
+  "sections": [
+    {"role": "situation_setup", "event": "S1 可视事件（4-6 秒能看清）",
+     "emotion": "观众此刻的感受"},
+    {"role": "counter_evidence", "event": "USE_EXISTING_FOOTAGE",
+     "emotion": "惊讶"},
+    {"role": "evidence_expansion", "event": "S3 可视事件（4-6 秒能看清）",
+     "emotion": "认可与轻松"}],
+  "emotion_arc": ["...", "...", "..."]}]}
+注意：每个故事是完整 JSON 对象（含 initial_belief/counter_evidence 等
+字段），不是按 S1/S2/S3 拆开的段落字典。其中：
   demonstrated_capability 填素材实际展示的具体能力领域
 - 三个外壳的 source_of_underestimation 与 S3 的证据类型必须互不相同
 - S1/S3 的事件必须是**可拍成视频的可视事件**（4-6 秒能看清）
