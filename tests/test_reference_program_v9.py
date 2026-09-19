@@ -338,11 +338,18 @@ def test_production_watch_prompts_do_not_spoil_reference_answer() -> None:
         BOUNDARY_FRAME_CHECK_PROMPT, DENSE_CUT_PROMPT, PER_SHOT_PROMPT,
         CONFLICT_GATE_PROMPT, NEUTRAL_EVENT_RECHECK_PROMPT,
         CONFLICT_RESOLUTION_PROMPT, REPAIR_HEADER, PROBE_PROMPT)
+    from src.agentic_video.ragen_director import DIRECTOR_CONTRACT_PROMPT
+    from src.agentic_video.ragen_edit import (BLIND_VIEWER_PROMPT,
+                                              COMPARATOR_PROMPT)
+    from src.agentic_video.ragen_story import (ASSET_STORY_PROMPT,
+                                               STORY_INSTANTIATION_PROMPT)
     prompts = (GLOBAL_WATCH_PROMPT, SECTION_WATCH_PROMPT,
                CONTENT_PROGRAM_PROMPT, EDIT_PROGRAM_PROMPT,
                BOUNDARY_FRAME_CHECK_PROMPT, DENSE_CUT_PROMPT, PER_SHOT_PROMPT,
                CONFLICT_GATE_PROMPT, NEUTRAL_EVENT_RECHECK_PROMPT,
-               CONFLICT_RESOLUTION_PROMPT, REPAIR_HEADER, PROBE_PROMPT)
+               CONFLICT_RESOLUTION_PROMPT, REPAIR_HEADER, PROBE_PROMPT,
+               DIRECTOR_CONTRACT_PROMPT, STORY_INSTANTIATION_PROMPT,
+               ASSET_STORY_PROMPT, BLIND_VIEWER_PROMPT, COMPARATOR_PROMPT)
     for prompt in prompts:
         for spoiler in ("没有双手", "跆拳道", "比赛", "能力展示", "全国冠军",
                         "废人", "剪脚指甲"):

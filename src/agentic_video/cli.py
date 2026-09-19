@@ -408,6 +408,31 @@ def build_parser() -> argparse.ArgumentParser:
     produce.add_argument("--plan-only", action="store_true")
     produce.add_argument("--execute", action="store_true")
 
+    ragen_dir = sub.add_parser(
+        "ragen-director",
+        help="ReGen module 1: frozen P0 -> transfer contract (narrative/"
+             "editing/rhythm grammar + slots + 9:16 display format)")
+    ragen_dir.add_argument("--p04e-output", required=True)
+    ragen_dir.add_argument("--output", required=True)
+    ragen_dir.add_argument("--gpu-pairs", default="0,1;6,7")
+    ragen_dir.add_argument("--worker-timeout", type=float, default=3600.0)
+    ragen_dir.add_argument("--force", action="store_true")
+
+    ragen_story = sub.add_parser(
+        "ragen-story",
+        help="ReGen module 2: transfer contract -> story plans "
+             "(creative x3 | asset-aware)")
+    ragen_story.add_argument("--contract-dir", required=True)
+    ragen_story.add_argument("--p04e-output", required=True)
+    ragen_story.add_argument("--output", required=True)
+    ragen_story.add_argument("--mode", default="creative",
+                             choices=("creative", "asset_aware"))
+    ragen_story.add_argument("--dailies-semantics", default=None,
+                             help="JSON list of {asset_id, observed_semantics}")
+    ragen_story.add_argument("--gpu-pairs", default="0,1;6,7")
+    ragen_story.add_argument("--worker-timeout", type=float, default=3600.0)
+    ragen_story.add_argument("--force", action="store_true")
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -2322,6 +2347,51 @@ def _long_take_produce(args, cfg) -> dict:
         ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
 
 
+def _ragen_director(args, cfg) -> dict:
+    from src.agentic_video.ragen_director import build_transfer_contract
+    from src.perception.omni_pool import OmniProcessPool
+
+    with OmniProcessPool(
+            args.gpu_pairs, cfg.perception.get("omni") or {},
+            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+            response_timeout_s=args.worker_timeout) as runner:
+        contract = build_transfer_contract(
+            Path(args.p04e_output), Path(args.output), runner=runner,
+            force=args.force)
+    return {"phase": "contract_built",
+            "contract_path": str(Path(args.output) / "transfer_contract.json"),
+            "theme": contract.get("theme"),
+            "section_roles": contract.get("section_roles")}
+
+
+def _ragen_story(args, cfg) -> dict:
+    import json as _json
+
+    from src.agentic_video.ragen_story import instantiate_stories
+    from src.perception.omni_pool import OmniProcessPool
+
+    contract_dir = Path(args.contract_dir)
+    contract = _json.loads(
+        (contract_dir / "transfer_contract.json").read_text(encoding="utf-8"))
+    annex = _json.loads(
+        (contract_dir / "reference_annex.json").read_text(encoding="utf-8"))
+    dailies = None
+    if args.dailies_semantics:
+        dailies = _json.loads(
+            Path(args.dailies_semantics).read_text(encoding="utf-8"))
+    with OmniProcessPool(
+            args.gpu_pairs, cfg.perception.get("omni") or {},
+            ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"),
+            response_timeout_s=args.worker_timeout) as runner:
+        result = instantiate_stories(
+            contract, Path(args.output), runner=runner, annex=annex,
+            mode=args.mode, dailies=dailies, force=args.force)
+    passing = [row["story"]["story_id"] for row in result["stories"]
+               if row["passed"]]
+    return {"phase": "stories_created", "mode": args.mode,
+            "passing_story_ids": passing}
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -2394,6 +2464,8 @@ def main(argv: list[str] | None = None) -> int:
                 "reference-generate-v9g-accept": _reference_generate_v9g_accept,
                 "long-take-lt0": _long_take_lt0,
                 "long-take-produce": _long_take_produce,
+                "ragen-director": _ragen_director,
+                "ragen-story": _ragen_story,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \
