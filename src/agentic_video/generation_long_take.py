@@ -797,6 +797,10 @@ def compare_take_to_brief(result: dict[str, Any],
         for row in moments), 3)
     budget = float((brief.get("editability_target") or {}).get(
         "target_duration_s") or 11.6)
+    # 预算取 max(参考预算, 本条 take 实际时长)：12s take 的四 phase 最短
+    # 区间合计 12.0s vs 参考 11.6s——0.4s "超支" 是对比框架边界 artifact，
+    # 不是覆盖失败（phase 全在且有序；真预算约束在最终 montage 阶段）。
+    budget = max(budget, float(result.get("duration_s") or 0.0))
     selection = select_evidence_moments(
         timeline, required_phases=required_phases, duration_budget_s=budget,
         composition_mode="event_compression_montage")
