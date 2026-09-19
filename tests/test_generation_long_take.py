@@ -75,7 +75,7 @@ def _pack() -> dict:
     # LT0 Round 1 无 arena（群像帧不能当纯场景参考）
     return {"schema_version": "x", "entries": [
         {"role": "c0_identity", "path": "/a.jpg", "sha256": "a", "uri": "file:///a.jpg"},
-        {"role": "c0_fullbody", "path": "/b.jpg", "sha256": "b", "uri": "file:///b.jpg"},
+        {"role": "c0_body_front", "path": "/b.jpg", "sha256": "b", "uri": "file:///b.jpg"},
         {"role": "c1_opponent", "path": "/c.jpg", "sha256": "c", "uri": "file:///c.jpg"},
     ]}
 
@@ -493,9 +493,9 @@ def test_plan_only_writes_all_eight_wire_payloads_without_http(
     assert "integrated_multimodal_description:" in prompt_only["prompt"]
     assert "<Picture" not in prompt_only["prompt"]
     assert "<Video" not in prompt_only["prompt"]
-    # D：3 图（无 arena）+ 1 静音视频，标签与条件顺序对应 + 混合路由备注
+    # D：4 图（identity + 双 morphology 锚 + C1）+ 1 静音视频
     assert [row["type"] for row in canonical_d["conditions"]] == [
-        "image", "image", "image", "video"]
+        "image", "image", "image", "image", "video"]
     assert canonical_d["_lt0"]["route_override_note"] == "ref2va_mixed"
     assert canonical_d["_lt0"]["condition_mix"] == "image+video"
     for take_dir in take_dirs:

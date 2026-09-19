@@ -27,8 +27,10 @@ def _pack_with_approval(approved: bool = True) -> dict:
     return {"schema_version": "x", "entries": [
         {"role": "c0_identity", "path": "/a.jpg", "sha256": "a",
          "uri": "file:///a.jpg", "evidence_quality": quality},
-        {"role": "c0_body", "path": "/b.jpg", "sha256": "b",
+        {"role": "c0_body_front", "path": "/b.jpg", "sha256": "b",
          "uri": "file:///b.jpg", "evidence_quality": quality},
+        {"role": "c0_body_aftermath", "path": "/b2.jpg", "sha256": "b2",
+         "uri": "file:///b2.jpg", "evidence_quality": quality},
         {"role": "c1_opponent", "path": "/c.jpg", "sha256": "c",
          "uri": "file:///c.jpg"},
     ]}
@@ -79,8 +81,9 @@ def test_wire_prompt_uses_three_layer_morphology() -> None:
     """修正 3：正面形态（指向参考）+语义+负面 guard；不发明关节位置。"""
     request = _request(_brief_with_constraints())
     prompt = request["prompt"]
-    assert ("Preserve the exact upper-limb morphology visible in "
-            "<Picture 2> throughout the target video." in prompt)
+    assert ("Preserve the morphology jointly demonstrated by "
+            "<Picture 2> and <Picture 3> throughout the target video."
+            in prompt)
     assert "This defining morphology includes the absence of hands." in prompt
     assert ("Do not synthesize hands, fingers, or hand-shaped gloves for "
             "<Subject 1>." in prompt)
@@ -102,13 +105,16 @@ def test_attribute_transmission_four_links() -> None:
                                               pack)
     assert {row["attribute_id"] for row in mapping} == {
         "C0.target_character", "C0.hand_morphology"}
+    assert mapping[1]["evidence_asset_ids"] == [
+        "c0_body_front", "c0_body_aftermath"]
     assert all(row["in_prompt"] and row["evidence_quality_ok"]
                for row in mapping)
     # 断链：换掉 prompt 里的形态句 → 拦
     broken_request = json.loads(json.dumps(request))
     broken_request["prompt"] = broken_request["prompt"].replace(
-        "Preserve the exact upper-limb morphology visible in "
-        "<Picture 2> throughout the target video.", "She is an athlete.")
+        "Preserve the morphology jointly demonstrated by "
+        "<Picture 2> and <Picture 3> throughout the target video.",
+        "She is an athlete.")
     with pytest.raises(ProductionBlocked) as excinfo:
         validate_attribute_transmission(constraints, brief, broken_request,
                                         pack)
@@ -219,17 +225,23 @@ def test_production_plan_only_runs_all_gates(tmp_path: Path,
                                 "duration_s": 11.6})
 
     picks = {"picks": {"c0_identity": "candidate_03",
-                       "c0_body": "candidate_03",
+                       "c0_body_front": "candidate_02",
+                       "c0_body_aftermath": "candidate_02",
                        "c1_opponent": "candidate_05"},
+             "morphology_refs": ["c0_body_front", "c0_body_aftermath"],
              "evidence_quality": {
                  "c0_identity": {"visibility": "clear",
                                  "subject_attribution": "unambiguous",
                                  "critical_region_complete": True,
                                  "human_approved": True},
-                 "c0_body": {"visibility": "clear",
-                             "subject_attribution": "unambiguous",
-                             "critical_region_complete": True,
-                             "human_approved": True}}}
+                 "c0_body_front": {"visibility": "clear",
+                                   "subject_attribution": "unambiguous",
+                                   "critical_region_complete": True,
+                                   "human_approved": True},
+                 "c0_body_aftermath": {"visibility": "clear",
+                                       "subject_attribution": "unambiguous",
+                                       "critical_region_complete": True,
+                                       "human_approved": True}}}
     summary = pt.run_production_take(
         _Cfg(), p04e_dir, tmp_path / "out", reference=tmp_path / "v.mp4",
         pack_picks=picks, plan_only=True)

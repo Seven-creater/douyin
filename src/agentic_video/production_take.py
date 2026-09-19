@@ -61,6 +61,12 @@ def validate_attribute_transmission(constraints: dict[str, Any],
     prompt = str(request.get("prompt") or "")
     by_role = {str(entry.get("role")): entry
                for entry in pack.get("entries") or []}
+    # morphology 锚实际标签（与 wire 生成同规则：Picture 1=identity，其后
+    # body 按条目顺序，C1 最后）
+    body_entries = [entry for entry in pack.get("entries") or []
+                    if str(entry.get("role")).startswith("c0_body")]
+    body_list = " and ".join(f"<Picture {2 + index}>"
+                             for index in range(len(body_entries)))
     mapping = []
     for row in constraints.get("critical_attributes") or []:
         attribute_id = str(row["id"])
@@ -69,7 +75,9 @@ def validate_attribute_transmission(constraints: dict[str, Any],
         # 的 prompt 正是修正 3 要消灭的弱约束形态；semantic/negative 不能
         # 替代指向参考的正面句）
         wire = row.get("wire") or {}
-        positive = str(wire.get("positive") or "").replace("{BODY_N}", "2")
+        positive = (str(wire.get("positive") or "")
+                    .replace("{BODY_N}", "2")
+                    .replace("{BODY_LIST}", body_list))
         if positive:
             in_prompt = positive in prompt
         elif wire.get("semantic") or wire.get("negative"):
@@ -204,6 +212,17 @@ def run_production_take(cfg: Any, p04e_dir: Path, output_dir: Path, *,
         Path(reference), output_dir, ffmpeg_bin=ffmpeg_bin)
     pack = choose_canonical_pack(candidates, output_dir,
                                  picks=(pack_picks or {}).get("picks"))
+    # morphology 锚选择（p0522）：单帧够则一锚；否则双互补锚——由人工在
+    # picks.morphology_refs 指定（默认双区域各一）。约束卡的 evidence_asset_ids
+    # 同步为所选锚（门与 wire 均按实际锚集合工作）。
+    morphology_refs = ((pack_picks or {}).get("morphology_refs") or
+                       ["c0_body_front", "c0_body_aftermath"])
+    pack["entries"] = [entry for entry in pack.get("entries") or []
+                       if not str(entry["role"]).startswith("c0_body") or
+                       str(entry["role"]) in morphology_refs]
+    for row in constraints.get("critical_attributes") or []:
+        if "hand_morphology" in str(row.get("id") or ""):
+            row["evidence_asset_ids"] = list(morphology_refs)
     # 人工批准信息随 picks 文件写入（evidence_quality 各字段）
     approvals = (pack_picks or {}).get("evidence_quality") or {}
     for entry in pack.get("entries") or []:

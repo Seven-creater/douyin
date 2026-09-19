@@ -53,10 +53,16 @@ PACK_ROLES: tuple[dict[str, Any], ...] = (
      "purpose": "主角面部清晰帧",
      "crop": {"frac_x": [0.15, 0.85], "frac_y": [0.05, 0.75]},
      "crop_note": "裁成头肩/上半身，去掉背景观众"},
-    {"role": "c0_body", "interval": [8.4, 14.0],
-     "purpose": "主角上肢形态清晰帧（morphology 证据）",
-     "crop": {"frac_x": [0.45, 1.00], "frac_y": [0.0, 0.62]},
-     "crop_note": "C0 右侧上半身，聚焦上肢末端形态"},
+    {"role": "c0_body_front", "interval": [0.4, 5.0],
+     "purpose": "S1 面对镜头阶段的上肢形态帧（低运动）",
+     "crop": {"frac_x": [0.20, 0.80], "frac_y": [0.10, 0.75]},
+     "crop_note": "S1 主体居中，裁上半身聚焦上肢末端",
+     "candidate_count": 3},
+    {"role": "c0_body_aftermath", "interval": [14.0, 16.6],
+     "purpose": "S2 赛后近景/反应阶段的上肢形态帧（低运动）",
+     "crop": {"frac_x": [0.25, 0.85], "frac_y": [0.05, 0.70]},
+     "crop_note": "S2 赛后近景，裁上半身聚焦上肢末端",
+     "candidate_count": 3},
     {"role": "c1_opponent", "interval": [6.4, 7.2],
      "purpose": "对手清晰帧",
      "crop": {"frac_x": [0.00, 0.58], "frac_y": [0.0, 1.0]},
@@ -145,14 +151,14 @@ def default_subject_constraints() -> dict[str, Any]:
             {"id": "C0.hand_morphology",
              "description": "没有双手；具体上肢形态按已确认参考画面保持",
              "source": "user_statement_and_approved_visual_evidence",
-             "evidence_asset_ids": ["c0_body"],
+             "evidence_asset_ids": ["c0_body_front", "c0_body_aftermath"],
              "applies_to": ["S1", "S2", "S3"],
              # 三层 wire（p0521 修正 3：正面形态 + 语义 + 负面 guard；
-             # 不发明关节位置——正面层只指向参考画面）
+             # 不发明关节位置——正面层只指向参考画面；p0522：允许双锚
+             # 联合定义（官方"一个 Subject 可由多资产共同定义"））
              "wire": {
-                 "positive": "Preserve the exact upper-limb morphology "
-                             "visible in <Picture {BODY_N}> throughout the "
-                             "target video.",
+                 "positive": "Preserve the morphology jointly demonstrated "
+                             "by {BODY_LIST} throughout the target video.",
                  "semantic": "This defining morphology includes the absence "
                              "of hands.",
                  "negative": "Do not synthesize hands, fingers, or "
@@ -367,8 +373,9 @@ def build_canonical_world_pack(
         role_dir = output_dir / "canonical_candidates" / spec["role"]
         role_dir.mkdir(parents=True, exist_ok=True)
         low, high = spec["interval"]
-        times = [round(low + (high - low) * (index + 0.5) / candidate_count, 3)
-                 for index in range(candidate_count)]
+        role_count = int(spec.get("candidate_count", candidate_count))
+        times = [round(low + (high - low) * (index + 0.5) / role_count, 3)
+                 for index in range(role_count)]
         crop_filter = _composed_crop_filter(
             active, spec.get("crop"), geometry["width"], geometry["height"])
         candidates = []
@@ -622,7 +629,9 @@ def _wire_shot_lines(brief: dict[str, Any], *, seconds: float,
     return lines
 
 
-def _retention_marker_lines(brief: dict[str, Any], recipe: str) -> list[str]:
+def _retention_marker_lines(brief: dict[str, Any], recipe: str,
+                           pack_entries: list[dict[str, Any]] | None = None
+) -> list[str]:
     """官方 retention markers：每个 reference/subject 的保留与迁移关系。
 
     生产化（p0521）：critical attributes 逐条 fully_preserved；morphology
@@ -647,15 +656,31 @@ def _retention_marker_lines(brief: dict[str, Any], recipe: str) -> list[str]:
             f"{row['id']} (throughout): fully_preserved - "
             f"{row.get('description', '')}")
     if use_canonical:
-        body_line = ("<Picture 2> (source for <Subject 1>): "
-                     "attribute_transfer - transfer her reference-visible "
-                     "upper-limb morphology.")
+        entries = [entry for entry in (pack_entries or [])
+                   if str(entry.get("role")) != "c1_opponent"]
+        body_lines = []
+        picture_index = 2
+        for entry in entries:
+            role = str(entry.get("role"))
+            if role == "c0_identity":
+                continue
+            complementary = len(body_lines) > 0
+            body_lines.append(
+                f"<Picture {picture_index}> (source for <Subject 1>): "
+                "attribute_transfer - "
+                + ("provides a complementary view of the same morphology."
+                   if complementary else
+                   "provides one clear view of Subject 1's upper-limb "
+                   "morphology."))
+            picture_index += 1
+        c1_index = picture_index
         lines[1:1] = [
             "<Picture 1> (source for <Subject 1>): attribute_transfer - "
             "transfer facial identity and headgear appearance.",
-            body_line,
-            "<Picture 3> (source for <Subject 2>): attribute_transfer - "
-            "transfer appearance, clothing and protective gear.",
+            *body_lines,
+            f"<Picture {c1_index}> (source for <Subject 2>): "
+            "attribute_transfer - transfer appearance, clothing and "
+            "protective gear.",
         ]
     if use_video:
         lines.append(
@@ -686,32 +711,47 @@ def _wire_prompt(brief: dict[str, Any], *, recipe: str, seconds: float,
             "non_diegetic_music:\nN/A"])
     subject_lines = []
     constraints = brief.get("subject_constraints") or {}
+    pack_entries = (pack or {}).get("entries") or []
+    # morphology 锚列表按 pack 条目顺序编号（Picture 1=identity，其后 body，
+    # C1 最后）；双锚时联合定义（官方：一个 Subject 可由多资产共同定义）
+    body_entries = [entry for entry in pack_entries
+                    if str(entry.get("role")).startswith("c0_body")]
+    c1_index = 2 + len(body_entries)
+    body_list = " and ".join(f"<Picture {2 + index}>"
+                             for index in range(len(body_entries)))
     if use_canonical:
         if constraints.get("critical_attributes"):
             # 三层 morphology 块（p0521 修正 3）：正面形态（指向参考画面，
             # 不发明关节位置）+ 语义说明 + 负面 guard。
+            joint = " and ".join(f"<Picture {2 + index}>"
+                                 for index in range(len(body_entries)))
             subject_lines.append(
                 "<Subject 1> is the adult woman defined by <Picture 1> "
-                "for facial identity and <Picture 2> for her "
-                "reference-visible upper-limb morphology.")
+                "for facial identity and by " + joint +
+                " jointly for her reference-visible upper-limb morphology.")
             for row in constraints["critical_attributes"]:
                 wire = row.get("wire") or {}
                 for key in ("positive", "semantic", "negative"):
-                    text = str(wire.get(key) or "").replace("{BODY_N}", "2")
+                    text = (str(wire.get(key) or "")
+                            .replace("{BODY_N}", "2")
+                            .replace("{BODY_LIST}", body_list))
                     if text:
                         subject_lines.append(text)
             subject_lines.append(
-                "<Subject 2> is the opponent, defined by <Picture 3>. "
-                "Do not transfer <Subject 1>'s body attributes to "
-                "<Subject 2>.")
+                f"<Subject 2> is the opponent, defined by "
+                f"<Picture {c1_index}>. Do not transfer <Subject 1>'s body "
+                "attributes to <Subject 2>.")
         else:
+            single_body = (f"<Picture 2>" if len(body_entries) <= 1
+                           else body_list)
             subject_lines.append(
                 "<Subject 1> is the same protagonist, defined jointly by "
                 "<Picture 1> (facial identity and headgear appearance) and "
-                "<Picture 2> (full-body proportions, uniform and protective "
-                "gear).")
+                f"{single_body} (uniform, proportions and visible upper-limb "
+                "morphology).")
             subject_lines.append(
-                "<Subject 2> is the opponent, defined by <Picture 3>.")
+                f"<Subject 2> is the opponent, defined by "
+                f"<Picture {c1_index}>.")
     else:
         subject_lines.append(
             "<Subject 1> is the protagonist: an adult taekwondo athlete "
