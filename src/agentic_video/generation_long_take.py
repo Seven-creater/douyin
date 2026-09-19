@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -1033,68 +1035,119 @@ def run_lt0_experiment(cfg: Any, p04e_dir: Path, output_dir: Path, *,
                                     ensure_ascii=False))
     repo_root = Path(__file__).resolve().parents[2]
     take_results = []
+    take_results_lock = threading.Lock()
 
-    def _run_group(group_jobs: list[dict[str, Any]], endpoint: str,
-                   variant: str, *, stop_after: bool = True) -> None:
-        port = endpoint.rsplit(":", 1)[-1].split("/")[0]
-        server_process = _ensure_h3_server(
-            endpoint, backend=h3_backend, variant=variant,
-            manage_server=manage_server, port=int(port), repo_root=repo_root,
-            log_path=output_dir / f"h3_server_{variant}.log",
-            gpu_set=gpu_set, python_bin=h3_python_bin)
-        client = SGLangH3Client(endpoint)
+    def _parse_endpoints(raw: str) -> list[str]:
+        return [item.strip().rstrip("/") for item in str(raw).split(",")
+                if item.strip()]
+
+    def _gpu_pairs_for(endpoint_count: int) -> list[str]:
+        """gpu_set 按序切成每端点一对（2 卡/实例，Phase-4 同款配方）。"""
+        indices = [item.strip() for item in gpu_set.split(",") if item.strip()]
+        if len(indices) != 2 * endpoint_count:
+            raise LT0Blocked(
+                "h3", "gpu_endpoint_mismatch",
+                f"{len(indices)} GPUs for {endpoint_count} endpoints "
+                f"(each diffusers instance needs exactly 2)")
+        return [",".join(indices[index:index + 2])
+                for index in range(0, len(indices), 2)]
+
+    def _run_job(client: SGLangH3Client, job: dict[str, Any],
+                 variant: str) -> dict[str, Any]:
+        job_dir = output_dir / "takes" / job["take_id"]
+        state = {"take_id": job["take_id"], "recipe": job["recipe"],
+                 "seed": job["seed"], "variant": variant,
+                 "state": "planned"}
+        _write_json(job_dir / "job_state.json", state)
         try:
-            for job in group_jobs:
-                job_dir = output_dir / "takes" / job["take_id"]
-                # resume：已 transport_validated 且成片在盘的 take 直接复用
-                # （重跑失败配方时不重烧已完成的 t2va 基线）
-                prior_path = job_dir / "job_state.json"
-                if prior_path.is_file():
-                    try:
-                        prior = json.loads(
-                            prior_path.read_text(encoding="utf-8"))
-                    except ValueError:
-                        prior = {}
-                    if (prior.get("state") == "transport_validated" and
-                            Path(str(prior.get("output_path") or "")
-                                 ).is_file()):
-                        prior["variant"] = variant
-                        take_results.append(prior)
-                        continue
-                state = {"take_id": job["take_id"], "recipe": job["recipe"],
-                         "seed": job["seed"], "variant": variant,
-                         "state": "planned"}
-                _write_json(job_dir / "job_state.json", state)
-                try:
-                    payload = client.serialize_payload(job["request"])
-                    created = client.submit(payload)
-                    state.update({"state": "submitted",
-                                  "job_id": created.get("id"),
-                                  "accepted_conditions": created.get(
-                                      "accepted_conditions")})
-                    _write_json(job_dir / "backend_response.json", created)
-                    completed = client.poll(str(created["id"]))
-                    state.update({"state": "completed",
-                                  "status_payload": completed})
-                    media = client.download(str(created["id"]),
-                                            job_dir / "take.mp4")
-                    state.update({"state": "downloaded", **media})
-                    state["ffprobe"] = common.run_ffprobe_json(
-                        _ffprobe_bin_of(ffmpeg_bin), Path(media["output_path"]))
-                    state["state"] = "transport_validated"
-                except V9GBlocked as exc:
-                    state.update({"state": "failed",
-                                  "reason_code": exc.reason_code,
-                                  "detail": str(exc)[:500]})
-                _write_json(job_dir / "job_state.json", state)
+            payload = client.serialize_payload(job["request"])
+            created = client.submit(payload)
+            state.update({"state": "submitted", "job_id": created.get("id"),
+                          "accepted_conditions": created.get(
+                              "accepted_conditions")})
+            _write_json(job_dir / "backend_response.json", created)
+            completed = client.poll(str(created["id"]))
+            state.update({"state": "completed", "status_payload": completed})
+            media = client.download(str(created["id"]), job_dir / "take.mp4")
+            state.update({"state": "downloaded", **media})
+            state["ffprobe"] = common.run_ffprobe_json(
+                _ffprobe_bin_of(ffmpeg_bin), Path(media["output_path"]))
+            state["state"] = "transport_validated"
+        except V9GBlocked as exc:
+            state.update({"state": "failed", "reason_code": exc.reason_code,
+                          "detail": str(exc)[:500]})
+        _write_json(job_dir / "job_state.json", state)
+        return state
+
+    def _lane(endpoint: str, work: "queue.Queue[dict[str, Any]]",
+              variant: str) -> None:
+        client = SGLangH3Client(endpoint)
+        while True:
+            try:
+                job = work.get_nowait()
+            except queue.Empty:
+                return
+            state = _run_job(client, job, variant)
+            with take_results_lock:
                 take_results.append(state)
+
+    def _run_group(group_jobs: list[dict[str, Any]], endpoints_raw: str,
+                   variant: str, *, stop_after: bool = True) -> None:
+        endpoints = _parse_endpoints(endpoints_raw)
+        # resume 先行：已 transport_validated 且成片在盘的 take 直接复用，
+        # 全部可复用时根本不起 serve（观察-only 重跑不再空烧加载）。
+        pending: list[dict[str, Any]] = []
+        for job in group_jobs:
+            prior_path = output_dir / "takes" / job["take_id"] / \
+                "job_state.json"
+            prior: dict[str, Any] = {}
+            if prior_path.is_file():
+                try:
+                    prior = json.loads(prior_path.read_text(encoding="utf-8"))
+                except ValueError:
+                    prior = {}
+            if (prior.get("state") == "transport_validated" and
+                    Path(str(prior.get("output_path") or "")).is_file()):
+                prior["variant"] = variant
+                take_results.append(prior)
+            else:
+                pending.append(job)
+        if not pending:
+            return
+        pairs = _gpu_pairs_for(len(endpoints))
+        servers: list[tuple[str, subprocess.Popen | None]] = []
+        try:
+            for endpoint, pair in zip(endpoints, pairs):
+                port = endpoint.rsplit(":", 1)[-1].split("/")[0]
+                servers.append((endpoint, _ensure_h3_server(
+                    endpoint, backend=h3_backend, variant=variant,
+                    manage_server=manage_server, port=int(port),
+                    repo_root=repo_root,
+                    log_path=output_dir /
+                    f"h3_server_{variant}_{port}.log",
+                    gpu_set=pair, python_bin=h3_python_bin)))
+            work: "queue.Queue[dict[str, Any]]" = queue.Queue()
+            for job in pending:
+                work.put(job)
+            if len(endpoints) == 1:
+                _lane(endpoints[0], work, variant)
+            else:
+                threads = [threading.Thread(target=_lane,
+                                             args=(endpoint, work, variant))
+                           for endpoint in endpoints]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
         finally:
             if stop_after:
-                _stop_owned_server(server_process)
+                for _, process in servers:
+                    _stop_owned_server(process)
 
-    if fl2va_endpoint.rstrip("/") == ref2va_endpoint.rstrip("/") or             "prompt_only" not in recipes:
-        # 统一 diffusers serve 同时服务 t2va 与 ref2va：单进程一次跑完，
-        # 不在两组之间重启（模型加载 ~10 分钟）；定点重跑（无 A）同理。
+    if (_parse_endpoints(fl2va_endpoint) == _parse_endpoints(ref2va_endpoint)
+            or "prompt_only" not in (recipes or RECIPES)):
+        # 统一 diffusers serve 同时服务 t2va 与 ref2va：全部 take 一组跑完
+        # （多端点时每实例一对卡并行车道）；定点重跑（无 A）同理。
         _run_group(jobs, ref2va_endpoint, "unified", stop_after=True)
     else:
         _run_group([job for job in jobs if job["recipe"] == "prompt_only"],

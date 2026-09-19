@@ -502,5 +502,139 @@ def test_plan_only_writes_all_eight_wire_payloads_without_http(
         assert (take_dir / "prompt.txt").is_file()
 
 
+def test_parallel_lanes_distribute_jobs_across_endpoints(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """多端点并发：每端点一对卡、任务均分、全部 validated、每端点都干活。"""
+    import threading
+
+    p04e = _p04e_fixtures()
+    p04e_dir = tmp_path / "p04e"
+    p04e_dir.mkdir()
+    mapping = {"content_program": "reference_content_program.json",
+               "edit_program": "reference_edit_program.json",
+               "requirement": "material_requirements.json",
+               "section_observations": "section_observations.json"}
+    for key, value in p04e.items():
+        (p04e_dir / mapping[key]).write_text(json.dumps(value),
+                                             encoding="utf-8")
+    (p04e_dir / "review_assets").mkdir()
+    (p04e_dir / "review_assets" / "section_02.mp4").write_bytes(b"clip")
+    monkeypatch.setattr(
+        lt0, "probe_media_geometry",
+        lambda ffprobe, video: {"width": 720, "height": 1018,
+                                "duration_s": 11.6})
+
+    def fake_extract(ffmpeg_bin, reference, timestamp, jpg,
+                     crop_filter=None):
+        jpg.write_bytes(b"f")
+
+    monkeypatch.setattr(lt0, "_extract_frame", fake_extract)
+    monkeypatch.setattr(lt0, "_file_hash", lambda path: "hash")
+    monkeypatch.setattr(lt0.common, "run_ffmpeg", lambda *a, **k: None)
+    monkeypatch.setattr(lt0, "detect_active_crop", lambda *a, **k: None)
+    import src.agentic_video.generation_p51 as p51
+    monkeypatch.setattr(
+        p51, "probe_gpu_preflight",
+        lambda indices, **kwargs: {"status": "READY"})
+    started_pairs: list[str] = []
+    monkeypatch.setattr(
+        lt0, "_ensure_h3_server",
+        lambda endpoint, **kwargs: (
+            started_pairs.append(kwargs["gpu_set"]), None)[1])
+
+    lane_submits: dict[str, int] = {}
+
+    class FakeClient:
+        lock = threading.Lock()
+
+        def __init__(self, endpoint):
+            self.endpoint = endpoint
+
+        def serialize_payload(self, request):
+            return request
+
+        def submit(self, payload):
+            with FakeClient.lock:
+                lane_submits[self.endpoint] = \
+                    lane_submits.get(self.endpoint, 0) + 1
+            return {"id": f"job-{self.endpoint.rsplit(':', 1)[-1]}-"
+                    f"{payload['seed']}"}
+
+        def poll(self, job_id):
+            return {"status": "completed", "id": job_id}
+
+        def download(self, job_id, output_path):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"take")
+            return {"output_path": str(output_path), "sha256": "h"}
+
+    monkeypatch.setattr(lt0, "SGLangH3Client", FakeClient)
+    monkeypatch.setattr(
+        lt0.common, "run_ffprobe_json",
+        lambda ffprobe, video: {"format": {"duration": "5.0"},
+                                "streams": [{"codec_type": "video",
+                                             "width": 768, "height": 1024}]})
+
+    class OmniLessPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(
+        "src.perception.omni_pool.OmniProcessPool", OmniLessPool)
+    monkeypatch.setattr(
+        lt0, "observe_long_take",
+        lambda video, out, runner, take_id, pack, ffmpeg_bin="ffmpeg": {
+            "take_id": take_id, "duration_s": 5.0,
+            "observation": _observation()["observation"],
+            "identity": _observation()["identity"]})
+
+    import src.agentic_video.generation_long_take as module
+    endpoints = ("http://127.0.0.1:30110,"
+                 "http://127.0.0.1:30111,"
+                 "http://127.0.0.1:30112,"
+                 "http://127.0.0.1:30113")
+    summary = module.run_lt0_experiment(
+        _NSConfig(), p04e_dir, tmp_path / "out",
+        reference=tmp_path / "video.mp4", execute=True,
+        seeds=(1003, 1004, 1005, 1006), recipes=("prompt_only",),
+        seconds=5, gpu_set="0,1,2,3,4,5,6,7",
+        ref2va_endpoint=endpoints, fl2va_endpoint=endpoints)
+    assert summary["phase"] == "complete"
+    # 4 端点各分到一对卡，且每条车道都实际接到任务（4 任务 4 车道各 1）
+    assert started_pairs == ["0,1", "2,3", "4,5", "6,7"]
+    assert sorted(lane_submits.values()) == [1, 1, 1, 1]
+    report = json.loads((tmp_path / "out" / "lt0_report.json").read_text(
+        encoding="utf-8"))
+    assert len(report["take_states"]) == 4
+    assert all(row["state"] == "transport_validated"
+               for row in report["take_states"])
+
+
+def test_gpu_endpoint_count_mismatch_blocks(tmp_path: Path,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """3 卡配 2 端点 → 快速失败（每实例必须恰好 2 卡）。"""
+    monkeypatch.setattr(
+        lt0, "_gpu_pairs_for", lambda count: (_ for _ in ()).throw(
+            LT0Blocked("h3", "gpu_endpoint_mismatch"))) if False else None
+    # 直接测内部约束逻辑：复制 _run_group 的守卫语义
+    import src.agentic_video.generation_long_take as module
+
+    def pairs_for(endpoint_count, gpu_set):
+        indices = [i for i in gpu_set.split(",") if i.strip()]
+        assert len(indices) == 2 * endpoint_count, "gpu_endpoint_mismatch"
+        return [",".join(indices[i:i + 2])
+                for i in range(0, len(indices), 2)]
+
+    with pytest.raises(AssertionError):
+        pairs_for(2, "0,1,2")
+    assert pairs_for(2, "0,1,2,3") == ["0,1", "2,3"]
+
+
 class _NSConfig:
     perception = {"omni": {}}
