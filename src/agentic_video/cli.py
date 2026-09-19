@@ -382,6 +382,32 @@ def build_parser() -> argparse.ArgumentParser:
     long_take.add_argument("--no-manage-server", action="store_true",
                            help="assume the ref2va server is already up")
 
+    produce = sub.add_parser(
+        "long-take-produce",
+        help="production single-take workflow: constraints -> gates -> 1xH3 "
+             "-> two-stage verification -> bounded repair")
+    produce.add_argument("--p04e-output", required=True)
+    produce.add_argument("--output", required=True)
+    produce.add_argument(
+        "--reference", default="data/videos/7682719919410072847/video.mp4")
+    produce.add_argument("--constraints", default=None,
+                         help="subject_constraints JSON (default: built-in "
+                              "user-approved card)")
+    produce.add_argument("--pack-picks", default=None,
+                         help="JSON: {picks: {role: candidate_NN|time}, "
+                              "evidence_quality: {role: {...human approval}}}")
+    produce.add_argument("--repair-plan", default=None,
+                         help="repair_plan JSON with condition_delta; "
+                              "enables the single repair attempt")
+    produce.add_argument("--endpoint", default="http://127.0.0.1:30011")
+    produce.add_argument("--gpu-set", default="0,1")
+    produce.add_argument("--gpu-pairs", default="0,1")
+    produce.add_argument("--h3-backend", default="diffusers")
+    produce.add_argument("--h3-python-bin", default=None)
+    produce.add_argument("--no-manage-server", action="store_true")
+    produce.add_argument("--plan-only", action="store_true")
+    produce.add_argument("--execute", action="store_true")
+
     run = sub.add_parser("run", help="decompose, retrieve, render, and critique")
     run.add_argument("--reference", required=True)
     run.add_argument("--theme", required=True)
@@ -2267,6 +2293,35 @@ def _long_take_lt0(args, cfg) -> dict:
         ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
 
 
+def _long_take_produce(args, cfg) -> dict:
+    import json as _json
+
+    from src.agentic_video.production_take import run_production_take
+
+    constraints = None
+    if args.constraints:
+        constraints = _json.loads(
+            Path(args.constraints).read_text(encoding="utf-8"))
+    pack_picks = None
+    if args.pack_picks:
+        pack_picks = _json.loads(
+            Path(args.pack_picks).read_text(encoding="utf-8"))
+    repair_plan = None
+    if args.repair_plan:
+        repair_plan = _json.loads(
+            Path(args.repair_plan).read_text(encoding="utf-8"))
+    return run_production_take(
+        cfg, Path(args.p04e_output), Path(args.output),
+        reference=Path(args.reference), constraints=constraints,
+        pack_picks=pack_picks, repair_plan=repair_plan,
+        plan_only=args.plan_only, execute=args.execute,
+        endpoint=args.endpoint, gpu_set=args.gpu_set,
+        gpu_pairs=args.gpu_pairs, h3_backend=args.h3_backend,
+        h3_python_bin=args.h3_python_bin,
+        manage_server=not args.no_manage_server,
+        ffmpeg_bin=cfg.perception.get("ffmpeg_bin", "ffmpeg"))
+
+
 def _run(args, cfg) -> dict:
     from src.agentic_video.pipeline import run_full
 
@@ -2338,6 +2393,7 @@ def main(argv: list[str] | None = None) -> int:
                 "reference-generate-v9g": _reference_generate_v9g,
                 "reference-generate-v9g-accept": _reference_generate_v9g_accept,
                 "long-take-lt0": _long_take_lt0,
+                "long-take-produce": _long_take_produce,
                 "run": _run}
     try:
         result = handlers[args.command](args, cfg) if args.command != "benchmark" \

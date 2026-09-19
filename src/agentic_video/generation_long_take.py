@@ -45,20 +45,31 @@ IDENTITY_SAMPLE_RATIOS = (0.1, 0.3, 0.5, 0.7, 0.9)
 # Canonical 候选区间 + 目标裁剪（人工审核 p0510：一张图里太多人不是身份参考，
 # 是污染）。arena 在 LT0 Round 1 不作为 Picture condition——候选帧全是
 # "垫+两人+裁判+观众"的群像，无法当纯场景参考；场景由 prompt/Video 1 定义。
+# 生产化（p0521）：c0_fullbody 重定位为 c0_body——职责从"全身比例"改为
+# "清楚展示上肢形态"（morphology 证据，Gloria 式职责单一锚）；morphology
+# 参考默认 1 张、最多 2 张互补视角（multi-reference conflict）。
 PACK_ROLES: tuple[dict[str, Any], ...] = (
     {"role": "c0_identity", "interval": [14.2, 16.0],
      "purpose": "主角面部清晰帧",
      "crop": {"frac_x": [0.15, 0.85], "frac_y": [0.05, 0.75]},
      "crop_note": "裁成头肩/上半身，去掉背景观众"},
-    {"role": "c0_fullbody", "interval": [5.3, 5.9],
-     "purpose": "主角全身（含护具）帧",
-     "crop": {"frac_x": [0.50, 1.00], "frac_y": [0.0, 1.0]},
-     "crop_note": "只裁右侧 C0（原帧左 C1/中裁判/右 C0）"},
+    {"role": "c0_body", "interval": [8.4, 14.0],
+     "purpose": "主角上肢形态清晰帧（morphology 证据）",
+     "crop": {"frac_x": [0.45, 1.00], "frac_y": [0.0, 0.62]},
+     "crop_note": "C0 右侧上半身，聚焦上肢末端形态"},
     {"role": "c1_opponent", "interval": [6.4, 7.2],
      "purpose": "对手清晰帧",
      "crop": {"frac_x": [0.00, 0.58], "frac_y": [0.0, 1.0]},
      "crop_note": "只裁左侧 C1"},
 )
+# 证据质量门（p0521 修正 1）：critical evidence 自身必须可证明属性，
+# 否则整条传递链建立在错误证据上——四环齐全也没意义。
+EVIDENCE_QUALITY_REQUIRED = {
+    "visibility": "clear",
+    "subject_attribution": "unambiguous",
+    "critical_region_complete": True,
+    "human_approved": True,
+}
 # phase → S2 内容镜头序号（0 基）的确定性映射（p04e 归一化 8 镜头）。
 PHASE_SHOT_MAP: dict[str, list[int]] = {
     "initiation": [0],
@@ -83,6 +94,8 @@ WARDROBE_GLOSSARY: tuple[tuple[str, str], ...] = (
     ("蓝色护具", "a blue chest protector"),
 )
 # wire 时间线模板：phase → 英文 shot 指令（official shot/timeline grammar）。
+# subject1_actions = 该 phase 中主角的**肯定动作断言**（主体作用域冲突
+# 检查只扫这份结构化清单，不扫成品 prompt 的自由文本）。
 PHASE_WIRE_TEMPLATES: dict[str, str] = {
     "initiation": (
         "Two taekwondo athletes prepare to begin the match inside the same "
@@ -99,12 +112,119 @@ PHASE_WIRE_TEMPLATES: dict[str, str] = {
         "The exchange has ended. <Subject 1> relaxes, turns away from the "
         "bout, and gives a light, confident reaction toward the camera."),
 }
+PHASE_SUBJECT1_ACTIONS: dict[str, list[str]] = {
+    "initiation": ["prepares for the match", "begins to attack"],
+    "action": ["launches a kicking exchange"],
+    "resolution": ["delivers a decisive high kick"],
+    "reflection": ["relaxes and turns toward the camera"],
+}
 
 
 def _wardrobe_english(*texts: str) -> list[str]:
     joined = "".join(str(text or "") for text in texts)
     return [english for chinese, english in WARDROBE_GLOSSARY
             if chinese in joined]
+
+
+# ---- 生产化：人物约束卡（p0521） ----
+
+SUBJECT_CONSTRAINTS_VERSION = "subject_constraints_v1"
+
+def default_subject_constraints() -> dict[str, Any]:
+    """用户已拍板的两条种子属性（原话），确定性装配；不扩写医学故事。"""
+    return {
+        "schema_version": SUBJECT_CONSTRAINTS_VERSION,
+        "subject_id": "C0",
+        "role": "protagonist",
+        "critical_attributes": [
+            {"id": "C0.target_character",
+             "description": "本轮生成用户指定的参考女性主角",
+             "source": "user_confirmed_target",
+             "evidence_asset_ids": ["c0_identity"],
+             "applies_to": ["S1", "S2", "S3"]},
+            {"id": "C0.hand_morphology",
+             "description": "没有双手；具体上肢形态按已确认参考画面保持",
+             "source": "user_statement_and_approved_visual_evidence",
+             "evidence_asset_ids": ["c0_body"],
+             "applies_to": ["S1", "S2", "S3"],
+             # 三层 wire（p0521 修正 3：正面形态 + 语义 + 负面 guard；
+             # 不发明关节位置——正面层只指向参考画面）
+             "wire": {
+                 "positive": "Preserve the exact upper-limb morphology "
+                             "visible in <Picture {BODY_N}> throughout the "
+                             "target video.",
+                 "semantic": "This defining morphology includes the absence "
+                             "of hands.",
+                 "negative": "Do not synthesize hands, fingers, or "
+                             "hand-shaped gloves for <Subject 1>."}},
+        ],
+        "section_appearance": {
+            "S2": {"clothing": "与已确认比赛参考一致",
+                   "headgear": "与已确认比赛参考一致"}},
+    }
+
+
+def validate_subject_constraints(constraints: dict[str, Any]) -> None:
+    """结构校验：subject_id/critical_attributes 每条 id+description+source。"""
+    if not constraints.get("subject_id"):
+        raise LT0Blocked("constraints", "constraints_subject_missing")
+    rows = constraints.get("critical_attributes") or []
+    if not rows:
+        raise LT0Blocked("constraints", "constraints_attributes_empty")
+    for row in rows:
+        for key in ("id", "description", "source"):
+            if not str(row.get(key) or "").strip():
+                raise LT0Blocked("constraints", "constraints_field_missing",
+                                 f"{row.get('id') or '?'}:{key}")
+
+
+def validate_evidence_quality(constraints: dict[str, Any],
+                              pack: dict[str, Any]) -> None:
+    """证据质量门：critical evidence 必须 clear/unambiguous/完整/人工批准。
+
+    四环传递齐全但 Picture 2 本身证明不了属性（人太小/被挡/混入对手肢体）
+    时，整条闭环建立在错误证据上——BLOCK BEFORE H3。
+    """
+    by_role = {str(entry.get("role")): entry
+               for entry in pack.get("entries") or []}
+    for row in constraints.get("critical_attributes") or []:
+        for asset_id in row.get("evidence_asset_ids") or []:
+            entry = by_role.get(str(asset_id))
+            if entry is None:
+                raise LT0Blocked("constraints", "evidence_asset_missing",
+                                 f"{row['id']}:{asset_id}")
+            quality = entry.get("evidence_quality") or {}
+            for key, expected in EVIDENCE_QUALITY_REQUIRED.items():
+                if quality.get(key) != expected:
+                    raise LT0Blocked(
+                        "constraints", "evidence_quality_gate",
+                        f"{asset_id}:{key}={quality.get(key)!r} "
+                        f"(need {expected!r}); 人工批准证据后重跑")
+
+
+# 主体作用域动作校验（p0521 修正 2：不做全局词扫——禁止句与 C1 的合法
+# 手部动作都会误触发；只检查主角的**肯定动作断言**）。
+HAND_REQUIRED_ACTIONS = (
+    "grab", "clench", "punch_with_hands", "catch", "push_with_hands",
+    "handstand", "clap", "握拳", "抓住", "抓握", "撑地", "拍手", "握手",
+)
+
+def validate_subject_scoped_actions(brief: dict[str, Any],
+                                    constraints: dict[str, Any]) -> None:
+    """主角动作断言 vs 手部形态约束（只扫 subject1_action_claims，不扫
+    negative guard / Subject 2 / retention——它们按构造不进入 claims）。"""
+    no_hands = any("hand_morphology" in str(row.get("id") or "")
+                   for row in constraints.get("critical_attributes") or [])
+    if not no_hands:
+        return
+    claims = brief.get("subject1_action_claims") or []
+    for claim in claims:
+        action = str(claim.get("action") or "").lower()
+        if any(word.lower() in action for word in HAND_REQUIRED_ACTIONS):
+            raise LT0Blocked(
+                "plan", "hand_action_contradicts_no_hands",
+                f"subject1 claim '{claim.get('action')}' requires hands "
+                f"({claim.get('source')})")
 
 
 class LT0Blocked(RuntimeError):
@@ -344,6 +464,7 @@ def compile_long_take_brief(content_program: dict[str, Any],
                             requirement: dict[str, Any],
                             section_observations: dict[str, Any], *,
                             section_id: str = "section_02",
+                            constraints: dict[str, Any] | None = None,
                             output_dir: Path | None = None) -> dict[str, Any]:
     """P0 冻结产物 → H3 导演任务书（确定性模板装配，不再调 Omni，防二次理解漂移）。
 
@@ -458,6 +579,14 @@ def compile_long_take_brief(content_program: dict[str, Any],
             "target_duration_s": budget,
             "composition_mode": (req.get("presentation_requirement") or {})
             .get("composition_mode")},
+        # 生产化（p0521）：全局人物约束进 brief（不依附 Section）；主角
+        # 动作断言按模板结构化登记，供主体作用域冲突检查。
+        "subject_constraints": constraints or None,
+        "subject1_action_claims": [
+            {"action": action, "phase": box["phase"],
+             "source": "phase_wire_template"}
+            for box in timeboxes
+            for action in PHASE_SUBJECT1_ACTIONS.get(box["phase"], [])],
     }
     if output_dir is not None:
         _write_json(Path(output_dir) / "h3_generation_brief.json", brief)
@@ -494,10 +623,15 @@ def _wire_shot_lines(brief: dict[str, Any], *, seconds: float,
 
 
 def _retention_marker_lines(brief: dict[str, Any], recipe: str) -> list[str]:
-    """官方 retention markers：每个 reference/subject 的保留与迁移关系。"""
+    """官方 retention markers：每个 reference/subject 的保留与迁移关系。
+
+    生产化（p0521）：critical attributes 逐条 fully_preserved；morphology
+    证据图职责单一化（attribute_transfer - upper-limb morphology）。
+    """
     use_canonical = recipe in {"canonical_only", "canonical_plus_video"}
     use_video = recipe in {"video_only", "canonical_plus_video"}
     wardrobe = brief.get("subject_wardrobe") or {}
+    constraints = brief.get("subject_constraints") or {}
     lines = [
         "<Subject 1> (throughout): fully_preserved - preserve the "
         "protagonist's identity, body proportions, and wardrobe "
@@ -508,12 +642,18 @@ def _retention_marker_lines(brief: dict[str, Any], recipe: str) -> list[str]:
         "Setting (throughout): fully_preserved - the same indoor taekwondo "
         "training hall.",
     ]
+    for row in constraints.get("critical_attributes") or []:
+        lines.append(
+            f"{row['id']} (throughout): fully_preserved - "
+            f"{row.get('description', '')}")
     if use_canonical:
+        body_line = ("<Picture 2> (source for <Subject 1>): "
+                     "attribute_transfer - transfer her reference-visible "
+                     "upper-limb morphology.")
         lines[1:1] = [
             "<Picture 1> (source for <Subject 1>): attribute_transfer - "
             "transfer facial identity and headgear appearance.",
-            "<Picture 2> (source for <Subject 1>): attribute_transfer - "
-            "transfer full-body proportions, uniform and protective gear.",
+            body_line,
             "<Picture 3> (source for <Subject 2>): attribute_transfer - "
             "transfer appearance, clothing and protective gear.",
         ]
@@ -545,14 +685,33 @@ def _wire_prompt(brief: dict[str, Any], *, recipe: str, seconds: float,
             brief["prompt_fields"]["overall_soundscape"],
             "non_diegetic_music:\nN/A"])
     subject_lines = []
+    constraints = brief.get("subject_constraints") or {}
     if use_canonical:
-        subject_lines.append(
-            "<Subject 1> is the same protagonist, defined jointly by "
-            "<Picture 1> (facial identity and headgear appearance) and "
-            "<Picture 2> (full-body proportions, uniform and protective "
-            "gear).")
-        subject_lines.append(
-            "<Subject 2> is the opponent, defined by <Picture 3>.")
+        if constraints.get("critical_attributes"):
+            # 三层 morphology 块（p0521 修正 3）：正面形态（指向参考画面，
+            # 不发明关节位置）+ 语义说明 + 负面 guard。
+            subject_lines.append(
+                "<Subject 1> is the adult woman defined by <Picture 1> "
+                "for facial identity and <Picture 2> for her "
+                "reference-visible upper-limb morphology.")
+            for row in constraints["critical_attributes"]:
+                wire = row.get("wire") or {}
+                for key in ("positive", "semantic", "negative"):
+                    text = str(wire.get(key) or "").replace("{BODY_N}", "2")
+                    if text:
+                        subject_lines.append(text)
+            subject_lines.append(
+                "<Subject 2> is the opponent, defined by <Picture 3>. "
+                "Do not transfer <Subject 1>'s body attributes to "
+                "<Subject 2>.")
+        else:
+            subject_lines.append(
+                "<Subject 1> is the same protagonist, defined jointly by "
+                "<Picture 1> (facial identity and headgear appearance) and "
+                "<Picture 2> (full-body proportions, uniform and protective "
+                "gear).")
+            subject_lines.append(
+                "<Subject 2> is the opponent, defined by <Picture 3>.")
     else:
         subject_lines.append(
             "<Subject 1> is the protagonist: an adult taekwondo athlete "
@@ -778,6 +937,93 @@ def observe_long_take(video_path: Path, output_dir: Path, *, runner,
     identity["frames"] = frames
     return {"take_id": take_id, "duration_s": duration_s,
             "observation": observation, "identity": identity}
+
+
+ATTRIBUTE_CHECK_PROMPT = """前两张起是目标人物的已批准参考图（按输入顺序，
+与人物卡中的证据对应），其后是生成视频按时间采样的帧。对人物卡中的每个
+critical attribute，逐项核对**画面中归属于 C0 的身体部位**与批准参考：
+只输出一个 JSON 对象：
+{"attributes":[{"attribute_id":"...","verdict":"pass|fail|unknown",
+  "ownership_confirmed":true,"evidence_interval":[0.0,1.0],
+  "notes":"..."}],
+ "scope_note":"checked spans only"}
+判定规则（必须遵守）：
+1. 先判归属：画面结构属于谁看不清时不得判 C0 的属性。
+2. 看不到不等于确认：关键区域被遮挡/模糊/出画 → verdict=unknown，
+   绝不是 pass（也不是 fail）。
+3. fail 仅当：清楚看到属于 C0 的、与约束冲突的结构（例如清楚可见的
+   手形结构且归属 C0）。
+4. 对手（C1）正常有手不构成 C0 的 fail。
+5. notes 必须具体到时间与画面；报告只声明已检查区间，不得宣称全片。"""
+
+
+def check_take_attributes(video_path: Path, output_dir: Path, *, runner,
+                           take_id: str, constraints: dict[str, Any],
+                           pack: dict[str, Any],
+                           sample_ratios: tuple[float, ...] = (0.1, 0.35, 0.55,
+                                                               0.75, 0.9),
+                           ffmpeg_bin: str = "ffmpeg"
+                           ) -> dict[str, Any]:
+    """第二段核对（p0521）：人物卡+参考图+采样帧 → 逐属性 pass/fail/unknown。
+
+    采样=前/中/后/动作关键位；五帧不宣称全片证明（scope_note 强制声明）。
+    可疑处补看（drill）由生产控制器按需追加，本函数只做基础核对。
+    """
+    output_dir = Path(output_dir)
+    geometry = probe_media_geometry(_ffprobe_bin_of(ffmpeg_bin), Path(video_path))
+    duration_s = geometry["duration_s"]
+    frame_dir = output_dir / f"{take_id}_attribute_frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    sample_paths = []
+    for index, ratio in enumerate(sample_ratios, 1):
+        jpg = frame_dir / f"sample_{index}.jpg"
+        _extract_frame(ffmpeg_bin, Path(video_path),
+                       min(duration_s * ratio, max(duration_s - 0.05, 0.05)),
+                       jpg)
+        sample_paths.append(jpg)
+    by_role = {str(entry.get("role")): entry
+               for entry in pack.get("entries") or []}
+    reference_paths = []
+    attributes_payload = []
+    for row in constraints.get("critical_attributes") or []:
+        attributes_payload.append({
+            "attribute_id": row["id"], "description": row["description"]})
+        for asset_id in row.get("evidence_asset_ids") or []:
+            entry = by_role.get(str(asset_id))
+            if entry and Path(str(entry["path"])).is_file():
+                reference_paths.append(Path(str(entry["path"])))
+    prompt = (ATTRIBUTE_CHECK_PROMPT + "\n人物卡 critical attributes：\n"
+              + json.dumps(attributes_payload, ensure_ascii=False,
+                           separators=(",", ":")) + "\n输入：")
+    answer = runner.inspect_media(
+        reference_paths + sample_paths, prompt, max_new_tokens=1536,
+        stop_after_json_object=True)
+    raw = getattr(answer, "text", str(answer))
+    (output_dir / f"{take_id}_attributes.txt").write_text(
+        raw, encoding="utf-8")
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    value = json.loads(text)
+    rows = value.get("attributes") or []
+    expected = {row["id"] for row in attributes_payload}
+    seen: set[str] = set()
+    for row in rows:
+        verdict = row.get("verdict")
+        if verdict not in {"pass", "fail", "unknown"}:
+            raise LT0Blocked("observe", "attribute_verdict_invalid",
+                             str(row.get("attribute_id")))
+        seen.add(str(row.get("attribute_id")))
+    if seen != expected:
+        raise LT0Blocked("observe", "attribute_missing",
+                         f"{sorted(expected - seen)}")
+    return {"take_id": take_id, "duration_s": duration_s,
+            "attribute_verdicts": {row["attribute_id"]: row
+                                   for row in rows},
+            "samples": [str(path) for path in sample_paths],
+            "scope_note": value.get("scope_note") or "checked spans only"}
 
 
 def compare_take_to_brief(result: dict[str, Any],
