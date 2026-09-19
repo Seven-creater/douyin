@@ -41,7 +41,7 @@ STORY_INSTANTIATION_PROMPT = """你是故事创作者。输入是一份**叙事�
   "story_id": "story_a",
   "logline": "一句话故事",
   "initial_belief": {"claim": "他人/观众的具体判断（含低估来源）",
-                     "capability": "被低估的抽象能力维度",
+                     "capability": "本故事的**具体**能力领域（如编程/烹饪/攀岩/急救——是契约抽象维度的一个实例，不是抽象维度本身）",
                      "source_of_underestimation": "低估来源（外表/年龄/资历/身份/经验等）"},
   "counter_evidence": {"demonstrated_capability": "必须等于 initial_belief.capability",
                        "event": "直接证明该能力的可视事件",
@@ -55,7 +55,8 @@ STORY_INSTANTIATION_PROMPT = """你是故事创作者。输入是一份**叙事�
   "emotion_arc": ["...", "...", "..."]}]}
 要求：
 1. **多样性硬约束**：三个故事必须在 source_of_underestimation（低估来源）、
-   capability（能力维度）、社会语境三方面**都不同**——不是换皮同一机制。
+   capability（**具体**能力领域——三个故事必须选三个不同领域，禁止都填
+   契约里的抽象维度原文）、社会语境三方面都不同——不是换皮同一机制。
 2. 每个故事的 counter_evidence.demonstrated_capability 必须与
    initial_belief.capability 是同一维度（预期 A 就证明 A，不能预期 A 证明 B）。
 3. sections 按契约的段角色顺序组织，每个角色恰好一段。
