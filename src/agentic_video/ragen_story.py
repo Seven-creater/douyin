@@ -40,12 +40,13 @@ STORY_INSTANTIATION_PROMPT = """你是故事创作者。输入是一份**叙事�
 {"stories": [{
   "story_id": "story_a",
   "logline": "一句话故事",
-  "initial_belief": {"statement": "观众/他人一开始对主人公的预期",
-                     "dimension": "被低估的能力维度"},
-  "counter_evidence": {"statement": "直接反驳该预期的可视事件",
-                       "contradicts_dimension": "必须等于 initial_belief.dimension",
-                       "visually_observable": true},
-  "reinforcement": [{"statement": "继续支持修正后认知的证据",
+  "initial_belief": {"claim": "他人/观众的具体判断（含低估来源）",
+                     "capability": "被低估的抽象能力维度",
+                     "source_of_underestimation": "低估来源（外表/年龄/资历/身份/经验等）"},
+  "counter_evidence": {"demonstrated_capability": "必须等于 initial_belief.capability",
+                       "event": "直接证明该能力的可视事件",
+                       "outcome": "决定性结果"},
+  "reinforcement": [{"event": "继续支持修正后认知的证据",
                      "supports_corrected_belief": true}],
   "ending": {"statement": "收尾小限制/小反差", "function": "人格化幽默收束",
              "cancels_corrected_belief": false},
@@ -53,10 +54,10 @@ STORY_INSTANTIATION_PROMPT = """你是故事创作者。输入是一份**叙事�
                 "emotion": "观众此刻的感受"}],
   "emotion_arc": ["...", "...", "..."]}]}
 要求：
-1. 三个故事在人物身份、能力领域、场合、结尾反差上**互不相同**（填不同的
-   槽位组合）；领域选择完全自由（运动/职业/生活技能/创作皆可）。
-2. 每个故事的 counter_evidence 必须与 initial_belief 在同一维度上构成
-   正面反驳（不能预期 A 却证明 B）。
+1. **多样性硬约束**：三个故事必须在 source_of_underestimation（低估来源）、
+   capability（能力维度）、社会语境三方面**都不同**——不是换皮同一机制。
+2. 每个故事的 counter_evidence.demonstrated_capability 必须与
+   initial_belief.capability 是同一维度（预期 A 就证明 A，不能预期 A 证明 B）。
 3. sections 按契约的段角色顺序组织，每个角色恰好一段。
 4. 全部内容必须可直接拍成视频（可视事件，不依赖旁白解释）。
 输入契约："""
@@ -107,17 +108,24 @@ def _output_violations(story_text: str, annex: dict[str, Any]) -> list[str]:
 
 def validate_story_causal(story: dict[str, Any],
                           contract: dict[str, Any]) -> list[str]:
-    """因果检查器（修正 1）：结构性验证，返回违规清单（空=过）。"""
+    """因果检查器（p0524 升级）：谓词级结构验证，返回违规清单（空=过）。
+
+    字段相等是必要不充分条件——语义级"E 是否直接否定 P"由
+    judge_direct_negation 的文本 judge 补足（廉价 ask，不看视频）。
+    """
     problems = []
     belief = story.get("initial_belief") or {}
     counter = story.get("counter_evidence") or {}
-    dimension = str(belief.get("dimension") or "").strip()
-    if not dimension:
-        problems.append("initial_belief.dimension_missing")
-    if str(counter.get("contradicts_dimension") or "").strip() != dimension:
-        problems.append("counter_evidence_dimension_mismatch")
-    if counter.get("visually_observable") is not True:
-        problems.append("counter_evidence_not_visual")
+    capability = str(belief.get("capability") or "").strip()
+    if not capability or not str(belief.get("claim") or "").strip():
+        problems.append("initial_belief_predicate_missing")
+    if not str(belief.get("source_of_underestimation") or "").strip():
+        problems.append("source_of_underestimation_missing")
+    if str(counter.get("demonstrated_capability") or "").strip() != capability:
+        problems.append("counter_evidence_capability_mismatch")
+    if not str(counter.get("event") or "").strip() or not str(
+            counter.get("outcome") or "").strip():
+        problems.append("counter_evidence_not_visual_decisive")
     for index, row in enumerate(story.get("reinforcement") or []):
         if row.get("supports_corrected_belief") is not True:
             problems.append(f"reinforcement_{index}_not_supporting")
@@ -128,6 +136,64 @@ def validate_story_causal(story: dict[str, Any],
     required = [str(role) for role in contract.get("section_roles") or []]
     if roles != required:
         problems.append(f"section_roles_mismatch:{roles}!={required}")
+    return problems
+
+
+NEGATION_JUDGE_PROMPT = """只做逻辑判定。前提 P 是他人对主人公的判断；
+证据事件 E 是视频中可见发生的事。问题：若 E 为真且清晰可见，E 是否
+**直接否定** P（同一能力维度上的正面反驳）？只输出一个 JSON 对象：
+{"directly_contradicts": "yes|no|partially",
+ "capability_match": true,
+ "reason": "一句话"}
+判定 yes 需：E 展示的正是 P 声称缺乏的同一能力。预期 A 证明 B = no。
+前提与证据："""
+
+
+def judge_direct_negation(story: dict[str, Any], *, runner) -> str:
+    """文本 judge（p0524 修正 2）：E 是否直接否定 P——结构门管不住的
+    语义级反驳判定，一次廉价 ask，不看视频。"""
+    belief = story.get("initial_belief") or {}
+    counter = story.get("counter_evidence") or {}
+    payload = json.dumps(
+        {"P": {"claim": belief.get("claim"),
+               "capability": belief.get("capability")},
+         "E": {"event": counter.get("event"),
+               "demonstrated_capability":
+                   counter.get("demonstrated_capability"),
+               "outcome": counter.get("outcome")}},
+        ensure_ascii=False, separators=(",", ":"))
+    answer = runner.ask(NEGATION_JUDGE_PROMPT + payload,
+                        max_new_tokens=512,
+                        stop_after_json_object=True)
+    raw = getattr(answer, "text", str(answer))
+    from src.agentic_video.reference_program_v9 import _parse_one_object
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    value = _parse_one_object(text, stage="ragen_story_judge")
+    verdict = str(value.get("directly_contradicts") or "")
+    if verdict not in {"yes", "no", "partially"}:
+        raise ReGenBlocked("story_judge", "judge_verdict_invalid", verdict)
+    return verdict
+
+
+def validate_diversity(stories: list[dict[str, Any]]) -> list[str]:
+    """p0524 修正 3：候选须在低估来源/能力维度上真正不同。"""
+    problems = []
+    if len(stories) < 3:
+        return problems
+
+    def _values(key):
+        return [str((s.get("initial_belief") or {}).get(key) or "").strip()
+                .lower() for s in stories]
+
+    for key, label in (("source_of_underestimation", "underestimation_source"),
+                       ("capability", "capability_domain")):
+        values = _values(key)
+        if len(set(values)) < 3:
+            problems.append(f"candidates_homogeneous_{label}:{values}")
     return problems
 
 
@@ -172,13 +238,21 @@ def instantiate_stories(contract: dict[str, Any], output_dir: Path, *,
     stories = value.get("stories") or ([value] if mode == "asset_aware" else [])
     if not stories:
         raise ReGenBlocked("story", "no_stories_returned", mode)
+    diversity_problems = (validate_diversity(stories)
+                          if mode == "creative" else [])
     audited = []
     for story in stories:
         story_text = json.dumps(story, ensure_ascii=False)
         problems = validate_story_causal(story, contract)
         violations = _output_violations(story_text, annex)
+        negation = None
+        if not problems:
+            negation = judge_direct_negation(story, runner=runner)
+            if negation != "yes":
+                problems.append(f"negation_judge_{negation}")
         audited.append({"story": story, "causal_problems": problems,
                         "copy_violations": violations,
+                        "negation_judge": negation,
                         "passed": not problems and not violations})
     passing = [row for row in audited if row["passed"]]
     if mode == "creative" and not passing:
@@ -187,7 +261,9 @@ def instantiate_stories(contract: dict[str, Any], output_dir: Path, *,
             json.dumps([row["causal_problems"] + row["copy_violations"]
                         for row in audited], ensure_ascii=False)[:500])
     result = {"schema_version": STORY_PLANS_VERSION, "mode": mode,
-              "input_sha256": input_hash, "stories": audited}
+              "input_sha256": input_hash,
+              "diversity_problems": diversity_problems,
+              "stories": audited}
     output_path.write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     return result

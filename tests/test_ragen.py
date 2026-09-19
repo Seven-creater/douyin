@@ -22,14 +22,18 @@ def _contract() -> dict:
         "theme": "challenge an initial underestimation through visible evidence",
         "narrative_invariants": {
             "initial_belief": {"type": "underestimation",
-                               "target_dimension": "capability"},
-            "counter_evidence": {
-                "must_directly_contradict_initial_belief": True,
-                "must_be_visually_observable": True, "strength": "decisive"},
-            "reinforcement": {"must_support_corrected_belief": True,
-                              "events_can_differ": True},
-            "ending": {"function": "humanizing_humorous_contrast",
-                       "must_not_cancel_corrected_belief": True}},
+                               "belief_predicate": "not capable of X",
+                               "capability_dimension": "physical competence",
+                               "source_of_underestimation":
+                                   "free_instantiation_slot"},
+            "counter_evidence": {"required_relation": "direct_negation",
+                                 "must_target_same_capability_dimension": True,
+                                 "must_be_visually_observable": True,
+                                 "must_be_decisive": True},
+            "reinforcement": {"must_support_revised_belief": True,
+                              "may_use_other_events": True},
+            "ending": {"function": "humanizing_contrast",
+                       "must_not_reverse_revised_belief": True}},
         "editing_grammar": [
             {"role": "situation_setup", "editing_intent": "slow premise setup",
              "content_pattern": ["premise"], "shot_density": "low",
@@ -68,18 +72,19 @@ def _annex() -> dict:
             "高踢击倒对手后微笑走向镜头。"}]}
 
 
-def _story(*, dimension: str = "competitive_ability",
-           contradicts: str | None = None,
+def _story(*, capability: str = "competitive ability",
+           demonstrates: str | None = None,
            ending_cancels: bool = False) -> dict:
     return {
         "story_id": "story_a", "logline": "x",
-        "initial_belief": {"statement": "被认为只是业余新手",
-                           "dimension": dimension},
-        "counter_evidence": {"statement": "比赛中展现决定性水平并取胜",
-                             "contradicts_dimension":
-                                 contradicts or dimension,
-                             "visually_observable": True},
-        "reinforcement": [{"statement": "更多能力证据",
+        "initial_belief": {"claim": "被认为只是业余新手",
+                           "capability": capability,
+                           "source_of_underestimation": "外表普通"},
+        "counter_evidence": {"demonstrated_capability":
+                                 demonstrates or capability,
+                             "event": "比赛中连续进攻",
+                             "outcome": "决定性取胜"},
+        "reinforcement": [{"event": "更多能力证据",
                            "supports_corrected_belief": True}],
         "ending": {"statement": "小缺点反差", "function": "人格化收束",
                    "cancels_corrected_belief": ending_cancels},
@@ -99,9 +104,10 @@ def test_causal_checker_accepts_sound_story() -> None:
 def test_causal_checker_rejects_dimension_mismatch() -> None:
     """用户反例锚死：预期 A 却证明 B（四 role 齐也不放过）。"""
     problems = validate_story_causal(
-        _story(dimension="cooking_skill", contradicts="athletic_prowess"),
+        _story(capability="cooking skill",
+               demonstrates="athletic prowess"),
         _contract())
-    assert "counter_evidence_dimension_mismatch" in problems
+    assert "counter_evidence_capability_mismatch" in problems
 
 
 def test_causal_checker_rejects_ending_cancel_and_role_gaps() -> None:
@@ -140,8 +146,8 @@ def test_output_gate_allows_independent_domains_blocks_verbatim() -> None:
         json.dumps(independent, ensure_ascii=False), _annex()) == []
     copycat = _story()
     copycat["initial_belief"] = {
-        "statement": "人们常常觉得失去了双手就会变成一个废人",
-        "dimension": "capability"}
+        "claim": "人们常常觉得失去了双手就会变成一个废人",
+        "capability": "capability", "source_of_underestimation": "外表"}
     violations = story._output_violations(
         json.dumps(copycat, ensure_ascii=False), _annex())
     assert any(v.startswith("verbatim_quote") for v in violations)
@@ -159,10 +165,17 @@ def test_contract_validator_requires_logic_not_labels() -> None:
     director.validate_contract(_contract(), _contract()["section_roles"])
     weak = _contract()
     weak["narrative_invariants"]["counter_evidence"][
-        "must_directly_contradict_initial_belief"] = False
+        "required_relation"] = "weak_reference"
     with pytest.raises(ReGenBlocked) as excinfo:
         director.validate_contract(weak, weak["section_roles"])
     assert excinfo.value.reason_code == "invariant_logic_weak"
+    # 抽象禁令（p0524）：身体完整性渗进维度 → 拦（三候选全残障题材的根因）
+    poisoned = _contract()
+    poisoned["narrative_invariants"]["initial_belief"][
+        "capability_dimension"] = "body integrity vs capability"
+    with pytest.raises(ReGenBlocked) as excinfo:
+        director.validate_contract(poisoned, poisoned["section_roles"])
+    assert excinfo.value.reason_code == "dimension_not_abstract"
     missing_role = _contract()
     missing_role["editing_grammar"] = missing_role["editing_grammar"][:2]
     with pytest.raises(ReGenBlocked):
@@ -257,3 +270,57 @@ def test_blind_viewer_then_comparator_two_stage() -> None:
 def test_ragen_prompts_do_not_spoil_reference(prompt: str) -> None:
     for spoiler in ("没有双手", "跆拳道", "全国冠军", "废人", "剪脚指甲"):
         assert spoiler not in prompt, (spoiler, prompt[:40])
+
+
+def test_negation_judge_and_diversity() -> None:
+    """p0524：文本 judge 与多样性检查。"""
+
+    class JudgeRunner:
+        def __init__(self, verdict):
+            self.verdict = verdict
+            self.calls = []
+
+        def ask(self, prompt, **kwargs):
+            self.calls.append(prompt)
+            return SimpleNamespace(text=json.dumps({
+                "directly_contradicts": self.verdict,
+                "capability_match": self.verdict == "yes",
+                "reason": "r"}))
+
+    good = _story()
+    assert story.judge_direct_negation(
+        good, runner=JudgeRunner("yes")) == "yes"
+    bad = JudgeRunner("banana")
+    with pytest.raises(ReGenBlocked) as excinfo:
+        story.judge_direct_negation(good, runner=bad)
+    assert excinfo.value.reason_code == "judge_verdict_invalid"
+
+    same_source = [_story() for _ in range(3)]
+    for row in same_source:
+        row["story_id"] = "x"
+    problems = story.validate_diversity(same_source)
+    assert any("homogeneous" in p for p in problems)
+    varied = []
+    for index, (source, capability) in enumerate([
+            ("youth", "cooking"), ("appearance", "chess"),
+            ("seniority", "climbing")]):
+        row = _story(capability=capability)
+        row["initial_belief"]["source_of_underestimation"] = source
+        row["story_id"] = f"s{index}"
+        varied.append(row)
+    assert story.validate_diversity(varied) == []
+
+
+def test_rhythm_prior_ranges_not_exact() -> None:
+    """p0524 修正 7：节奏是先验区间（target+range），不是精确硬约束。"""
+    content = {"sections": [
+        {"interval": [0.0, 5.0], "content_function": "situation_setup"},
+        {"interval": [5.0, 16.6], "content_function": "counter_evidence"},
+        {"interval": [16.6, 22.0],
+         "content_function": "evidence_expansion"}]}
+    rhythm = director.compute_rhythm_grammar(content, {"scene_detection":
+                                                       {"cut_candidates":
+                                                        []}})
+    prior = rhythm["rhythm_prior"]["counter_evidence"]
+    assert prior["range"][0] < prior["target"] < prior["range"][1]
+    assert "不复制精确秒数" in rhythm["policy"]

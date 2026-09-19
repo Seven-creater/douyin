@@ -32,12 +32,17 @@ DIRECTOR_CONTRACT_PROMPT = """你是导演学者。输入是一部参考短片�
 这样剪。只输出一个 JSON 对象：
 {"theme": "一句话：这条片子用什么因果机制打动观众（不是内容概要）",
  "narrative_invariants": {
-   "initial_belief": {"type": "...", "target_dimension": "..."},
-   "counter_evidence": {"must_directly_contradict_initial_belief": true,
-     "must_be_visually_observable": true, "strength": "decisive"},
-   "reinforcement": {"must_support_corrected_belief": true,
-     "events_can_differ": true},
-   "ending": {"function": "...", "must_not_cancel_corrected_belief": true}},
+   "initial_belief": {"type": "underestimation",
+     "belief_predicate": "the protagonist is not capable of X",
+     "capability_dimension": "X（抽象维度名，2-4 词）",
+     "source_of_underestimation": "free_instantiation_slot"},
+   "counter_evidence": {"required_relation": "direct_negation",
+     "must_target_same_capability_dimension": true,
+     "must_be_visually_observable": true, "must_be_decisive": true},
+   "reinforcement": {"must_support_revised_belief": true,
+     "may_use_other_events": true},
+   "ending": {"function": "humanizing_contrast",
+     "must_not_reverse_revised_belief": true}},
  "editing_grammar": [
    {"role": "...", "editing_intent": "...", "content_pattern": ["..."],
     "shot_density": "low|medium|medium_high|very_high",
@@ -45,14 +50,22 @@ DIRECTOR_CONTRACT_PROMPT = """你是导演学者。输入是一部参考短片�
     "timing_function": "..."}],
  "instantiation_slots": ["可自由替换的具体化维度，如主角身份/能力领域/场合"]}
 要求：
-1. narrative_invariants 是**逻辑约束**不是标签清单：counter_evidence 与
-   initial_belief 必须同一能力维度上的正反命题；ending 只人格化、不得取消
-   已修正的认知。
-2. editing_grammar 的每条回答"这一段为什么用这种剪法"（editing_intent），
-   并给出内容骨架（content_pattern）；形式参数（快切/转场族）只是手段。
-3. 所有描述必须可迁移：换成任何题材/人物，同一套约束仍然成立且可用。
-4. theme/invariants/editing_intent 不得包含具体人名、具体运动、具体身体
-   特征——那些属于 instantiation slots。
+1. narrative_invariants 是**谓词级因果结构**（不是标签清单）：
+   initial_belief 必须写成 belief_predicate（"the protagonist is not
+   capable of X" 形式）+ capability_dimension（X = 抽象能力维度名，如
+   "physical competence"/"professional skill"，2-4 词）+
+   source_of_underestimation（填 "free_instantiation_slot"——低估的
+   来源是自由槽位：外表/年龄/资历/身份/身体条件都只是实例）。
+   counter_evidence 必须 required_relation="direct_negation" 且
+   must_target_same_capability_dimension=true。ending 只人格化不翻案。
+2. **抽象禁令**：capability_dimension 与 theme 不得携带任何具体实例色彩
+   （身体条件/残疾/具体运动/具体职业全禁止）——参考片用什么实例实现
+   这条因果链与契约无关，那是 instantiation_slots 的事。
+3. editing_grammar 每条回答"这一段为什么用这种剪法"（editing_intent）；
+   content_pattern 用**通用证据类别**（如 different_context_evidence /
+   decisive_action / visible_result / humanizing_detail），不得罗列
+   参考片后段具体出现的内容类型。
+4. 所有描述必须可迁移：换成任何题材/人物，同一套约束仍然成立且可用。
 输入："""
 
 
@@ -90,15 +103,24 @@ def compute_rhythm_grammar(content: dict[str, Any],
         cuts_inside = sum(1 for pts in cut_pts if start < pts < end)
         densities.append(_bucket_density(cuts_inside / span))
         spans.append(round(span, 2))
+    # p0524 修正 7：节奏是**先验区间**不是精确硬约束（复制秒数=复刻路线）
+    roles = [str(row.get("content_function")) for row in sections]
+    rhythm_prior = {
+        role: {"target": ratio,
+               "range": [round(max(0.0, ratio - 0.055), 3),
+                         round(ratio + 0.065, 3)]}
+        for role, ratio in zip(roles, ratios)}
     return {
         "section_duration_s": spans,
         "section_duration_ratios": ratios,
+        "rhythm_prior": rhythm_prior,
         "relative_cut_density": densities,
         "punchline_release": bool(
-            sections and str(sections[-1].get("content_function") or "")
-            in {"evidence_expansion", "punchline_payoff"}),
+            sections and roles[-1] in
+            {"evidence_expansion", "punchline_payoff"}),
         "beat_sync_strength": "preferred",
-        "policy": "迁移相对节奏结构；新 BGM 的 beat timeline 映射到相同模式",
+        "policy": "迁移相对节奏结构（先验区间）；新 BGM 的 beat timeline "
+                  "映射到相同模式，不复制精确秒数",
     }
 
 
@@ -125,6 +147,13 @@ def build_director_payload(content: dict[str, Any],
     return payload
 
 
+# 抽象禁令（p0524）：维度名/theme 不得携带参考实例色彩——上一轮三候选全
+# 残障题材的根因即"身体完整性"渗进了本该抽象的 capability_dimension。
+DIMENSION_INSTANCE_BAN = ("身体", "残疾", "残障", "肢体", "听力", "视力",
+                          "轮椅", "失聪", "失明", "body integrity", "disab",
+                          "hand", "arm", "limb", "deaf", "blind")
+
+
 def validate_contract(contract: dict[str, Any],
                       section_roles: list[str]) -> None:
     invariants = contract.get("narrative_invariants") or {}
@@ -132,11 +161,26 @@ def validate_contract(contract: dict[str, Any],
                 "ending"):
         if not isinstance(invariants.get(key), dict) or not invariants[key]:
             raise ReGenBlocked("director", "invariant_missing", key)
+    belief = invariants["initial_belief"]
+    for key in ("belief_predicate", "capability_dimension"):
+        if not str(belief.get(key) or "").strip():
+            raise ReGenBlocked("director", "invariant_field_missing", key)
+    dimension = str(belief.get("capability_dimension") or "").lower()
+    theme_text = str(contract.get("theme") or "").lower()
+    for banned in DIMENSION_INSTANCE_BAN:
+        if banned in dimension or banned in theme_text:
+            raise ReGenBlocked(
+                "director", "dimension_not_abstract",
+                f"'{banned}' leaked an instantiation into the transferable "
+                f"dimension/theme; body/appearance specifics belong to "
+                f"instantiation slots, not contract invariants")
     counter = invariants["counter_evidence"]
-    if counter.get("must_directly_contradict_initial_belief") is not True or \
-            counter.get("must_be_visually_observable") is not True:
+    if (counter.get("required_relation") != "direct_negation" or
+            counter.get("must_target_same_capability_dimension") is not True or
+            counter.get("must_be_visually_observable") is not True or
+            counter.get("must_be_decisive") is not True):
         raise ReGenBlocked("director", "invariant_logic_weak", "counter_evidence")
-    if invariants["ending"].get("must_not_cancel_corrected_belief") is not True:
+    if invariants["ending"].get("must_not_reverse_revised_belief") is not True:
         raise ReGenBlocked("director", "invariant_logic_weak", "ending")
     if not str(contract.get("theme") or "").strip():
         raise ReGenBlocked("director", "theme_missing")
