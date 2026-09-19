@@ -61,9 +61,9 @@ def build_section_take_request(story: dict[str, Any], role: str,
         ending = story.get("ending") or {}
         event_desc = "; ".join(str(e) for e in events[:2]) or \
             "additional visible evidence that the corrected belief holds"
-        extra = (f"End with a light humanizing beat: {ending.get('statement', "
-                 f"'a small relatable quirk')}. Do not reverse the corrected "
-                 f"belief.")
+        ending_beat = str(ending.get("statement") or "a small relatable quirk")
+        extra = ("End with a light humanizing beat: " + ending_beat +
+                 ". Do not reverse the corrected belief.")
     else:
         raise ReGenBlocked("ragen_generate", "role_not_generatable", role)
     prompt = SECTION_TAKE_PROMPT_TMPL.format(
