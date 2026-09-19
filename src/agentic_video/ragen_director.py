@@ -171,7 +171,7 @@ def build_transfer_contract(p04e_dir: Path, output_dir: Path, *,
     ledger = json.loads(
         (p04e_dir / "reference_evidence.json").read_text(encoding="utf-8"))
     payload = build_director_payload(content, edit_program)
-    section_roles = [str(row.get("content_function")) for row in payload]
+    section_roles = [str(row.get("role")) for row in payload]
     input_hash = json_hash({"payload": payload,
                             "prompt": DIRECTOR_CONTRACT_PROMPT})
     if contract_path.is_file() and not force:
