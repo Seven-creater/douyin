@@ -1048,7 +1048,7 @@ def check_take_attributes(video_path: Path, output_dir: Path, *, runner,
             text = text[4:]
     value = json.loads(text)
     rows = value.get("attributes") or []
-    expected = {row["id"] for row in attributes_payload}
+    expected = {row["attribute_id"] for row in attributes_payload}
     seen: set[str] = set()
     for row in rows:
         verdict = row.get("verdict")
