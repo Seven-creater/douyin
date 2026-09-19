@@ -64,15 +64,19 @@ STORY_INSTANTIATION_PROMPT = """你是故事创作者。输入是一份**叙事�
 输入契约："""
 
 ASSET_STORY_PROMPT = """你是故事创作者。输入是一份**叙事迁移契约**和一段
-**已有视频素材的观察语义**。你的任务：创造一个新故事，使已有素材正好充当
-其中的核心反证段（counter_evidence），并补齐其余段落的事件描述。只输出一
-个 JSON 对象（同 creative 模式的单故事 schema，story_id 固定
-"asset_aware"，sections 中 counter_evidence 段的 event 字段写
-"USE_EXISTING_FOOTAGE"）。要求：
-1. 故事不得破坏契约的叙事因果约束（S1 建立的预期必须正好被已有素材反驳：
-   已有素材展示的能力维度要填进 initial_belief.dimension）。
-2. 补齐的段落（setup/reinforcement/ending 等）给出一句话事件描述即可，
-   后续由生成模块展开。
+**已有视频素材的客观观察语义**（不含任何原故事文本）。已知该素材将充当
+故事的核心反证段（counter_evidence/S2）。你的任务：创造 **3 个互不相同**
+的完整故事外壳，每个外壳为这段素材设计一个新的 S1 前提（被这段素材直接
+推翻）和一个新的 S3（继续支持修正后的认知并以轻松方式收尾）。只输出一个
+JSON 对象：{"stories": [同 creative 模式的单故事 schema ×3]}，其中：
+- counter_evidence.event 固定写 "USE_EXISTING_FOOTAGE"，
+  demonstrated_capability 填素材实际展示的具体能力领域
+- 三个外壳的 source_of_underestimation 与 S3 的证据类型必须互不相同
+- S1/S3 的事件必须是**可拍成视频的可视事件**（4-6 秒能看清）
+要求：
+1. 每个外壳的 S1 前提必须正好被已有素材**直接推翻**（同一能力维度）；
+   judge 会检查这一点。
+2. 不得破坏契约的叙事因果约束；ending 只人格化不翻案。
 输入契约与素材语义："""
 
 
@@ -236,7 +240,7 @@ def instantiate_stories(contract: dict[str, Any], output_dir: Path, *,
     raw = getattr(answer, "text", str(answer))
     (output_dir / f"story_{mode}_raw.txt").write_text(raw, encoding="utf-8")
     value = _parse_answer(raw)
-    stories = value.get("stories") or ([value] if mode == "asset_aware" else [])
+    stories = value.get("stories") or [value]
     if not stories:
         raise ReGenBlocked("story", "no_stories_returned", mode)
     diversity_problems = (validate_diversity(stories)
@@ -261,9 +265,15 @@ def instantiate_stories(contract: dict[str, Any], output_dir: Path, *,
             "story", "no_causally_valid_story",
             json.dumps([row["causal_problems"] + row["copy_violations"]
                         for row in audited], ensure_ascii=False)[:500])
+    selected = None
+    if mode == "asset_aware" and passing:
+        selected = passing[0]["story"]["story_id"]
+        for row in audited:
+            row["selected"] = row["story"]["story_id"] == selected
     result = {"schema_version": STORY_PLANS_VERSION, "mode": mode,
               "input_sha256": input_hash,
               "diversity_problems": diversity_problems,
+              "selected_story_id": selected,
               "stories": audited}
     output_path.write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
