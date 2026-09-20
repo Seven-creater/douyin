@@ -242,7 +242,11 @@ class Workspace:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _stage_dir(self, name: str) -> Path:
-        # 映射 artifact 名到目录（如 screenplay → 01_screenplay）
+        # 映射 artifact 名到目录（如 screenplay → 01_screenplay）。
+        # M2 资产链 artifact 名含冒号（asset:C0_master 等）→
+        # 03_asset_studio/<name>/（每 artifact 独立子目录防版本文件撞名）
+        if name.startswith("asset:"):
+            return self.root / "03_asset_studio" / name[len("asset:"):]
         mapping = {
             "creative_dna": "00_reference",
             "screenplay": "01_screenplay",

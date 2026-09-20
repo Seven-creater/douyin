@@ -26,11 +26,15 @@ class SkillSpec:
     execute_fn: Callable[..., Any] | None = None  # set by subclass
 
     def can_run(self, workspace: Workspace) -> tuple[bool, str]:
-        """检查前置条件是否满足。返回 (can_run, reason_if_not)。"""
+        """检查前置条件是否满足。返回 (can_run, reason_if_not)。
+
+        rsplit：artifact 名本身可含冒号（M2 的 "asset:C0_master:committed"
+        → artifact="asset:C0_master", required="committed"）。
+        """
         for pre in self.preconditions:
-            parts = pre.split(":")
-            artifact = parts[0]
-            required = parts[1] if len(parts) > 1 else "committed"
+            artifact, _, required = pre.rpartition(":")
+            if not artifact:
+                artifact, required = pre, "committed"
             status = workspace.get_status(artifact)
             if required == "committed" and status != "committed":
                 return False, f"precondition {pre} unmet ({status})"

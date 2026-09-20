@@ -98,11 +98,12 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
             kwargs["test_failures"] = last_failure.get("failures") or []
             kwargs["target"] = action.get("target") or ""
         result = registry.execute(action, workspace, **kwargs)
-
-        # 测试（Actor ≠ Test）
         artifact_name = str(result.get("artifact") or "")
-        test_report = _run_validator(
-            workspace, registry, artifact_name, controller_runner)
+
+        # 测试（Actor ≠ Test）——validator 归属于本次 skill
+        # （M2 多 skill 共享输出 artifact，按 artifact 反查会猜错）
+        test_report = _run_validator_for_action(
+            action, registry, workspace, controller_runner)
 
         # 落档 trace
         workspace.record_trace(step, action, result, test_report)
@@ -127,15 +128,16 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
     }
 
 
-def _run_validator(workspace: Workspace, registry: SkillRegistry,
-                   artifact_name: str, runner) -> dict[str, Any]:
-    """运行 artifact 对应的 validator（独立上下文，Actor ≠ Test）。"""
+def _run_validator_for_action(action: dict[str, Any], registry: SkillRegistry,
+                              workspace: Workspace, runner) -> dict[str, Any]:
+    """运行本次 action 所属 skill 的 validator（独立上下文，Actor ≠ Test）。
+
+    M1 语义不变（write/repair_screenplay 本就同一 validator）；
+    M2 多 skill 共享输出 artifact 时按 artifact 反查会永远猜中第一个。
+    """
     from src.agentic_video.validators import run_test
-    spec = None
-    for skill in registry.skills.values():
-        if artifact_name in skill.outputs:
-            spec = skill
-            break
+    skill_name = str((action or {}).get("skill") or "")
+    spec = registry.skills.get(skill_name)
     validator_names = spec.validators if spec else []
     if not validator_names:
         return {"passed": True, "validators_run": [],
