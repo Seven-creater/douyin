@@ -156,9 +156,12 @@ def assemble_final(edl: dict[str, Any], dailies_paths: dict[str, Path],
             "segments": segments,
             "editorial_policy_version": REGEN_EDIT_VERSION}
     # 修正 5：竖版 9:16 画布（1080×1920），覆写 renderer 的画布配置读取
+    base_generation = getattr(cfg, "generation", None)
+    generation_dict = dict(base_generation) if isinstance(
+        base_generation, dict) else {}
+    generation_dict["assemble"] = {"width": 1080, "height": 1920}
     canvas_cfg = SimpleNamespace(
-        **{**vars(cfg), "generation": SimpleNamespace(
-            assemble=SimpleNamespace(width=1080, height=1920))})
+        **{**vars(cfg), "generation": generation_dict})
     result = render_micro_montage(canvas_cfg, plan, Path(output_dir))
     return {"plan": plan, "render": result}
 
