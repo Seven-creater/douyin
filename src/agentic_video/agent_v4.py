@@ -23,17 +23,39 @@ class AgentBlocked(RuntimeError):
 
 def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
                controller_runner, max_steps: int = 30,
-               budget: str = "cheap_text") -> dict[str, Any]:
+               budget: str = "cheap_text",
+               no_progress_detector=None) -> dict[str, Any]:
     """主循环：inspect → Omni 选 skill → execute → test → commit/repair。
 
     controller_runner: Omni 池（ask 文本模式）——用于 choose_action 和
     validators（独立 prompt，Actor ≠ Test）。
+    no_progress_detector: 可选 NoProgressDetector——世界状态+失败均
+    连续零增量时 break（Run A-v2 集成教训：检测必须在循环内部）。
     """
     step = 0
     last_failure: dict[str, Any] | None = None
+    stop_reason = "max_steps"
 
     while not workspace.goal_satisfied() and step < max_steps:
         step += 1
+
+        if no_progress_detector is not None:
+            progress = no_progress_detector.step(workspace, last_failure)
+            if progress["stalled"]:
+                stagnant = progress["consecutive_stagnant_steps"]
+                workspace.record_trace(
+                    step,
+                    {"skill": "NO_PROGRESS", "event": stagnant},
+                    {"artifact": "-"},
+                    {"passed": False,
+                     "failures": [{
+                         "check": "no_progress",
+                         "detail": f"stagnant steps: {stagnant}"}],
+                     "restricted_actions":
+                         no_progress_detector.restricted_actions()})
+                stop_reason = "no_progress"
+                break
+
         state_map = workspace.build_map()
         runnable = registry.runnable_skills(workspace, budget)
         recent = workspace.recent_trace(3)
@@ -93,9 +115,12 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
             workspace.set_status(artifact_name, "draft")
             last_failure = test_report
 
+    if workspace.goal_satisfied():
+        stop_reason = "goal_satisfied"
     return {
         "steps_taken": step,
         "goal_satisfied": workspace.goal_satisfied(),
+        "stop_reason": stop_reason,
         "goal": workspace.state["goal"],
         "final_status": workspace.get_status(
             workspace.state["goal"]["target_artifact"]),

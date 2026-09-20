@@ -62,25 +62,18 @@ REPAIR_SCREENPLAY_PROMPT = """你是剧本医生。输入：当前剧本 + 失�
    可观察动作）
 输入："""
 
+from src.agentic_video.skills.asset_schema import ASSET_GRAPH_FORMAT_SPEC
+
 EXTRACT_ASSETS_PROMPT = """你是资产管家。输入锁定的剧本。你的任务：抽取
-剧本中全部实体，输出 Asset Graph。只输出一个 JSON：
-{"assets": [
-  {"asset_id": "C0", "type": "character", "tier": "A",
-   "canonical": {"description": "..."},
-   "states": ["default"],
-   "usage": {"B1": "default", "B2": "default"},
-   "immutable": {"face": "...", "body_build": "..."},
-   "mutable": {"wardrobe": true},
-   "status": "active"},
-  {"asset_id": "L01", "type": "location", "tier": "A", ...},
-  {"asset_id": "A01", "type": "motion", "tier": "A",
-   "status": "deferred_to_M4"}
-]}
-要求：
+剧本中全部实体，输出 Asset Graph。要求：
 1. 覆盖全部实体：Character/Location/Prop/Wardrobe/Motion/Style/Audio/
    Graphics/Creature——不生成的标 status=deferred
 2. 人物 immutable（脸/体格/发型）与 mutable（服装/表情/姿态）分开
 3. tier 按复用频率：A=跨多镜头（完整 pack）/B=2-3 次/C=一次性
+输出必须逐字段遵循此 schema（schema_version 必填，status 只能是
+active 或 deferred，绝不能写 deferred_to_M4 之类的值）：
+""" + ASSET_GRAPH_FORMAT_SPEC + """
+只输出一个 JSON（顶层就是 schema 对象本身，不要包在任何外层键里）。
 输入剧本："""
 
 
@@ -99,6 +92,16 @@ def build_m1_registry(runner=None) -> SkillRegistry:
             if text.startswith("json"):
                 text = text[4:]
         return _parse_one_object(text, stage="v4_skill")
+
+    def _unwrap(value: Any, *keys: str) -> Any:
+        """Run A-v2 教训：payload 以 {"<key>": ...} 包裹时 Omni 会照抄
+        外层结构原样返回，write_draft 存进嵌套包装。此处剥掉单键包装。"""
+        if isinstance(value, dict) and len(value) <= 3:
+            for key in keys:
+                inner = value.get(key)
+                if isinstance(inner, dict):
+                    return inner
+        return value
 
     def run_analyze_reference(workspace: Workspace, **kw) -> dict:
         # 复用已有 creative_dna（ragen_director 产物）或直接读
@@ -131,10 +134,12 @@ def build_m1_registry(runner=None) -> SkillRegistry:
         failures = kw.get("test_failures") or []
         target = kw.get("target") or ""
         payload = json.dumps(
-            {"screenplay": screenplay, "failed_tests": failures,
+            {"current_screenplay": screenplay, "failed_tests": failures,
              "failure_location": target},
             ensure_ascii=False, separators=(",", ":"))
-        repaired = _ask(REPAIR_SCREENPLAY_PROMPT + payload)
+        repaired = _unwrap(
+            _ask(REPAIR_SCREENPLAY_PROMPT + payload),
+            "screenplay", "current_screenplay")
         version = workspace.write_draft("screenplay", repaired)
         return {"artifact": "screenplay", "version": version,
                 "action": "repaired"}
@@ -143,9 +148,17 @@ def build_m1_registry(runner=None) -> SkillRegistry:
         screenplay = workspace.read_artifact("screenplay")
         if not screenplay:
             raise ValueError("screenplay not in workspace")
-        graph = _ask(
-            EXTRACT_ASSETS_PROMPT + json.dumps(
-                screenplay, ensure_ascii=False, separators=(",", ":")))
+        prompt = EXTRACT_ASSETS_PROMPT + json.dumps(
+            screenplay, ensure_ascii=False, separators=(",", ":"))
+        # schema 校验失败后的 re-extract = asset_graph 的合法修复动作：
+        # 把失败明细喂回去，而不是让 Agent 去乱修 screenplay
+        failures = kw.get("test_failures") or []
+        if failures:
+            prompt += ("\n\n上一次输出的 Asset Graph 未通过 schema 校验，"
+                       "失败明细如下，本次输出必须逐条修正：\n"
+                       + json.dumps(failures, ensure_ascii=False,
+                                    separators=(",", ":")))
+        graph = _unwrap(_ask(prompt), "asset_graph", "graph")
         version = workspace.write_draft("asset_graph", graph)
         return {"artifact": "asset_graph", "version": version,
                 "action": "extracted"}

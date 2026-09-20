@@ -83,6 +83,9 @@ class NoProgressDetector:
         }
 
     def restricted_actions(self) -> list[str]:
-        """NO_PROGRESS 后动作空间收缩：只能 repair/rewrite/stop。"""
+        """NO_PROGRESS 后动作空间收缩：只能 repair/rewrite/stop。
+
+        M1 真实技能名（asset_graph 的修复动作是带失败反馈的
+        re-extract，不存在 repair_asset_graph 这个 skill）。"""
         return ["repair_screenplay", "write_screenplay",
-                "repair_asset_graph", "stop"]
+                "extract_assets", "stop"]

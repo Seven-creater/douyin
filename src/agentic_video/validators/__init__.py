@@ -23,15 +23,8 @@ VALIDATE_SCREENPLAY_PROMPT = """你是剧本验收员（不是编剧）。输入
 你没有看过任何之前的修复过程——只根据当前剧本本身判断。
 输入剧本："""
 
-VALIDATE_ASSET_GRAPH_PROMPT = """你是资产验收员。输入 Asset Graph JSON。
-独立检查以下三条，只输出一个 JSON：
-{"passed": true, "failures": [{"asset_id": "...", "check": "...",
-  "detail": "..."}]}
-三条检查：
-1. 覆盖：剧本中出现的实体（人物/场景/道具）是否全部在 assets 中
-2. tier：核心角色/场景是否标 Tier A；一次性元素是否标 C 或 deferred
-3. immutable/mutable 分离：人物的脸/体格/发型是否在 immutable 中
-输入："""
+# 注：asset_graph 不再有 Omni 语义验收 prompt——Run A-v2 教训，
+# 确定性 schema 校验（skills/asset_schema.py）是唯一权威。
 
 
 def run_test(validator_name: str, workspace: Workspace, runner
@@ -91,29 +84,15 @@ def _test_screenplay(workspace: Workspace, runner) -> dict[str, Any]:
 
 
 def _test_asset_graph(workspace: Workspace, runner) -> dict[str, Any]:
-    from src.agentic_video.reference_program_v9 import _parse_one_object
+    """P0.4 修复：完全确定性校验（Run A-v2 教训——Omni 语义层会与 schema
+    层互相矛盾导致死循环）。immutable 含 face/body_build 是事实判定。"""
+    from src.agentic_video.skills.asset_schema import validate_asset_graph
     graph = workspace.read_artifact("asset_graph")
     if not graph:
         return {"passed": False,
                 "failures": [{"check": "exists",
                               "detail": "asset_graph is empty"}],
                 "validators_run": ["test_asset_graph"]}
-    answer = runner.ask(
-        VALIDATE_ASSET_GRAPH_PROMPT + json.dumps(
-            graph, ensure_ascii=False, separators=(",", ":")),
-        max_new_tokens=2048, stop_after_json_object=True)
-    raw = getattr(answer, "text", str(answer))
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-    try:
-        value = _parse_one_object(text, stage="validator")
-    except Exception:
-        return {"passed": False,
-                "failures": [{"check": "parse", "detail": raw[:200]}],
-                "validators_run": ["test_asset_graph"]}
-    return {"passed": bool(value.get("passed")),
-            "failures": value.get("failures") or [],
+    failures = validate_asset_graph(graph)
+    return {"passed": not failures, "failures": failures,
             "validators_run": ["test_asset_graph"]}
