@@ -28,9 +28,42 @@ def run_m3_test(validator_name: str, workspace: Workspace,
                 runner) -> dict[str, Any]:
     if validator_name == "test_shot_plan":
         return _test_shot_plan(workspace)
+    if validator_name == "test_storyboard_dependencies":
+        return _test_storyboard_dependencies(workspace)
     if validator_name == "test_storyboard_frame_pair":
         return _test_frame_pair(workspace, runner)
     raise KeyError(f"unknown m3 validator: {validator_name}")
+
+
+def _test_storyboard_dependencies(workspace: Workspace) -> dict[str, Any]:
+    """逐 shot 依赖清单：全 COMMIT → READY；否则 BLOCKED（带缺失列表）。
+
+    只读诊断型 validator（不 gate commit——它验收的是"就绪度"这个
+    事实本身，BLOCKED 就是它的正确输出）。
+    """
+    from src.agentic_video.storyboard.skills import shot_dependencies
+    plan = workspace.read_artifact("shot_plan")
+    if not plan:
+        return {"passed": False, "failures": [{"check": "exists",
+                "detail": "shot_plan is empty"}],
+                "validators_run": ["test_storyboard_dependencies"]}
+    blocked: list[dict[str, str]] = []
+    ready = 0
+    for shot in plan.get("shots") or []:
+        shot_id = str(shot.get("shot_id") or "?")
+        missing = [d["artifact"] for d in
+                   shot_dependencies(shot, workspace)
+                   if d["status"] != "committed"]
+        if missing:
+            blocked.append({"shot_id": shot_id,
+                            "check": "dependency_gate",
+                            "detail": f"BLOCKED missing: {missing}"})
+        else:
+            ready += 1
+    total = len(plan.get("shots") or [])
+    return {"passed": not blocked, "failures": blocked,
+            "validators_run": ["test_storyboard_dependencies"],
+            "detail": f"{ready}/{total} shots READY"}
 
 
 def _test_shot_plan(workspace: Workspace) -> dict[str, Any]:

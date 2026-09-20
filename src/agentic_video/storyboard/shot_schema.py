@@ -6,15 +6,48 @@ M3-B 才基于已 COMMIT 的资产生成 start/end frame pair。
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 SHOT_PLAN_SCHEMA_VERSION = "shot_plan_v1"
 
 SHOT_SIZES = ("extreme_closeup", "closeup", "medium", "medium_full",
               "full", "wide")
+CAMERA_ANGLES = ("eye_level", "high", "low", "overhead", "bird_eye",
+                 "dutch")
 CAMERA_MOVEMENTS = ("static", "push_in", "pull_back", "pan_left",
                     "pan_right", "tilt_up", "tilt_down", "tracking",
                     "handheld")
+
+
+def _state_payload(state: Any) -> tuple[bool, Any]:
+    """state 兼容 str / per-entity dict（{"C0.pose": "..."}）。
+    返回 (is_dict, normalized_json_str)。dict 键按 entity.attr 命名。"""
+    if isinstance(state, dict):
+        return True, json.dumps(state, ensure_ascii=False, sort_keys=True)
+    return False, str(state or "")
+
+
+def _state_has_movement(shot: dict[str, Any]) -> tuple[bool, str]:
+    """start→end 是否构成推进：str 模式不等即可；dict 模式至少一个
+    entity 态键的值变化（或新增键）。"""
+    _, start_norm = _state_payload(shot.get("start_state"))
+    _, end_norm = _state_payload(shot.get("end_state"))
+    if not start_norm or not end_norm:
+        return False, "start_state/end_state empty"
+    if start_norm == end_norm:
+        return False, "end_state equals start_state (no movement)"
+    if isinstance(shot.get("start_state"), dict):
+        try:
+            start_d = json.loads(start_norm)
+            end_d = json.loads(end_norm)
+        except Exception:  # noqa: BLE001
+            return False, "state dict not valid JSON"
+        changed = [k for k in set(start_d) | set(end_d)
+                   if start_d.get(k) != end_d.get(k)]
+        if not changed:
+            return False, "no entity state key changed"
+    return True, ""
 
 
 def _screenplay_beats(screenplay: dict[str, Any]) -> dict[str, str]:
@@ -91,16 +124,37 @@ def validate_shot_plan(plan: dict[str, Any],
                 failures.append({"shot_id": shot_id, "check": "asset_ref",
                                  "detail": f"unknown asset {ref!r}"})
 
-        # 因果推进：start≠end 且都非空
-        start = str(shot.get("start_state") or "")
-        end = str(shot.get("end_state") or "")
-        if not start or not end:
+        # 因果推进（兼容 str / per-entity dict state）
+        moved, why = _state_has_movement(shot)
+        if not moved:
             failures.append({"shot_id": shot_id, "check": "causality",
-                             "detail": "start_state/end_state empty"})
-        elif start.strip() == end.strip():
-            failures.append({"shot_id": shot_id, "check": "causality",
-                             "detail": "end_state equals start_state "
-                                       "(no narrative movement)"})
+                             "detail": why})
+        else:
+            # dict state 的 entity 前缀必须存在于 asset_graph
+            for key in ("start_state", "end_state"):
+                is_dict, _ = _state_payload(shot.get(key))
+                if is_dict:
+                    for entity in (shot.get(key) or {}):
+                        eid = str(entity).split(".")[0]
+                        if eid not in asset_ids:
+                            failures.append({
+                                "shot_id": shot_id,
+                                "check": "state_entity_ref",
+                                "detail": f"unknown entity {eid!r} "
+                                          f"in {key}"})
+
+        # camera 词表
+        camera = shot.get("camera") or {}
+        if camera.get("shot_size") not in SHOT_SIZES:
+            failures.append({"shot_id": shot_id, "check": "shot_size",
+                             "detail": f"invalid: {camera.get('shot_size')}"})
+        angle = camera.get("angle")
+        if angle is not None and angle not in CAMERA_ANGLES:
+            failures.append({"shot_id": shot_id, "check": "camera_angle",
+                             "detail": f"invalid: {angle}"})
+        if camera.get("movement") not in CAMERA_MOVEMENTS:
+            failures.append({"shot_id": shot_id, "check": "movement",
+                             "detail": f"invalid: {camera.get('movement')}"})
 
         # 时长预算
         budget = shot.get("duration_budget_s")
@@ -112,15 +166,6 @@ def validate_shot_plan(plan: dict[str, Any],
         else:
             total_min += float(budget[0])
             total_max += float(budget[1])
-
-        # camera 词表
-        camera = shot.get("camera") or {}
-        if camera.get("shot_size") not in SHOT_SIZES:
-            failures.append({"shot_id": shot_id, "check": "shot_size",
-                             "detail": f"invalid: {camera.get('shot_size')}"})
-        if camera.get("movement") not in CAMERA_MOVEMENTS:
-            failures.append({"shot_id": shot_id, "check": "movement",
-                             "detail": f"invalid: {camera.get('movement')}"})
 
         # 单镜事件密度（一镜塞过多事件=剪辑失能）
         events = shot.get("visual_events") or []
@@ -156,14 +201,20 @@ SHOT_PLAN_FORMAT_SPEC = """{
      "props": ["P01"],
      "wardrobe": ["W01"],
      "motion_refs": ["A01"],
-     "camera": {"shot_size": "medium", "movement": "push_in"},
-     "start_state": "镜头开始时的可观察状态",
-     "end_state": "镜头结束时的可观察状态（必须≠start）",
+     "camera": {"shot_size": "medium", "angle": "eye_level",
+                "movement": "push_in"},
+     "start_state": {"C0.pose": "站姿放松，手机垂在身侧",
+                     "P01.state": "屏幕熄灭"},
+     "end_state": {"C0.pose": "抬手看屏幕，身体前倾",
+                   "P01.state": "屏幕亮起显示消息"},
      "visual_events": ["至多3个可拍事件"]}
   ]
 }
 必填：schema_version="shot_plan_v1"；shot_id/beat_id 唯一且 beat 存在
-于剧本；所有资产 id 必须存在于 asset_graph；duration_budget_s=[min,max]
-且 min≤max；shot_size ∈ extreme_closeup|closeup|medium|medium_full|full|
-wide；movement ∈ static|push_in|pull_back|pan_left|pan_right|tilt_up|
-tilt_down|tracking|handheld；visual_events ≤ 3。"""
+于剧本；所有资产 id 必须存在于 asset_graph（含 state dict 的 entity
+前缀）；start/end_state 推荐用 per-entity dict（键名 "<asset_id>.<属性>"），
+至少一个 entity 态必须变化（也接受非空字符串但必须不等）；
+duration_budget_s=[min,max] 且 min≤max；shot_size ∈ extreme_closeup|
+closeup|medium|medium_full|full|wide；angle（可选）∈ eye_level|high|low|
+overhead|bird_eye|dutch；movement ∈ static|push_in|pull_back|pan_left|
+pan_right|tilt_up|tilt_down|tracking|handheld；visual_events ≤ 3。"""

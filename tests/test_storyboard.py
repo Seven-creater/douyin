@@ -35,6 +35,8 @@ ASSET_GRAPH = {
         {"asset_id": "C0", "type": "character", "tier": "A",
          "immutable": {"face": "oval"}, "status": "active"},
         {"asset_id": "L01", "type": "location", "tier": "A",
+         "status": "active"},
+        {"asset_id": "P01", "type": "prop", "tier": "B",
          "status": "active"}]}
 
 
@@ -301,6 +303,130 @@ def test_agent_loop_survives_blocked(tmp_path: Path) -> None:
 
 
 # ---- 帧对 L1 ----
+
+def test_dict_state_causality_and_entity_refs() -> None:
+    """per-entity dict state：至少一键变化；entity 前缀必须存在。"""
+    plan = _plan([
+        _shot(start_state={"C0.pose": "stand", "P01.state": "off"},
+              end_state={"C0.pose": "lean in", "P01.state": "on"},
+              duration_budget_s=[5.0, 6.5]),
+        _shot("SH02", "B2",
+              duration_budget_s=[5.0, 6.5],
+              start_state={"C0.pose": "a"}, end_state={"C0.pose": "b"}),
+        _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+              start_state="a", end_state="b")])
+    assert validate_shot_plan(plan, SCREENPLAY, ASSET_GRAPH) == []
+
+    # 无变化的 dict state
+    bad = _plan([_shot(start_state={"C0.pose": "x"},
+                       end_state={"C0.pose": "x"},
+                       duration_budget_s=[5.0, 6.5]),
+                 _shot("SH02", "B2", duration_budget_s=[5.0, 6.5],
+                       start_state="a", end_state="b"),
+                 _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+                       start_state="a", end_state="b")])
+    failures = validate_shot_plan(bad, SCREENPLAY, ASSET_GRAPH)
+    assert any(f["check"] == "causality" for f in failures)
+
+    # 未知 entity 前缀
+    bad2 = _plan([_shot(start_state={"C9.pose": "a"},
+                        end_state={"C9.pose": "b"},
+                        duration_budget_s=[5.0, 6.5]),
+                  _shot("SH02", "B2", duration_budget_s=[5.0, 6.5],
+                        start_state="a", end_state="b"),
+                  _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+                        start_state="a", end_state="b")])
+    failures = validate_shot_plan(bad2, SCREENPLAY, ASSET_GRAPH)
+    assert any(f["check"] == "state_entity_ref" for f in failures)
+
+
+def test_camera_angle_vocab() -> None:
+    plan = _plan([_shot(camera={"shot_size": "medium",
+                                "angle": "warp_speed",
+                                "movement": "static"}),
+                  _shot("SH02", "B2", duration_budget_s=[5.0, 6.5],
+                        start_state="a", end_state="b"),
+                  _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+                        start_state="a", end_state="b")])
+    failures = validate_shot_plan(plan, SCREENPLAY, ASSET_GRAPH)
+    assert any(f["check"] == "camera_angle" for f in failures)
+
+
+def test_storyboard_dependencies_validator(tmp_path: Path) -> None:
+    """READY/BLOCKED 清单：C0 committed + location 未产 → 仅无地点镜 READY。"""
+    ws = _ws(tmp_path / "deps", with_c0="committed")
+    plan = _plan([_shot(), _shot("SH02", "B2",
+                                 narrative_role="counter_evidence",
+                                 location=None,
+                                 duration_budget_s=[5.0, 6.5],
+                                 start_state="a", end_state="b"),
+                  _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+                        start_state="a", end_state="b")])
+    ws.write_draft("shot_plan", plan)
+    report = run_test("test_storyboard_dependencies", ws, runner=None)
+    assert not report["passed"]
+    assert "1/3 shots READY" in report["detail"]
+    blocked_ids = {f["shot_id"] for f in report["failures"]}
+    assert blocked_ids == {"SH01", "SH03"}  # L01 未产 → 带 location 的全 BLOCKED
+
+
+def test_pilot_shot_prefers_simpler(tmp_path: Path) -> None:
+    """同缺资产时选人物+道具更少的镜头。"""
+    ws = _ws(tmp_path / "simple", with_c0="committed")
+    plan = _plan([_shot(), _shot("SH02", "B2",
+                                 narrative_role="counter_evidence",
+                                 location=None, props=["P01", "P02"],
+                                 duration_budget_s=[5.0, 6.5],
+                                 start_state="a", end_state="b"),
+                  _shot("SH03", "B3", location=None,
+                        narrative_role="counter_evidence",
+                        duration_budget_s=[5.0, 6.5],
+                        start_state="a", end_state="b")])
+    # P01/P02 不在 fixture 资产表里会挂校验——但选镜只看复杂度
+    assert pick_pilot_shot(plan, ws)["shot_id"] == "SH03"
+
+
+def test_acceptance_report(tmp_path: Path) -> None:
+    """验收报告：视图状态/修复史/recommended refs/back 修复降级。"""
+    from src.agentic_video.asset_studio.acceptance import (
+        build_acceptance_report)
+    ws = _ws(tmp_path / "acc", with_c0="committed")
+    # 伪造 master/views/final 三层 manifest + 一次 profile 修复 trace
+    ws.write_draft("asset:C0_master", {
+        "identity_description": "a woman",
+        "master": {"file": "03_asset_studio/files/C0_master_front_v1.png",
+                   "sha": "m1", "generator": "qwen-image"}})
+    ws.record_dependency_snapshot("asset:C0_master")
+    ws.commit("asset:C0_master")
+    views = {"views": {v: {"file": f"03_asset_studio/files/C0_{v}_v1.png",
+                           "sha4k": f"{v}-sha", "file4k":
+                           f"03_asset_studio/files/C0_{v}_v1.png"}
+                       for v in ("front", "profile", "back", "face")}}
+    ws.write_draft("asset:C0_views", views)
+    ws.record_dependency_snapshot("asset:C0_views")
+    ws.commit("asset:C0_views")
+    ws.write_draft("asset:C0", {
+        "identity_description": "a woman",
+        "views_4k": {v: {"file": views["views"][v]["file4k"],
+                         "sha": f"{v}-sha"}
+                     for v in ("front", "profile", "back", "face")},
+        "sheet": {"file": "03_asset_studio/files/C0_sheet_v1.png",
+                  "sha": "s1"}})
+    ws.record_dependency_snapshot("asset:C0")
+    ws.commit("asset:C0")
+    ws.record_trace(5, {"skill": "repair_character_view",
+                        "target": "profile"}, {"target": "profile"},
+                    {"passed": True})
+
+    report = build_acceptance_report(ws, "C0")
+    assert report["overall"] == "committed"
+    assert report["views"]["profile"]["repair_count"] == 1
+    assert report["views"]["front"]["repair_count"] == 0
+    rec = report["recommended_reference_roles"]
+    assert rec["face_identity"] == ["face", "front"]
+    assert rec["side_body"] == ["profile", "front"]
+    assert "back(repaired,verify)" not in rec["back_body"]  # back 未修过
+
 
 def test_inspect_never_commits(tmp_path: Path) -> None:
     """M3-A dry-run 教训：无 validator 的只读动作不得触发 commit。"""

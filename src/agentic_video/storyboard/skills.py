@@ -22,8 +22,9 @@ beats，每个 beat 有 purpose/visual_action/editing_role）+ Creative DNA
 编译成 Shot Plan（22 秒总量约 6-10 镜）。要求：
 1. 每个 beat 至少一个 shot 承载；counter_evidence/decisive_action
    beat 优先给决定性镜头（closeup 或 push_in）
-2. start_state/end_state 必须可观察、可拍，且构成明确状态推进
-   （end ≠ start）
+2. start_state/end_state 必须可观察、可拍，且构成明确状态推进：
+   推荐用 per-entity dict（键名 "<asset_id>.<属性>"，如
+   "C0.pose"/"P01.state"），至少一个 entity 态变化
 3. 所有资产 id 必须来自 asset_graph；特写镜头（closeup/
    extreme_closeup 且不依赖场景）location 可为 null
 4. duration_budget_s 各镜总和落在剧本 target_duration ±20%
@@ -75,27 +76,46 @@ def select_references(shot: dict[str, Any], workspace: Workspace
     return refs, missing
 
 
+def shot_dependencies(shot: dict[str, Any], workspace: Workspace
+                      ) -> list[dict[str, str]]:
+    """单 shot 的依赖清单（人物视图 + location master）。"""
+    deps: list[dict[str, str]] = []
+    for cid in shot.get("characters") or []:
+        art = f"asset:{cid}_views"
+        deps.append({"artifact": art,
+                     "status": workspace.get_status(art)})
+    loc = shot.get("location")
+    if loc:
+        art = f"asset:{loc}"
+        deps.append({"artifact": art,
+                     "status": workspace.get_status(art)})
+    return deps
+
+
 def pick_pilot_shot(plan: dict[str, Any], workspace: Workspace
                     ) -> dict[str, Any]:
-    """M3-B 单 Shot Pilot 选镜：优先 narrative_role=counter_evidence，
-    其次 decisive_action，按 missing 资产最少排序。"""
+    """M3-B 单 Shot Pilot 选镜：优先 counter_evidence/decisive_action，
+    排序键 = (缺资产数, 复杂度[人物+道具数], 角色权重)——简单且关键。"""
     rank = {"counter_evidence": 0, "decisive_action": 1}
     best: dict[str, Any] | None = None
-    best_key = (99, 99)
+    best_key = (99, 99, 99)
     for shot in plan.get("shots") or []:
         role = str(shot.get("narrative_role") or "")
         if role not in rank:
             continue
         _, missing = select_references(shot, workspace)
-        key = (len(missing), rank[role])
+        complexity = len(shot.get("characters") or []) + len(
+            shot.get("props") or [])
+        key = (len(missing), complexity, rank[role])
         if best is None or key < best_key:
             best, best_key = shot, key
     if best is None:
         shots = plan.get("shots") or []
         if not shots:
             raise ValueError("shot_plan has no shots")
-        best = min(shots, key=lambda s: len(
-            select_references(s, workspace)[1]))
+        best = min(shots, key=lambda s: (
+            len(select_references(s, workspace)[1]),
+            len(s.get("characters") or []) + len(s.get("props") or [])))
     return best
 
 
