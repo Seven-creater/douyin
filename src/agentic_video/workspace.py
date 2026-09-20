@@ -247,6 +247,8 @@ class Workspace:
         # 03_asset_studio/<name>/（每 artifact 独立子目录防版本文件撞名）
         if name.startswith("asset:"):
             return self.root / "03_asset_studio" / name[len("asset:"):]
+        if name in ("shot_plan", "storyboard_frames"):
+            return self.root / "04_storyboard" / name
         mapping = {
             "creative_dna": "00_reference",
             "screenplay": "01_screenplay",

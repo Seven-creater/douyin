@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 from src.agentic_video.skills import CHOOSE_ACTION_PROMPT, SkillRegistry
+from src.agentic_video.skills.registry import SkillBlocked
 from src.agentic_video.workspace import Workspace
 
 
@@ -97,13 +98,27 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
         if last_failure:
             kwargs["test_failures"] = last_failure.get("failures") or []
             kwargs["target"] = action.get("target") or ""
-        result = registry.execute(action, workspace, **kwargs)
+        result = None
+        try:
+            result = registry.execute(action, workspace, **kwargs)
+        except SkillBlocked as blocked:
+            # 依赖门拦截（BLOCKED ≠ 崩溃）：落 trace，循环继续
+            result = {"artifact": None, "action": "blocked",
+                      "blocked_reason": str(blocked)}
         artifact_name = str(result.get("artifact") or "")
 
         # 测试（Actor ≠ Test）——validator 归属于本次 skill
         # （M2 多 skill 共享输出 artifact，按 artifact 反查会猜错）
-        test_report = _run_validator_for_action(
-            action, registry, workspace, controller_runner)
+        if result.get("action") == "blocked":
+            test_report = {"passed": False,
+                           "failures": [{"check": "dependency_gate",
+                                         "detail": str(
+                                             result.get("blocked_reason")
+                                         )[:200]}],
+                           "validators_run": []}
+        else:
+            test_report = _run_validator_for_action(
+                action, registry, workspace, controller_runner)
 
         # 落档 trace
         workspace.record_trace(step, action, result, test_report)

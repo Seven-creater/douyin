@@ -12,6 +12,18 @@ from typing import Any, Callable
 from src.agentic_video.workspace import Workspace
 
 
+class SkillBlocked(RuntimeError):
+    """技能执行被依赖门拦截（如 storyboard 资产未 COMMIT）。
+
+    Blocked 不是崩溃：Agent 落 trace 后继续循环（选别的动作/停）。
+    """
+
+    def __init__(self, reason_code: str, detail: str = "") -> None:
+        super().__init__(f"{reason_code}:{detail}")
+        self.reason_code = reason_code
+        self.detail = detail
+
+
 @dataclass
 class SkillSpec:
     name: str

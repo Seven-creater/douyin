@@ -41,6 +41,9 @@ def run_test(validator_name: str, workspace: Workspace, runner
                           "test_views_4k", "test_character_asset"):
         from src.agentic_video.asset_studio.validators import run_m2_test
         return run_m2_test(validator_name, workspace, runner)
+    if validator_name in ("test_shot_plan", "test_storyboard_frame_pair"):
+        from src.agentic_video.storyboard.validators import run_m3_test
+        return run_m3_test(validator_name, workspace, runner)
     return {"passed": True, "failures": [],
             "validators_run": [validator_name], "detail": "unknown validator, auto-pass"}
 
