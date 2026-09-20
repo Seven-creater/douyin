@@ -38,15 +38,20 @@ def run_test(validator_name: str, workspace: Workspace, runner
         return _test_asset_graph(workspace, runner)
     if validator_name in ("test_character_master",
                           "test_character_multiview",
-                          "test_views_4k", "test_character_asset"):
+                          "test_views_4k", "test_character_asset",
+                          "test_asset_approved"):
         from src.agentic_video.asset_studio.validators import run_m2_test
         return run_m2_test(validator_name, workspace, runner)
     if validator_name in ("test_shot_plan", "test_storyboard_frame_pair",
                           "test_storyboard_dependencies"):
         from src.agentic_video.storyboard.validators import run_m3_test
         return run_m3_test(validator_name, workspace, runner)
-    return {"passed": True, "failures": [],
-            "validators_run": [validator_name], "detail": "unknown validator, auto-pass"}
+    # P0-3：未知 validator 一律 fail-closed（假绿入口封死）——
+    # typo 的 validator 名必须变成可见失败，而不是静默放行
+    return {"passed": False,
+            "failures": [{"check": "validator_registry",
+                          "detail": f"unknown validator: {validator_name}"}],
+            "validators_run": [validator_name]}
 
 
 def _test_creative_dna(workspace: Workspace) -> dict[str, Any]:
@@ -93,8 +98,7 @@ def _test_screenplay(workspace: Workspace, runner) -> dict[str, Any]:
 
 
 def _test_asset_graph(workspace: Workspace, runner) -> dict[str, Any]:
-    """P0.4 修复：完全确定性校验（Run A-v2 教训——Omni 语义层会与 schema
-    层互相矛盾导致死循环）。immutable 含 face/body_build 是事实判定。"""
+    """确定性校验唯一权威 + P1-4 剧本完整性契约（有剧本时）。"""
     from src.agentic_video.skills.asset_schema import validate_asset_graph
     graph = workspace.read_artifact("asset_graph")
     if not graph:
@@ -102,6 +106,7 @@ def _test_asset_graph(workspace: Workspace, runner) -> dict[str, Any]:
                 "failures": [{"check": "exists",
                               "detail": "asset_graph is empty"}],
                 "validators_run": ["test_asset_graph"]}
-    failures = validate_asset_graph(graph)
+    screenplay = workspace.read_artifact("screenplay")
+    failures = validate_asset_graph(graph, screenplay or None)
     return {"passed": not failures, "failures": failures,
             "validators_run": ["test_asset_graph"]}

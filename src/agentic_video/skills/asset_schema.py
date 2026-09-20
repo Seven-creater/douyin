@@ -11,15 +11,52 @@ from typing import Any
 ASSET_GRAPH_SCHEMA_VERSION = "asset_graph_v1"
 
 ASSET_TYPES = ("character", "location", "prop", "wardrobe", "motion",
-               "style", "audio", "graphics", "creature")
+               "style", "audio", "graphics", "creature", "vehicle")
 TIERS = ("A", "B", "C")
 
 
-def validate_asset_graph(graph: dict[str, Any]) -> list[dict[str, str]]:
+def _required_assets(screenplay: dict[str, Any]
+                     ) -> dict[str, set[str]]:
+    """从剧本确定性收集 required_asset_ids（P1-4 completeness）。
+
+    返回 {asset_id: {允许的 type 集合}}：
+    - characters → {character}
+    - location → {location}
+    - props → {prop}
+    - motion_refs → {motion}
+    """
+    required: dict[str, set[str]] = {}
+    for char in screenplay.get("characters") or []:
+        cid = str(char.get("id") or "")
+        if cid:
+            required.setdefault(cid, set()).add("character")
+    for scene in screenplay.get("scenes") or []:
+        loc = str(scene.get("location") or "")
+        if loc:
+            required.setdefault(loc, set()).add("location")
+        for beat in scene.get("beats") or []:
+            pr = beat.get("production_requirements") or {}
+            for cid in pr.get("characters") or []:
+                required.setdefault(str(cid), set()).add("character")
+            loc = str(pr.get("location") or "")
+            if loc:
+                required.setdefault(loc, set()).add("location")
+            for pid in pr.get("props") or []:
+                required.setdefault(str(pid), set()).add("prop")
+            for mid in pr.get("motion_refs") or []:
+                required.setdefault(str(mid), set()).add("motion")
+    return required
+
+
+def validate_asset_graph(graph: dict[str, Any],
+                         screenplay: dict[str, Any] | None = None,
+                         ) -> list[dict[str, str]]:
     """Deterministic schema 校验（唯一权威——无 Omni 语义二次判定）。
 
     返回 failures 列表（空=过）。检查：必填字段/asset_id 唯一/tier 合法/
     character immutable 必含 identity/face/body_build/tier_A 覆盖检查。
+    提供 screenplay 时追加 P1-4 completeness：剧本 required 资产必须
+    全部存在且 type 匹配（确定性契约检查，非 Omni 自由评价）。
     Run A-v2 教训：确定性 schema 通过后不得再让 Omni 重新猜"immutable
     应含什么"——两个 verifier 会互相矛盾导致死循环。
     """
@@ -86,6 +123,24 @@ def validate_asset_graph(graph: dict[str, Any]) -> list[dict[str, str]]:
     if not has_tier_a:
         failures.append({"asset_id": "_root", "check": "tier_coverage",
                          "detail": "at least one Tier A asset required"})
+
+    # P1-4 completeness：剧本 required 资产覆盖 + type 匹配（确定性）
+    if screenplay:
+        by_id = {str(a.get("asset_id")): a for a in assets
+                 if a.get("asset_id")}
+        for aid, allowed_types in _required_assets(screenplay).items():
+            asset = by_id.get(aid)
+            if asset is None:
+                failures.append({"asset_id": aid,
+                                 "check": "completeness",
+                                 "detail": "required by screenplay but "
+                                           "missing in asset_graph"})
+            elif asset.get("type") not in allowed_types:
+                failures.append({"asset_id": aid,
+                                 "check": "type_mismatch",
+                                 "detail": f"expected one of "
+                                           f"{sorted(allowed_types)}, "
+                                           f"got {asset.get('type')}"})
 
     return failures
 

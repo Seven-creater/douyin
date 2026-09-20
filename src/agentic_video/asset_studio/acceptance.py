@@ -43,49 +43,74 @@ def _repair_counts(workspace: Workspace) -> dict[str, int]:
 
 def build_acceptance_report(workspace: Workspace,
                             asset_id: str = "C0") -> dict[str, Any]:
-    """生成资产验收报告（不落盘；调用方决定写哪）。"""
+    """生成资产验收报告（不落盘；调用方决定写哪）。
+
+    夜链产物 = candidate（机器验收完、待人审）；final 只有人审
+    approve 后才存在。
+    """
     final = workspace.read_artifact(f"asset:{asset_id}") or {}
+    candidate = workspace.read_artifact(
+        f"asset:{asset_id}_candidate") or {}
     views_manifest = workspace.read_artifact(f"asset:{asset_id}_views") or {}
     master = workspace.read_artifact(f"asset:{asset_id}_master") or {}
     repairs = _repair_counts(workspace)
-    committed = workspace.get_status(f"asset:{asset_id}") == "committed"
+
+    final_status = workspace.effective_status(f"asset:{asset_id}")
+    candidate_status = workspace.effective_status(
+        f"asset:{asset_id}_candidate")
+    if final_status == "committed":
+        overall = "committed"
+    elif candidate_status == "committed":
+        overall = "machine_validated_awaiting_human"
+    else:
+        overall = "not_ready"
 
     views_report: dict[str, Any] = {}
     for view, entry in (views_manifest.get("views") or {}).items():
         sha4k = entry.get("sha4k") or entry.get("sha")
         views_report[view] = {
-            "status": "pass" if committed else "pending",
+            "status": "pass" if overall != "not_ready" else "pending",
             "sha": sha4k,
             "file": entry.get("file4k") or entry.get("file"),
-            "repair_count": repairs.get(view, 0)}
+            "repair_count": repairs.get(view, 0),
+            "repaired": repairs.get(view, 0) > 0}
 
-    # 推荐参考角色：按可用性裁剪候选序；修复过的视图标注
+    # 推荐参考角色：结构化 metadata（P1-5——view id 永远合法，
+    # 修复史/降级用显式字段表达，Reference Router 不会读到伪 ID）
     available = set(views_report)
     repaired = {v for v, c in repairs.items() if c > 0}
-    recommended: dict[str, list[str]] = {}
+    recommended: dict[str, dict[str, Any]] = {}
     for role, candidates in ROLE_VIEW_CANDIDATES.items():
         usable = [v for v in candidates if v in available]
-        if usable:
-            recommended[role] = usable
-    # 背面视图漂移风险 → 明示降级（back 修过 → 标记 fallback 到 front）
-    if "back" in repaired and "back_body" in recommended:
-        recommended["back_body"] = ["back(repaired,verify)", "front"]
+        if not usable:
+            continue
+        entry: dict[str, Any] = {"primary": [usable[0]],
+                                 "fallback": usable[1:],
+                                 "requires_extra_verification": False,
+                                 "note": ""}
+        if usable[0] in repaired:
+            entry["requires_extra_verification"] = True
+            entry["note"] = f"{usable[0]} view was repaired — verify"
+        recommended[role] = entry
 
     return {
         "asset_id": asset_id,
-        "overall": "committed" if committed else "not_committed",
-        "identity_description": final.get("identity_description")
+        "overall": overall,
+        "identity_description": (final or candidate).get(
+            "identity_description")
         or master.get("identity_description"),
         "master": {
             "status": "pass" if master else "missing",
             "sha": (master.get("master") or {}).get("sha"),
             "generator": (master.get("master") or {}).get("generator")},
         "views": views_report,
-        "identity_consistency": "pass" if committed else "pending",
-        "human_review": "pending",
+        "identity_consistency": "pass" if overall != "not_ready"
+        else "pending",
+        "human_review": "approved" if final else "pending",
         "repair_history": repairs,
         "recommended_reference_roles": recommended,
-        "identity_sheet": (final.get("sheet") or {}).get("file"),
+        "identity_sheet": ((candidate or final).get("sheet")
+                           or {}).get("file"),
     }
 
 

@@ -24,6 +24,14 @@ class SkillBlocked(RuntimeError):
         self.detail = detail
 
 
+class SkillExecutionError(RuntimeError):
+    """真实工具运行时异常（CUDA OOM / TypeError / worker 死亡等）。
+
+    agent_loop 捕获后转成 tool_runtime 失败进 trace——环境错误必须
+    是 Observation（可诊断），而不是杀掉整个进程。
+    """
+
+
 @dataclass
 class SkillSpec:
     name: str
@@ -42,11 +50,13 @@ class SkillSpec:
 
         rsplit：artifact 名本身可含冒号（M2 的 "asset:C0_master:committed"
         → artifact="asset:C0_master", required="committed"）。
+        用 effective_status（P0-6）：上游 stale 时下游 skill 不可运行。
         """
         for pre in self.preconditions:
             artifact, _, required = pre.rpartition(":")
             if not artifact:
                 artifact, required = pre, "committed"
+            status = workspace.effective_status(artifact)
             status = workspace.get_status(artifact)
             if required == "committed" and status != "committed":
                 return False, f"precondition {pre} unmet ({status})"
@@ -90,15 +100,35 @@ class SkillRegistry:
         return result
 
     def validate_action(self, action: dict[str, Any],
-                        workspace: Workspace) -> None:
-        """Harness enforcement：skill 存在、前置满足、参数合法。"""
+                        workspace: Workspace, *,
+                        budget: str | None = None,
+                        allowed_skill_names: set[str] | None = None,
+                        ) -> None:
+        """Harness enforcement（P0-4：预算/可运行集是硬门非提示）。
+
+        - skill 存在
+        - 在当前 runnable 集内（Omni 幻觉的 skill 一律拒）
+        - cost_class 与 budget 兼容
+        - 前置条件满足（effective_status）
+        违规抛 SkillBlocked（进 trace，不杀进程）。
+        """
         skill_name = str(action.get("skill") or "")
         if skill_name not in self.skills:
-            raise ValueError(f"unknown skill: {skill_name}")
+            raise SkillBlocked("unknown_skill", skill_name)
         spec = self.skills[skill_name]
+        if allowed_skill_names is not None and \
+                skill_name not in allowed_skill_names:
+            raise SkillBlocked(
+                "action_not_runnable",
+                f"{skill_name} is not in the current runnable set "
+                f"(state/budget)")
+        if budget == "cheap_text" and spec.cost_class == "expensive_gpu":
+            raise SkillBlocked(
+                "budget_gate",
+                f"{skill_name} is expensive_gpu, budget={budget}")
         can, reason = spec.can_run(workspace)
         if not can:
-            raise ValueError(f"precondition failed: {reason}")
+            raise SkillBlocked("precondition", reason)
 
     def execute(self, action: dict[str, Any],
                 workspace: Workspace, **kwargs) -> dict[str, Any]:

@@ -78,7 +78,7 @@ class _Runner:
 
 
 def _ws(tmp_path: Path, *, with_c0: str = "committed") -> Workspace:
-    """committed 剧本链 + 可选 C0 视图资产（with_c0: committed/draft/None）。"""
+    """committed 剧本链 + 可选 C0 final 资产（with_c0: committed/draft/None）。"""
     ws = Workspace(tmp_path / "run")
     ws.state["goal"] = {"target_artifact": "storyboard_frames",
                         "required_status": "committed"}
@@ -93,17 +93,17 @@ def _ws(tmp_path: Path, *, with_c0: str = "committed") -> Workspace:
     if with_c0:
         files = ws.root / "03_asset_studio" / "files"
         files.mkdir(parents=True, exist_ok=True)
-        views = {}
+        views_4k = {}
         for view in ("front", "face"):
             p = files / f"C0_{view}_v1.png"
             Image.new("RGB", (108, 192), (120, 120, 120)).save(p)
-            views[view] = {"file": f"03_asset_studio/files/{p.name}",
-                           "file4k": f"03_asset_studio/files/{p.name}"}
-        ws.write_draft("asset:C0_views", {"asset_id": "C0",
-                                          "views": views})
-        ws.record_dependency_snapshot("asset:C0_views")
+            views_4k[view] = {"file": f"03_asset_studio/files/{p.name}",
+                              "sha": f"{view}-sha"}
+        ws.write_draft("asset:C0", {"asset_id": "C0",
+                                    "views_4k": views_4k})
+        ws.record_dependency_snapshot("asset:C0")
         if with_c0 == "committed":
-            ws.commit("asset:C0_views")
+            ws.commit("asset:C0")
     return ws
 
 
@@ -207,32 +207,6 @@ def test_repair_injects_failures_and_patches_locally(
     assert run_test("test_shot_plan", ws, runner=runner)["passed"]
 
 
-def test_dependency_gate_blocks_without_committed_assets(
-        tmp_path: Path) -> None:
-    """核心：C0 未 COMMIT（或 location 缺）→ BLOCKED，绝不烧 GPU。"""
-    for c0_state in ("draft", None):
-        ws = _ws(tmp_path / f"case_{c0_state}", with_c0=c0_state)
-        plan = _plan([_shot(), _shot("SH02", "B2",
-                                     narrative_role="counter_evidence",
-                                     location=None,
-                                     start_state="a", end_state="b"),
-                      _shot("SH03", "B3", start_state="a",
-                            end_state="b")])
-        ws.write_draft("shot_plan", plan)
-        ws.record_dependency_snapshot("shot_plan")
-        ws.commit("shot_plan")
-        registry = build_m3_registry(runner=None)
-        try:
-            registry.execute(
-                {"skill": "generate_storyboard_frame",
-                 "target": "SH02"}, ws)
-            raise AssertionError("must be blocked")
-        except SkillBlocked as blocked:
-            assert "STORYBOARD:SH02 BLOCKED" in str(blocked)
-            assert "asset:C0_views" in str(blocked) or \
-                "backend" in str(blocked)
-
-
 def test_gate_blocks_when_location_not_committed(tmp_path: Path) -> None:
     """C0 已 COMMIT 但 L01 未产 → 带 location 的 shot BLOCKED。"""
     ws = _ws(tmp_path / "loc", with_c0="committed")
@@ -263,6 +237,32 @@ def test_router_picks_face_for_closeup(tmp_path: Path) -> None:
     refs2, _ = select_references(
         _shot(location=None), ws)
     assert refs2 == ["03_asset_studio/files/C0_front_v1.png"]
+
+
+def test_dependency_gate_blocks_without_committed_assets(
+        tmp_path: Path) -> None:
+    """核心：C0 未 COMMIT（或 location 缺）→ BLOCKED，绝不烧 GPU。"""
+    for c0_state in ("draft", None):
+        ws = _ws(tmp_path / f"case_{c0_state}", with_c0=c0_state)
+        plan = _plan([_shot(), _shot("SH02", "B2",
+                                     narrative_role="counter_evidence",
+                                     location=None,
+                                     start_state="a", end_state="b"),
+                      _shot("SH03", "B3", start_state="a",
+                            end_state="b")])
+        ws.write_draft("shot_plan", plan)
+        ws.record_dependency_snapshot("shot_plan")
+        ws.commit("shot_plan")
+        registry = build_m3_registry(runner=None)
+        try:
+            registry.execute(
+                {"skill": "generate_storyboard_frame",
+                 "target": "SH02"}, ws)
+            raise AssertionError("must be blocked")
+        except SkillBlocked as blocked:
+            assert "STORYBOARD:SH02 BLOCKED" in str(blocked)
+            assert "asset:C0" in str(blocked) or \
+                "backend" in str(blocked)
 
 
 def test_pilot_shot_prefers_counter_evidence_min_missing(
@@ -387,11 +387,10 @@ def test_pilot_shot_prefers_simpler(tmp_path: Path) -> None:
 
 
 def test_acceptance_report(tmp_path: Path) -> None:
-    """验收报告：视图状态/修复史/recommended refs/back 修复降级。"""
+    """验收报告：candidate 语义 + 修复史 + 结构化 recommended refs。"""
     from src.agentic_video.asset_studio.acceptance import (
         build_acceptance_report)
     ws = _ws(tmp_path / "acc", with_c0="committed")
-    # 伪造 master/views/final 三层 manifest + 一次 profile 修复 trace
     ws.write_draft("asset:C0_master", {
         "identity_description": "a woman",
         "master": {"file": "03_asset_studio/files/C0_master_front_v1.png",
@@ -405,27 +404,33 @@ def test_acceptance_report(tmp_path: Path) -> None:
     ws.write_draft("asset:C0_views", views)
     ws.record_dependency_snapshot("asset:C0_views")
     ws.commit("asset:C0_views")
-    ws.write_draft("asset:C0", {
+    ws.write_draft("asset:C0_candidate", {
         "identity_description": "a woman",
         "views_4k": {v: {"file": views["views"][v]["file4k"],
                          "sha": f"{v}-sha"}
                      for v in ("front", "profile", "back", "face")},
         "sheet": {"file": "03_asset_studio/files/C0_sheet_v1.png",
                   "sha": "s1"}})
-    ws.record_dependency_snapshot("asset:C0")
-    ws.commit("asset:C0")
+    ws.record_dependency_snapshot("asset:C0_candidate")
+    ws.commit("asset:C0_candidate")
     ws.record_trace(5, {"skill": "repair_character_view",
                         "target": "profile"}, {"target": "profile"},
                     {"passed": True})
 
     report = build_acceptance_report(ws, "C0")
+    # final（_ws 里的 asset:C0 views_4k fixture）→ committed
     assert report["overall"] == "committed"
     assert report["views"]["profile"]["repair_count"] == 1
     assert report["views"]["front"]["repair_count"] == 0
     rec = report["recommended_reference_roles"]
-    assert rec["face_identity"] == ["face", "front"]
-    assert rec["side_body"] == ["profile", "front"]
-    assert "back(repaired,verify)" not in rec["back_body"]  # back 未修过
+    # P1-5：结构化——view id 永远合法，修复史用显式字段
+    assert rec["face_identity"]["primary"] == ["face"]
+    assert rec["face_identity"]["fallback"] == ["front"]
+    assert rec["side_body"]["requires_extra_verification"] is True
+    assert rec["side_body"]["note"]
+    all_ids = [v for entry in rec.values()
+               for v in entry["primary"] + entry["fallback"]]
+    assert all(v in ("front", "profile", "back", "face") for v in all_ids)
 
 
 def test_inspect_never_commits(tmp_path: Path) -> None:

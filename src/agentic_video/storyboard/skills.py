@@ -43,7 +43,8 @@ def select_references(shot: dict[str, Any], workspace: Workspace
                       ) -> tuple[list[str], list[str]]:
     """Reference Router v1：按 shot 需求选已 COMMIT 的资产视图文件。
 
-    特写用 face 视图，其余用 front；location 用其 master。
+    P0-5 后 locked asset = final asset:C0（含人审）。特写用 face 视图，
+    其余用 front；location 用其 master。
     返回 (ref_rel_paths, missing_artifacts)——missing 非空即 BLOCKED。
     """
     refs: list[str] = []
@@ -51,23 +52,26 @@ def select_references(shot: dict[str, Any], workspace: Workspace
     size = (shot.get("camera") or {}).get("shot_size") or "medium"
     want_face = size in ("closeup", "extreme_closeup")
     for cid in shot.get("characters") or []:
-        art = f"asset:{cid}_views"
-        if workspace.get_status(art) != "committed":
-            missing.append(f"{art}({workspace.get_status(art)})")
+        art = f"asset:{cid}"
+        status = workspace.effective_status(art)
+        if status != "committed":
+            missing.append(f"{art}({status})")
             continue
-        views = (workspace.read_artifact(art) or {}).get("views") or {}
-        key = "face" if want_face and "face" in views else "front"
-        entry = views.get(key) or {}
-        rel = entry.get("file4k") or entry.get("file")
+        final = workspace.read_artifact(art) or {}
+        views_4k = final.get("views_4k") or {}
+        key = "face" if (want_face and "face" in views_4k) else "front"
+        entry = views_4k.get(key) or {}
+        rel = entry.get("file")
         if rel:
             refs.append(str(rel))
         else:
-            missing.append(f"{art}(no views)")
+            missing.append(f"{art}(no views_4k)")
     loc = shot.get("location")
     if loc:
         art = f"asset:{loc}"
-        if workspace.get_status(art) != "committed":
-            missing.append(f"{art}({workspace.get_status(art)})")
+        status = workspace.effective_status(art)
+        if status != "committed":
+            missing.append(f"{art}({status})")
         else:
             master = (workspace.read_artifact(art) or {}
                       ).get("master") or {}
@@ -78,17 +82,17 @@ def select_references(shot: dict[str, Any], workspace: Workspace
 
 def shot_dependencies(shot: dict[str, Any], workspace: Workspace
                       ) -> list[dict[str, str]]:
-    """单 shot 的依赖清单（人物视图 + location master）。"""
+    """单 shot 的依赖清单（final 人物资产 + location master）。"""
     deps: list[dict[str, str]] = []
     for cid in shot.get("characters") or []:
-        art = f"asset:{cid}_views"
+        art = f"asset:{cid}"
         deps.append({"artifact": art,
-                     "status": workspace.get_status(art)})
+                     "status": workspace.effective_status(art)})
     loc = shot.get("location")
     if loc:
         art = f"asset:{loc}"
         deps.append({"artifact": art,
-                     "status": workspace.get_status(art)})
+                     "status": workspace.effective_status(art)})
     return deps
 
 

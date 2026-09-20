@@ -106,11 +106,15 @@ class Workspace:
             self._save()
 
     def commit(self, name: str) -> str:
-        """Commit 当前 active 版本（不可变；旧 committed 版本变 stale）。"""
+        """Commit 当前 active 版本（不可变；旧 committed 版本变 stale）。
+
+        commit 自带依赖快照冻结（P0-6：不依赖调用方记得先 record）。
+        """
         artifact = self.state["artifacts"].get(name) or {}
         version = artifact.get("active_version")
         if not version:
             raise WorkspaceBlocked("commit_no_active_version", name)
+        self.record_dependency_snapshot(name)
         # 旧 committed 版本变 stale
         for vid, info in (artifact.get("versions") or {}).items():
             if info.get("status") == "committed" and vid != version:
@@ -138,21 +142,60 @@ class Workspace:
         self._save()
 
     def _invalidate_downstream(self, changed: str) -> None:
-        """上游 commit/变更 → 下游依赖不匹配的自动 stale。"""
-        for name, deps in self.state["dependencies"].items():
-            if changed in deps:
-                upstream_sha = self.get_sha(changed)
-                artifact = self.state["artifacts"].get(name) or {}
+        """上游 commit/变更 → 下游递归 stale（P0-6：BFS 全链传播）。
+
+        eager 标记 + effective_status 懒推导双保险：即使这里漏标，
+        goal_satisfied/can_run 用的 effective_status 也不会误判。
+        """
+        reverse: dict[str, list[str]] = {}
+        for child, deps in self.state["dependencies"].items():
+            for upstream in deps:
+                reverse.setdefault(upstream, []).append(child)
+        queue = [changed]
+        visited = {changed}
+        while queue:
+            upstream = queue.pop(0)
+            for child in reverse.get(upstream, []):
+                if child in visited:
+                    continue
+                visited.add(child)
+                artifact = self.state["artifacts"].get(child) or {}
                 version = artifact.get("active_version")
                 if version:
                     info = artifact["versions"][version]
-                    # 如果下游的依赖 SHA 与新上游不匹配 → stale
-                    recorded = info.get("depends_on_shas") or {}
-                    if (recorded.get(changed) is not None and
-                            upstream_sha and
-                            recorded[changed] != upstream_sha):
+                    if (info.get("status") == "committed"
+                            and self.effective_status(child)
+                            != "committed"):
                         info["status"] = "stale"
                         self._save()
+                        queue.append(child)
+
+    def effective_status(self, name: str,
+                         _seen: set[str] | None = None) -> str:
+        """有效状态：自身 committed 且全部上游仍有效且 SHA 快照
+        匹配才算 committed，否则 stale（P0-6 懒推导层）。"""
+        raw = self.get_status(name)
+        if raw != "committed":
+            return raw
+        seen = _seen or set()
+        if name in seen:  # 环保护
+            return raw
+        seen = set(seen)
+        seen.add(name)
+        artifact = self.state["artifacts"].get(name) or {}
+        version = artifact.get("active_version")
+        recorded = (artifact.get("versions") or {}).get(
+            version, {}).get("depends_on_shas") or {}
+        for upstream, required in (
+                self.state["dependencies"].get(name) or {}).items():
+            if required != "committed":
+                continue
+            if self.effective_status(upstream, seen) != "committed":
+                return "stale"
+            if (upstream in recorded
+                    and recorded[upstream] != self.get_sha(upstream)):
+                return "stale"
+        return "committed"
 
     def record_dependency_snapshot(self, name: str) -> None:
         """commit 时记录当前依赖 SHA 快照（用于后续失效检测）。"""
@@ -169,14 +212,17 @@ class Workspace:
     # ---- Blocker 推导（动态计算，不存储）----
 
     def compute_blockers(self) -> list[dict[str, str]]:
-        """从事实推导当前阻塞项。不存储——每次调用重新计算。"""
+        """从事实推导当前阻塞项。不存储——每次调用重新计算。
+
+        用 effective_status（P0-6）：上游 stale 同样构成下游阻塞。
+        """
         blockers = []
         for name, deps in self.state["dependencies"].items():
-            status = self.get_status(name)
+            status = self.effective_status(name)
             if status in ("committed",):
                 continue
             for upstream, required in deps.items():
-                upstream_status = self.get_status(upstream)
+                upstream_status = self.effective_status(upstream)
                 if required == "committed" and upstream_status != "committed":
                     blockers.append({
                         "artifact": name,
@@ -189,7 +235,7 @@ class Workspace:
         goal = self.state.get("goal") or {}
         target = str(goal.get("target_artifact") or "")
         required = str(goal.get("required_status") or "committed")
-        return self.get_status(target) == required
+        return self.effective_status(target) == required
 
     # ---- Production Map（Aider repo map 同思想）----
 
@@ -198,7 +244,7 @@ class Workspace:
         lines = [f"GOAL: {self.state['goal']['target_artifact']} → "
                  f"{self.state['goal']['required_status']}", ""]
         for name in sorted(self.state["artifacts"]):
-            status = self.get_status(name)
+            status = self.effective_status(name)
             sha = (self.get_sha(name) or "")[:8]
             version = (self.state["artifacts"][name].get(
                 "active_version") or "—")

@@ -4,8 +4,11 @@
 协议：stdin 每行一个 JSON 任务 → stdout 每行一个 JSON 结果。
 role=t2i  → QwenImagePipeline（Hero Master 文生图）
 role=edit → QwenImageEditPlusPipeline（Edit-2511 身份保持编辑）
-显存：全量加载 ~59GB > A6000 49GB → enable_model_cpu_offload
-（文本编码器/VAE 用时上卡，denoise 时只有 transformer 常驻）。
+
+真实 API 契约（P0-1/P0-2 修复，对照官方 quick start）：
+- Edit 的参考图走 `image=[PIL.Image]`（不是 image1=path 字符串）
+- CFG 需 true_cfg_scale>1 + negative_prompt；t2i 50 步 / edit 40 步
+显存：全量 ~59GB > A6000 49GB → enable_model_cpu_offload。
 
 用法：python -m src.agentic_video.asset_studio.gen_worker <role> <gpu> [model_id]
 """
@@ -14,6 +17,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+
+# 官方推荐推理配置（Qwen-Image / Edit-2511 quick start）
+T2I_STEPS = 50
+EDIT_STEPS = 40
+TRUE_CFG_SCALE = 4.0
 
 
 def main() -> None:
@@ -65,6 +73,8 @@ def _load(role: str, model_id: str):
 
 
 def _run(pipe, role: str, task: dict) -> dict:
+    from PIL import Image
+
     from src.agentic_video.asset_studio.image_io import save_image
 
     prompt = str(task["prompt"])
@@ -72,16 +82,32 @@ def _run(pipe, role: str, task: dict) -> dict:
     height = int(task.get("height") or 2048)
     seed = int(task.get("seed") or 0)
     out_path = str(task["out_path"])
+    steps = int(task.get("steps") or
+                (T2I_STEPS if role == "t2i" else EDIT_STEPS))
 
     import torch
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    kwargs = {"prompt": prompt, "width": width, "height": height,
-              "generator": generator, "num_inference_steps":
-                  int(task.get("steps") or 30)}
+    kwargs = {
+        "prompt": prompt,
+        # CFG：true_cfg_scale>1 + 非空 negative_prompt 才真正启用
+        "negative_prompt": str(task.get("negative_prompt") or " "),
+        "true_cfg_scale": float(task.get("true_cfg_scale")
+                                or TRUE_CFG_SCALE),
+        "width": width,
+        "height": height,
+        "generator": generator,
+        "num_inference_steps": steps,
+    }
     if role != "t2i":
-        kwargs["image1"] = task["reference_path"]
+        # 官方契约：参考图是 PIL Image 列表，键名 image（非 image1/path）
+        ref = Image.open(task["reference_path"]).convert("RGB")
+        kwargs["image"] = [ref]
+        kwargs["guidance_scale"] = float(
+            task.get("guidance_scale") or 1.0)
 
-    image = pipe(**kwargs).images[0]
+    import torch as _torch
+    with _torch.inference_mode():
+        image = pipe(**kwargs).images[0]
     save_image(image, out_path)
     return {"path": out_path, "width": image.width, "height": image.height,
             "seed": seed}

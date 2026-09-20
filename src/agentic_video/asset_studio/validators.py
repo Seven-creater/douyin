@@ -1,28 +1,35 @@
 # -*- coding: utf-8 -*-
 """M2-A Character 资产验收（Actor ≠ Test）。
 
-三层：L1 程序化（尺寸/比例/可读/视图齐/背景干净）→
-L2 Omni 视觉（跨视图同一人/视角正确/无多余人物）→ L3 人工（sheet）。
-L1 失败直接 FAIL——程序能查的不浪费 Omni（expensive 资产省着验）。
+四层：L1 程序化 → L2 Omni 视觉（fidelity + studio + 一致性）→
+L3 人工（candidate → final 的 SHA 绑定门）。
+L1 失败直接 FAIL——程序能查的不浪费 Omni。
+
+P1-1：master 验收含 fidelity gate——"稳定的错人"不允许 PASS
+（consistency without fidelity 是本层要拦的最大漏洞）。
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
 from src.agentic_video.workspace import Workspace
 
 VALIDATE_MASTER_PROMPT = """你是角色资产验收员（不是生成者）。输入一张
-Hero Master 全身照。只根据图像本身独立检查，只输出一个 JSON：
-{"passed": true, "failures": [{"check": "...", "detail": "..."}]}
+Hero Master 全身照，以及该角色的期望规格（来自剧本资产表）。只根据
+图像与期望规格独立检查，只输出一个 JSON：
+{"passed": true,
+ "target_fidelity": {"passed": true, "mismatches": ["..."]},
+ "failures": [{"check": "...", "detail": "..."}]}
 检查项：
-1. single_person：画面中只有一个人物，无额外人/镜像
-2. full_body：头到脚全身可见（含鞋）
-3. neutral_bg：中性灰无缝棚拍背景，无场景元素
-4. no_text：无文字/水印/logo
-5. neutral_look：中性表情闭嘴、自然站姿、中性深灰基础服装
-你没有看过任何生成过程——只根据当前图像判断。图像："""
+1. target_fidelity（最重要）：图像中的人是否符合期望规格的
+   年龄/性别/发型/体型/显著特征——错人必须 FAIL
+2. single_person：只有一个人物，无额外人/镜像
+3. full_body：头到脚全身可见（含鞋）
+4. neutral_bg：中性灰无缝棚拍背景，无场景元素
+5. no_text：无文字/水印/logo
+6. neutral_look：中性表情闭嘴、自然站姿、中性深灰基础服装
+期望角色规格：{expected_spec}
+你没有看过任何生成过程——只根据当前图像与期望规格判断。图像："""
 
 VALIDATE_VIEWS_PROMPT = """你是角色一致性验收员。输入同一角色的四张
 视图照片，顺序：1=front 正面全身、2=profile 90°侧面全身、3=back 背面
@@ -65,13 +72,36 @@ def run_m2_test(validator_name: str, workspace: Workspace,
         return _test_views_4k(workspace)
     if validator_name == "test_character_asset":
         return _test_character_asset(workspace, runner)
+    if validator_name == "test_asset_approved":
+        return _test_asset_approved(workspace)
     raise KeyError(f"unknown m2 validator: {validator_name}")
 
 
-# ---- L1 工具 ----
+# ---- 工具 ----
 
-def _resolve(workspace: Workspace, rel: str) -> Path:
+def _resolve(workspace: Workspace, rel: str):
     return workspace.root / rel
+
+
+def _expected_spec(workspace: Workspace, asset_id: str = "C0") -> str:
+    """从 asset_graph 提取期望角色规格（fidelity gate 的测试期望）。
+
+    Actor ≠ Test ≠ Test 不知道规格——Test 必须看到测试期望。
+    """
+    import json as _json
+    graph = workspace.read_artifact("asset_graph") or {}
+    for asset in graph.get("assets") or []:
+        if str(asset.get("asset_id")) == asset_id:
+            keep = {}
+            canonical = asset.get("canonical") or {}
+            if canonical.get("description"):
+                keep["description"] = canonical["description"]
+            immutable = asset.get("immutable") or {}
+            for key in ("identity", "face", "body_build", "hair"):
+                if immutable.get(key):
+                    keep[key] = immutable[key]
+            return _json.dumps(keep, ensure_ascii=False)
+    return "{}"
 
 
 def _l1_image(rel: str, workspace: Workspace,
@@ -103,9 +133,10 @@ def _l1_image(rel: str, workspace: Workspace,
 
 
 def _view_of(rel: str) -> str:
-    name = Path(rel).stem
+    name = rel.rsplit("/", 1)[-1] if "/" in rel else rel
+    name = name.split(".")[0]
     for view in ("front", "profile", "back", "face"):
-        if name.startswith(view):
+        if view in name:
             return view
     return name
 
@@ -123,6 +154,7 @@ def _parse_omni_json(answer) -> dict[str, Any]:
 # ---- Validators ----
 
 def _test_character_master(workspace: Workspace, runner) -> dict[str, Any]:
+    """Master 验收 = L1 确定性 + L2 Omni（fidelity gate 优先）。"""
     manifest = workspace.read_artifact("asset:C0_master")
     if not manifest:
         return {"passed": False, "failures": [{"check": "exists",
@@ -137,15 +169,24 @@ def _test_character_master(workspace: Workspace, runner) -> dict[str, Any]:
     if failures:  # L1 挂不烧 Omni
         return {"passed": False, "failures": failures,
                 "validators_run": ["test_character_master"]}
+    prompt = VALIDATE_MASTER_PROMPT.replace(
+        "{expected_spec}", _expected_spec(workspace))
     answer = runner.inspect_media(
-        image_paths=[_resolve(workspace, rel)], prompt=VALIDATE_MASTER_PROMPT)
+        image_paths=[_resolve(workspace, rel)], prompt=prompt)
     try:
         value = _parse_omni_json(answer)
     except Exception as exc:  # noqa: BLE001
         return {"passed": False, "failures": [{"check": "parse",
                 "detail": str(exc)[:120]}],
                 "validators_run": ["test_character_master"]}
-    omni_failures = value.get("failures") or []
+    omni_failures = list(value.get("failures") or [])
+    # P1-1：fidelity 单独判——错人不允许被 studio 项放行
+    fidelity = value.get("target_fidelity") or {}
+    if fidelity.get("passed") is False:
+        omni_failures.append({
+            "check": "fidelity",
+            "detail": "generated person does not match expected "
+                      f"spec: {fidelity.get('mismatches')}"})
     return {"passed": bool(value.get("passed")) and not omni_failures,
             "failures": omni_failures,
             "validators_run": ["test_character_master"]}
@@ -181,8 +222,7 @@ def _test_character_multiview(workspace: Workspace, runner) -> dict[str, Any]:
         return {"passed": False, "failures": [{"check": "parse",
                 "detail": str(exc)[:120]}],
                 "validators_run": ["test_character_multiview"]}
-    omni_failures = value.get("failures") or []
-    # view 级 verdict 兜底映射（Omni 有时只填 views 不填 failures）
+    omni_failures = list(value.get("failures") or [])
     for verdict in value.get("views") or []:
         view = str(verdict.get("view") or "")
         issues = verdict.get("issues") or []
@@ -200,7 +240,10 @@ def _test_character_multiview(workspace: Workspace, runner) -> dict[str, Any]:
 
 
 def _test_views_4k(workspace: Workspace) -> dict[str, Any]:
-    """纯确定性：全部视图长边 ≥ 3840 且文件 sha 与 manifest 一致。"""
+    """纯确定性：全部视图长边 ≥ 3840 且文件 sha 与 manifest 一致。
+
+    （尺寸 4K = derived_4k_master；不代表细节增强。）
+    """
     from src.agentic_video.asset_studio.image_io import (
         TARGET_4K_LONG_SIDE, VIEW_IDS, file_sha256, load_image)
     manifest = workspace.read_artifact("asset:C0_views")
@@ -234,13 +277,14 @@ def _test_views_4k(workspace: Workspace) -> dict[str, Any]:
 
 
 def _test_character_asset(workspace: Workspace, runner) -> dict[str, Any]:
-    """最终验收：L1（sheet 存在/视图 4k/sha 链）→ L2 Omni 终审。"""
+    """candidate 验收（机器链终点）：L1（sheet 存在/视图 4k/sha 链）→
+    L2 Omni 终审。PASS 只 COMMIT candidate——final 需人审（P0-5）。"""
     from src.agentic_video.asset_studio.image_io import (
         TARGET_4K_LONG_SIDE, VIEW_IDS, file_sha256, load_image)
-    manifest = workspace.read_artifact("asset:C0")
+    manifest = workspace.read_artifact("asset:C0_candidate")
     if not manifest:
         return {"passed": False, "failures": [{"check": "exists",
-                "detail": "asset:C0 is empty"}],
+                "detail": "asset:C0_candidate is empty"}],
                 "validators_run": ["test_character_asset"]}
     failures: list[dict[str, str]] = []
     sheet_rel = str((manifest.get("sheet") or {}).get("file") or "")
@@ -280,3 +324,26 @@ def _test_character_asset(workspace: Workspace, runner) -> dict[str, Any]:
     return {"passed": bool(value.get("passed")) and not omni_failures,
             "failures": omni_failures,
             "validators_run": ["test_character_asset"]}
+
+
+def _test_asset_approved(workspace: Workspace) -> dict[str, Any]:
+    """final COMMIT 复核（确定性）：approval SHA 绑定 + 人审记录。"""
+    final = workspace.read_artifact("asset:C0")
+    approval = workspace.read_artifact("human_approval:C0")
+    if not final:
+        return {"passed": False, "failures": [{"check": "exists",
+                "detail": "asset:C0 is empty"}],
+                "validators_run": ["test_asset_approved"]}
+    failures: list[dict[str, str]] = []
+    if final.get("human_review") != "approved":
+        failures.append({"check": "human_review",
+                         "detail": f"{final.get('human_review')!r}"})
+    if not approval or approval.get("decision") != "approve":
+        failures.append({"check": "approval",
+                         "detail": "no approving human_approval:C0"})
+    elif str(approval.get("candidate_sha") or "") != str(
+            workspace.get_sha("asset:C0_candidate") or ""):
+        failures.append({"check": "approval_binding",
+                         "detail": "approval bound to stale candidate"})
+    return {"passed": not failures, "failures": failures,
+            "validators_run": ["test_asset_approved"]}

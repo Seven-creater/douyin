@@ -11,7 +11,8 @@ import json
 from typing import Any
 
 from src.agentic_video.skills import CHOOSE_ACTION_PROMPT, SkillRegistry
-from src.agentic_video.skills.registry import SkillBlocked
+from src.agentic_video.skills.registry import (
+    SkillBlocked, SkillExecutionError)
 from src.agentic_video.workspace import Workspace
 
 
@@ -90,21 +91,31 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
                 text = text[4:]
         action = _parse_one_object(text, stage="agent_controller")
 
-        # Harness enforcement
-        registry.validate_action(action, workspace)
+        # Harness enforcement（P0-4：预算/可运行集硬门）
+        runnable_names = {row["name"] for row in runnable}
 
-        # 执行
+        # 执行（P0-8：blocked 与真实运行时异常都转 Observation）
         kwargs = {}
         if last_failure:
             kwargs["test_failures"] = last_failure.get("failures") or []
             kwargs["target"] = action.get("target") or ""
         result = None
         try:
+            registry.validate_action(action, workspace, budget=budget,
+                                      allowed_skill_names=runnable_names)
             result = registry.execute(action, workspace, **kwargs)
         except SkillBlocked as blocked:
-            # 依赖门拦截（BLOCKED ≠ 崩溃）：落 trace，循环继续
+            # 依赖门/预算门拦截（BLOCKED ≠ 崩溃）：落 trace，循环继续
             result = {"artifact": None, "action": "blocked",
                       "blocked_reason": str(blocked)}
+        except SkillExecutionError as exc:
+            result = {"artifact": None, "action": "execution_failed",
+                      "error_type": type(exc).__name__,
+                      "error": str(exc)[:400]}
+        except Exception as exc:  # noqa: BLE001 — 环境错误必须是 Observation
+            result = {"artifact": None, "action": "execution_failed",
+                      "error_type": type(exc).__name__,
+                      "error": str(exc)[:400]}
         artifact_name = str(result.get("artifact") or "")
 
         # 测试（Actor ≠ Test）——validator 归属于本次 skill
@@ -116,6 +127,16 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
                                              result.get("blocked_reason")
                                          )[:200]}],
                            "validators_run": []}
+        elif result.get("action") == "execution_failed":
+            # P0-8：工具运行时失败 ≠ 验收失败——分开标记供 Agent 诊断
+            test_report = {
+                "passed": False, "failure_class": "tool_runtime",
+                "failures": [{
+                    "check": "skill_execution",
+                    "skill": str(action.get("skill") or ""),
+                    "error_type": result.get("error_type"),
+                    "detail": str(result.get("error"))[:300]}],
+                "validators_run": []}
         else:
             test_report = _run_validator_for_action(
                 action, registry, workspace, controller_runner)
@@ -132,7 +153,8 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
                 workspace.commit(artifact_name)
             last_failure = None
         else:
-            workspace.set_status(artifact_name, "draft")
+            if artifact_name:
+                workspace.set_status(artifact_name, "draft")
             last_failure = test_report
 
     if workspace.goal_satisfied():

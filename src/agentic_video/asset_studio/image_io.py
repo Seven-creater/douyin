@@ -34,11 +34,13 @@ def load_image(path: str | Path) -> Image.Image:
 
 
 def file_sha256(path: str | Path) -> str:
+    """完整 64 hex SHA-256（P2-3：SHA 是 lock/provenance 基础设施，
+    底层不截断；显示端自行 [:8]）。"""
     digest = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
-    return digest.hexdigest()[:16]
+    return digest.hexdigest()
 
 
 def check_aspect_9_16(image: Image.Image, tolerance: float = 0.03) -> bool:
@@ -75,7 +77,11 @@ def check_background_clean(image: Image.Image) -> bool:
 
 def upscale_lanczos(src_path: str | Path, out_path: str | Path,
                     long_side: int = TARGET_4K_LONG_SIDE) -> Path:
-    """确定性 4K 超分（v1：PIL Lanczos；RealESRGAN 可后续替换）。"""
+    """确定性 4K 派生（v1：PIL Lanczos；RealESRGAN 可后续替换）。
+
+    命名诚实：这是尺寸 4K（derived_4k_master），不新增生成细节——
+    detail_enhanced=false。分辨率检查只代表尺寸与 provenance 合法。
+    """
     image = load_image(src_path)
     if image.width >= image.height:
         new_size = (long_side, round(image.height * long_side / image.width))

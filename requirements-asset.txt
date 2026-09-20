@@ -1,0 +1,6 @@
+# Asset Studio 运行时（h3 env 实测版本，2026-09-20）
+# Qwen-Image-Edit-2511 官方要求较新 diffusers；首次真机跑通后冻结。
+# 运行时证据另见 preflight 产出的 runtime_manifest.json。
+diffusers==0.40.0
+torch==2.9.1+cu128
+# transformers 版本以 h3 env `python -c "import transformers;print(transformers.__version__)"` 为准补录
