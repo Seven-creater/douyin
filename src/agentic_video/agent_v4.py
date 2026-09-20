@@ -1,0 +1,118 @@
+# -*- coding: utf-8 -*-
+"""v4 Agent Controller：Omni 自主选 Skill 的循环（非 if/else 工作流）。
+
+p0626 §一/§十二：workspace 提供状态，registry 提供 affordances，
+Omni Controller 根据当前状态+可用 skills+最近失败推理下一步。
+Harness enforcement（前置/预算/参数）在 registry.validate_action。
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from src.agentic_video.skills import CHOOSE_ACTION_PROMPT, SkillRegistry
+from src.agentic_video.workspace import Workspace
+
+
+class AgentBlocked(RuntimeError):
+    def __init__(self, reason_code: str, detail: str = "") -> None:
+        super().__init__(f"{reason_code}:{detail}")
+        self.reason_code = reason_code
+        self.detail = detail
+
+
+def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
+               controller_runner, max_steps: int = 30,
+               budget: str = "cheap_text") -> dict[str, Any]:
+    """主循环：inspect → Omni 选 skill → execute → test → commit/repair。
+
+    controller_runner: Omni 池（ask 文本模式）——用于 choose_action 和
+    validators（独立 prompt，Actor ≠ Test）。
+    """
+    step = 0
+    last_failure: dict[str, Any] | None = None
+
+    while not workspace.goal_satisfied() and step < max_steps:
+        step += 1
+        state_map = workspace.build_map()
+        runnable = registry.runnable_skills(workspace, budget)
+        recent = workspace.recent_trace(3)
+
+        if not runnable:
+            raise AgentBlocked(
+                "no_runnable_skills",
+                f"step={step}, map={state_map[:200]}")
+
+        # Omni 自主选动作（非硬编码分支）
+        from src.agentic_video.reference_program_v9 import _parse_one_object
+        payload = json.dumps(
+            {"goal": workspace.state["goal"],
+             "workspace_map": state_map,
+             "runnable_skills": runnable,
+             "recent_failure": last_failure,
+             "recent_trace": [
+                 {"step": t.get("step"),
+                  "action": t.get("action", {}).get("skill"),
+                  "tests_passed": t.get("tests", {}).get("passed")}
+                 for t in recent]},
+            ensure_ascii=False, separators=(",", ":"))
+        answer = controller_runner.ask(
+            CHOOSE_ACTION_PROMPT + payload, max_new_tokens=512,
+            stop_after_json_object=True)
+        raw = getattr(answer, "text", str(answer))
+        text = raw.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("json"):
+                text = text[4:]
+        action = _parse_one_object(text, stage="agent_controller")
+
+        # Harness enforcement
+        registry.validate_action(action, workspace)
+
+        # 执行
+        kwargs = {}
+        if last_failure:
+            kwargs["test_failures"] = last_failure.get("failures") or []
+            kwargs["target"] = action.get("target") or ""
+        result = registry.execute(action, workspace, **kwargs)
+
+        # 测试（Actor ≠ Test）
+        artifact_name = str(result.get("artifact") or "")
+        test_report = _run_validator(
+            workspace, registry, artifact_name, controller_runner)
+
+        # 落档 trace
+        workspace.record_trace(step, action, result, test_report)
+
+        if test_report.get("passed"):
+            workspace.record_dependency_snapshot(artifact_name)
+            workspace.commit(artifact_name)
+            last_failure = None
+        else:
+            workspace.set_status(artifact_name, "draft")
+            last_failure = test_report
+
+    return {
+        "steps_taken": step,
+        "goal_satisfied": workspace.goal_satisfied(),
+        "goal": workspace.state["goal"],
+        "final_status": workspace.get_status(
+            workspace.state["goal"]["target_artifact"]),
+    }
+
+
+def _run_validator(workspace: Workspace, registry: SkillRegistry,
+                   artifact_name: str, runner) -> dict[str, Any]:
+    """运行 artifact 对应的 validator（独立上下文，Actor ≠ Test）。"""
+    from src.agentic_video.validators import run_test
+    spec = None
+    for skill in registry.skills.values():
+        if artifact_name in skill.outputs:
+            spec = skill
+            break
+    validator_names = spec.validators if spec else []
+    if not validator_names:
+        return {"passed": True, "validators_run": [],
+                "detail": "no validator"}
+    return run_test(validator_names[0], workspace, runner)
