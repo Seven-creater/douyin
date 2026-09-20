@@ -24,11 +24,15 @@ class NoProgressDetector:
         self._consecutive_zero = 0
 
     def compute_state_hash(self, workspace: Workspace) -> str:
-        """全量 artifact 状态 + blocker 的指纹。"""
+        """全量 artifact 状态 + blocker 的指纹。
+
+        M3-A dry-run 教训：指纹不含版本号——repair 原样吐回相同内容时
+        版本号递增但 sha 不变，若计入版本号会产生"假 progress"，
+        同一失败循环 4 次都不停机。
+        """
         fingerprint = {
             "artifacts": {
                 name: {
-                    "active": info.get("active_version"),
                     "status": (
                         (info.get("versions") or {}).get(
                             info.get("active_version") or "", {}

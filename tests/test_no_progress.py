@@ -153,6 +153,25 @@ def test_no_progress_resets_on_failure_change() -> None:
         assert r3["consecutive_stagnant_steps"] == 0
 
 
+def test_no_progress_not_fooled_by_version_bump(tmp_path: Path) -> None:
+    """M3-A dry-run 教训：repair 原样吐回相同内容 → 版本号递增但
+    sha 不变——这不是 progress，必须计入停滞。"""
+    ws = _ws_with_screenplay(tmp_path)
+    detector = NoProgressDetector(limit=3)
+    failure = {"failures": [{"check": "asset_ref"}]}
+
+    detector.step(ws, failure)  # 首次 progress=True
+    ws.write_draft("asset_graph", {"assets": []})  # v1（世界真变了）
+    detector.step(ws, failure)  # progress=True（sha 变）
+    # 之后 repair 原样吐回：版本号 v2/v3/v4 递增但内容相同
+    r3 = detector.step(ws, failure)  # 无变化 → stagnant=1
+    assert not r3["progress"]
+    r4 = detector.step(ws, failure)  # stagnant=2
+    assert not r4["stalled"]
+    r5 = detector.step(ws, failure)  # stagnant=3 → stalled
+    assert r5["stalled"]
+
+
 # ---- Run A-v2 三教训回归 ----
 
 class _RecordingRunner:

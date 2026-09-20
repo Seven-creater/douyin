@@ -166,8 +166,13 @@ def build_m3_registry(*, runner=None, storyboard_backend=None
         if not plan:
             raise ValueError("shot_plan not in workspace")
         failures = kw.get("test_failures") or []
+        graph = workspace.read_artifact("asset_graph") or {}
+        asset_ids = [str(a.get("asset_id"))
+                     for a in graph.get("assets") or []]
         payload = json.dumps(
-            {"current_shot_plan": plan, "failed_tests": failures},
+            {"current_shot_plan": plan, "failed_tests": failures,
+             # 修复必需上下文：否则 Omni 不知道合法 id 只能瞎猜
+             "available_asset_ids": asset_ids},
             ensure_ascii=False, separators=(",", ":"))
         repaired = _ask(REPAIR_SHOT_PLAN_PROMPT + payload, max_tokens=6144)
         version = workspace.write_draft("shot_plan", repaired)
