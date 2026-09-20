@@ -205,17 +205,26 @@ def test_rhythm_grammar_from_p0_data() -> None:
 
 # ---- Module 3：EDL 发散→选择 ----
 
+SECTION_ROLES = ["situation_setup", "counter_evidence", "evidence_expansion"]
+
+
 def _moments() -> list[dict]:
+    """三段各配 8-10s 素材（role-aware + 总量过 21.93±1.5 硬门）。"""
+    plan = [
+        ("t_s1", "situation_setup", "premise", [(0.0, 4.9)]),
+        ("t_s2", "counter_evidence", "setup", [(0.0, 1.5)]),
+        ("t_s2", "counter_evidence", "decisive_action", [(1.5, 4.0)]),
+        ("t_s2", "counter_evidence", "visible_result", [(4.0, 6.0)]),
+        ("t_s2", "counter_evidence", "reaction", [(6.0, 10.9)]),
+        ("t_s3", "evidence_expansion", "proof_a", [(0.0, 3.2)]),
+        ("t_s3", "evidence_expansion", "proof_b", [(3.2, 6.3)]),
+    ]
     rows = []
-    for phase, spans in (("premise", [(0.0, 2.0)]),
-                         ("setup", [(2.0, 3.0)]),
-                         ("decisive_action", [(3.0, 5.5)]),
-                         ("visible_result", [(5.5, 7.0)]),
-                         ("reaction", [(7.0, 9.0)]),
-                         ("proof_a", [(9.0, 10.0)]),
-                         ("proof_b", [(10.0, 11.0)])):
+    for take_id, role, phase, spans in plan:
         for start, end in spans:
-            rows.append({"take_id": "t1", "phase": phase,
+            rows.append({"take_id": take_id, "phase": phase,
+                         "section_role": role,
+                         "beat_id": f"{role}::{phase}",
                          "start": start, "end": end,
                          "source_interval": [start, end]})
     return rows
@@ -225,18 +234,78 @@ def test_edl_candidates_and_deterministic_selection() -> None:
     patterns = [["premise"], ["setup", "decisive_action", "visible_result",
                               "reaction"], ["proof_a", "proof_b"]]
     edls = editor.build_candidate_edls(
-        _moments(), patterns, _contract()["rhythm_grammar"])
+        _moments(), patterns, _contract()["rhythm_grammar"],
+        section_roles=SECTION_ROLES)
     assert {edl["strategy"] for edl in edls} == {
         "shortest", "longest", "earliest"}
-    selection = editor.select_edl(edls, _contract()["rhythm_grammar"])
+    selection = editor.select_edl(edls, _contract()["rhythm_grammar"],
+                                  SECTION_ROLES)
     assert selection["selected"]["score"] >= 0
     assert selection["selected"]["moment_count"] == 7
+    assert 20.4 <= selection["selected"]["total_duration_s"] <= 23.5
     # 覆盖不齐 → 无合法 EDL → 拦
     assert editor.build_candidate_edls(
-        _moments()[:2], patterns, {}) == []
+        _moments()[:2], patterns, {}, section_roles=SECTION_ROLES) == []
     with pytest.raises(ReGenBlocked) as excinfo:
-        editor.select_edl([], {})
+        editor.select_edl([], {}, SECTION_ROLES)
     assert excinfo.value.reason_code == "no_legal_edl"
+
+
+def test_cross_section_moments_never_fill_wrong_section() -> None:
+    """p0620 修正 1a 回归锚：S1 素材缺失时不得拿 S2 的 moment 顶替。"""
+    moments = _moments()
+    # 删掉 S1 的全部 moment——S1 段无法覆盖 → 该 section 无合法 EDL
+    no_s1 = [m for m in moments if m["section_role"] != "situation_setup"]
+    patterns = [["premise"], ["setup"], ["proof_a"]]
+    edls = editor.build_candidate_edls(
+        no_s1, patterns, {}, section_roles=SECTION_ROLES)
+    assert edls == []
+
+
+def test_edl_hard_gates_duration_and_overlap() -> None:
+    """修正 1b：总时长硬门（动态 target±tolerance）；修正 1c：interval
+    overlap 全局唯一（tuple 相同不够）。"""
+    edl = {"sections": [
+        {"section_index": 0, "section_role": "situation_setup",
+         "moments": [{"take_id": "a", "start": 0.0, "end": 2.0}]},
+        {"section_index": 1, "section_role": "counter_evidence",
+         "moments": [{"take_id": "a", "start": 0.0, "end": 2.0}]},
+        {"section_index": 2, "section_role": "evidence_expansion",
+         "moments": [{"take_id": "b", "start": 0.0, "end": 2.0}]}]}
+    problems = editor.validate_edl(edl, {}, SECTION_ROLES)
+    assert any(p.startswith("total_duration_out_of_range") for p in problems)
+    # 同 take 不同 tuple 但 overlap
+    overlap_edl = {"sections": [
+        {"section_index": 0, "section_role": "situation_setup",
+         "moments": [{"take_id": "a", "start": 2.0, "end": 5.0}]},
+        {"section_index": 1, "section_role": "counter_evidence",
+         "moments": [{"take_id": "a", "start": 3.5, "end": 4.5}]},
+        {"section_index": 2, "section_role": "evidence_expansion",
+         "moments": [{"take_id": "b", "start": 0.0, "end": 22.0}]}]}
+    problems = editor.validate_edl(overlap_edl, {}, SECTION_ROLES)
+    assert any(p.startswith("interval_overlap") for p in problems)
+    with pytest.raises(ReGenBlocked) as excinfo:
+        editor.select_edl(
+            [{**edl, "strategy": "x"}], {}, SECTION_ROLES,
+            target_duration=21.93, tolerance=1.5)
+    assert excinfo.value.reason_code == "all_edls_illegal"
+
+
+def test_blind_causal_judge_rejects_generic_theme() -> None:
+    """修正 1g 假绿锚：严肃→活泼 ≠ 能力低估→反证。"""
+
+    class FakeRunner:
+        def ask(self, prompt, **kwargs):
+            return SimpleNamespace(text=json.dumps({
+                "directly_contradicts": "no",
+                "reason": "personality contrast is not capability "
+                          "correction"}))
+
+    blind = {"inferred_theme": "运动员场下活泼反差",
+             "cognition_arc": [{"at_s": 0, "belief": "严肃"},
+                               {"at_s": 10, "belief": "活泼"}]}
+    assert editor.blind_causal_judge(
+        blind, _contract(), runner=FakeRunner()) == "no"
 
 
 def test_blind_viewer_then_comparator_two_stage() -> None:

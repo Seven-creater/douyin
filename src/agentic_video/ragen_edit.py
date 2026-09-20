@@ -41,12 +41,19 @@ JSON 对象：{"theme_consistent": true, "counter_evidence_landed": true,
 A) 盲看结果："""
 
 
-def build_moment_index(dailies: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """dailies 观察结果（observe_long_take 产物）→ 扁平 moment 池。"""
+def build_moment_index(dailies: list[dict[str, Any]],
+                       take_roles: dict[str, str] | None = None
+                       ) -> list[dict[str, Any]]:
+    """dailies 观察 → 扁平 moment 池（p0620 修正 1a：保留 section 归属）。
+
+    take_roles: take_id → section_role——丢了它 _pick 会跨 section 串台
+    （badcase 根因：S1 素材一秒未进成片、S2 的 0-1s 被填三段）。
+    """
     moments = []
     for row in dailies:
         observation = row.get("observation") or {}
         take_id = str(row.get("take_id"))
+        section_role = (take_roles or {}).get(take_id, "unknown")
         for entry in observation.get("event_timeline") or []:
             if entry.get("supported") is not True:
                 continue
@@ -55,14 +62,18 @@ def build_moment_index(dailies: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             moments.append({
                 "take_id": take_id, "phase": str(entry.get("phase")),
+                "section_role": section_role,
+                "beat_id": f"{section_role}::{entry.get('phase')}",
                 "start": float(interval[0]), "end": float(interval[1]),
                 "source_interval": [float(interval[0]), float(interval[1])]})
     return moments
 
 
-def _pick(moments: list[dict[str, Any]], phase: str, strategy: str
-          ) -> dict[str, Any] | None:
-    rows = [m for m in moments if m["phase"] == phase]
+def _pick(moments: list[dict[str, Any]], section_role: str, phase: str,
+          strategy: str) -> dict[str, Any] | None:
+    """只在该 section 自己的 moments 内选（修正 1a：跨 section=illegal）。"""
+    rows = [m for m in moments
+            if m["phase"] == phase and m["section_role"] == section_role]
     if not rows:
         return None
     if strategy == "longest":
@@ -75,16 +86,23 @@ def _pick(moments: list[dict[str, Any]], phase: str, strategy: str
 def build_candidate_edls(moment_index: list[dict[str, Any]],
                          section_patterns: list[list[str]],
                          rhythm: dict[str, Any],
-                         section_of_phase: dict[str, int] | None = None
+                         section_roles: list[str] | None = None
                          ) -> list[dict[str, Any]]:
-    """三种合法 EDL（发散）：min_sufficient / fullest / rhythm_aligned。"""
+    """三种合法 EDL（发散）：min_sufficient / fullest / earliest。
+
+    section_roles 与 section_patterns 平行——moment 按 section 归属匹配，
+    杜绝串台。1b/1c 的合法性在 validate_edl 单独做（时长硬门+overlap）。
+    """
+    if section_roles is None:
+        section_roles = [f"section_{i}" for i in range(len(section_patterns))]
     edls = []
     for strategy in ("shortest", "longest", "earliest"):
         segments, legal = [], True
         for section_index, phases in enumerate(section_patterns):
             picks = []
             for phase in phases:
-                moment = _pick(moment_index, phase, strategy)
+                moment = _pick(moment_index,
+                               section_roles[section_index], phase, strategy)
                 if moment is None:
                     legal = False
                     break
@@ -92,10 +110,49 @@ def build_candidate_edls(moment_index: list[dict[str, Any]],
             if not legal:
                 break
             segments.append({"section_index": section_index,
+                             "section_role": section_roles[section_index],
                              "moments": picks})
         if legal:
             edls.append({"strategy": strategy, "sections": segments})
     return edls
+
+
+def validate_edl(edl: dict[str, Any], rhythm: dict[str, Any],
+                 section_roles: list[str],
+                 *, target_duration: float = 21.93,
+                 tolerance: float = 1.5) -> list[str]:
+    """p0620 修正 1b/1c：时长硬门（动态，非魔法数）+ interval overlap
+    全局唯一。返回违规清单（空=合法）。"""
+    problems = []
+    total = sum(row["end"] - row["start"]
+                for sec in edl["sections"] for row in sec["moments"])
+    if not (target_duration - tolerance <= total
+            <= target_duration + tolerance):
+        problems.append(f"total_duration_out_of_range:{round(total, 2)}")
+    prior = rhythm.get("rhythm_prior") or {}
+    for sec in edl["sections"]:
+        span = sum(row["end"] - row["start"] for row in sec["moments"])
+        bounds = prior.get(sec["section_role"]) or {}
+        rng = bounds.get("range")
+        if rng and total > 0:
+            share = span / total
+            if not (rng[0] - 0.05 <= share <= rng[1] + 0.05):
+                problems.append(
+                    f"section_budget_violation:{sec['section_role']}:"
+                    f"{round(share, 3)}")
+    # 修正 1c：同 take_id 下任意两 interval 交集 > 0 → 重复（tuple 相同不够）
+    by_take: dict[str, list[tuple[float, float]]] = {}
+    for sec in edl["sections"]:
+        for row in sec["moments"]:
+            by_take.setdefault(row["take_id"], []).append(
+                (row["start"], row["end"]))
+    for take_id, spans in by_take.items():
+        ordered = sorted(spans)
+        for left, right in zip(ordered, ordered[1:]):
+            if right[0] < left[1] - 1e-6:
+                problems.append(f"interval_overlap:{take_id}:"
+                                f"[{left[0]},{left[1]}]x[{right[0]},{right[1]}]")
+    return problems
 
 
 def score_edl(edl: dict[str, Any], rhythm: dict[str, Any]) -> dict[str, Any]:
@@ -124,14 +181,35 @@ def score_edl(edl: dict[str, Any], rhythm: dict[str, Any]) -> dict[str, Any]:
             "rhythm_error": round(rhythm_error, 3), "moment_count": density}
 
 
-def select_edl(edls: list[dict[str, Any]], rhythm: dict[str, Any]
-               ) -> dict[str, Any]:
+def select_edl(edls: list[dict[str, Any]], rhythm: dict[str, Any],
+               section_roles: list[str] | None = None,
+               *, target_duration: float = 21.93,
+               tolerance: float = 1.5) -> dict[str, Any]:
+    """硬门（validate_edl）过滤后再打分选择——不满足时长/重叠即非法，
+    不是扣分（p0620 修正 1b/1c）。"""
     if not edls:
         raise ReGenBlocked("edit", "no_legal_edl",
                            "moment index cannot cover all section patterns")
-    scored = [{"edl": edl, **score_edl(edl, rhythm)} for edl in edls]
+    roles = section_roles or [
+        f"section_{i}" for i in range(len(edls[0]["sections"]))]
+    legal, rejected = [], []
+    for edl in edls:
+        problems = validate_edl(edl, rhythm, roles,
+                                target_duration=target_duration,
+                                tolerance=tolerance)
+        if problems:
+            rejected.append({"strategy": edl.get("strategy"),
+                             "problems": problems})
+        else:
+            legal.append(edl)
+    if not legal:
+        raise ReGenBlocked(
+            "edit", "all_edls_illegal",
+            json.dumps(rejected, ensure_ascii=False)[:500])
+    scored = [{"edl": edl, **score_edl(edl, rhythm)} for edl in legal]
     scored.sort(key=lambda row: row["score"], reverse=True)
-    return {"selected": scored[0], "candidates": scored}
+    return {"selected": scored[0], "candidates": scored,
+            "rejected": rejected}
 
 
 def assemble_final(edl: dict[str, Any], dailies_paths: dict[str, Path],
@@ -218,32 +296,82 @@ def run_ragen_edit(cfg: Any, output_dir: Path, *,
                    dailies: list[dict[str, Any]],
                    dailies_paths: dict[str, Path],
                    runner, section_patterns: list[list[str]],
+                   take_roles: dict[str, str] | None = None,
+                   target_duration: float = 21.93,
                    ffmpeg_bin: str = "ffmpeg") -> dict[str, Any]:
-    """Moment Index → 候选 EDL → 选择 → 9:16 装配 → 盲看 → 比对（一修可选）。"""
+    """Moment Index → 候选 EDL（role-aware）→ 硬门选择 → 9:16 装配 →
+    盲看 → causal judge → 比对（p0620 三关终审）。"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    moment_index = build_moment_index(dailies)
+    roles = take_roles or {}
+    moment_index = build_moment_index(dailies, roles)
     edls = build_candidate_edls(moment_index, section_patterns,
-                                contract.get("rhythm_grammar") or {})
-    selection = select_edl(edls, contract.get("rhythm_grammar") or {})
+                                contract.get("rhythm_grammar") or {},
+                                section_roles=contract.get("section_roles"))
+    selection = select_edl(edls, contract.get("rhythm_grammar") or {},
+                           contract.get("section_roles"),
+                           target_duration=target_duration)
     assembled = assemble_final(selection["selected"]["edl"],
                                dailies_paths, cfg, output_dir)
     blind = blind_view(Path(assembled["render"]["content_master"]),
                        output_dir, runner=runner, ffmpeg_bin=ffmpeg_bin)
     comparison = compare_to_contract(blind, contract, output_dir,
                                      runner=runner)
-    passed = all(comparison[key] for key in (
+    # p0620 修正 1g：causal judge（盲看谓词互否）+ identity gate
+    negation = blind_causal_judge(blind, contract, runner=runner)
+    identity_false = any(
+        str((d.get("identity") or {}).get("c0_consistent")) == "False"
+        for d in dailies)
+    passed = (all(comparison[key] for key in (
         "theme_consistent", "counter_evidence_landed",
-        "ending_function_matched"))
+        "ending_function_matched")) and negation == "yes"
+        and not identity_false)
     report = {
         "schema_version": REGEN_EDIT_VERSION,
         "edl_selection": selection,
         "final_video": str(assembled["render"]["content_master"]),
         "duration_s": assembled["render"].get("duration_s"),
         "blind_viewer": blind, "comparator": comparison,
+        "blind_causal_judge": negation,
+        "identity_gate_clean": not identity_false,
         "passed": passed,
         "bounded_reedit_available": not passed,
     }
     (output_dir / "ragen_edit_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     return report
+
+
+BLIND_CAUSAL_JUDGE_PROMPT = """只做逻辑判定。A 是观众盲看一条视频后自述的
+认知变化；B 是该视频 intended 的叙事契约。问题：观众自述的初始判断与
+转折证据，是否构成契约要求的**能力维度上的直接否定**？只输出一个 JSON
+对象：{"directly_contradicts": "yes|no|partially", "reason": "一句话"}
+注意：性格反差（严肃→活泼）不是能力修正；只有"低估其能力→可见的高能力
+证据"才是 yes。A) 盲看自述："""
+
+
+def blind_causal_judge(blind: dict[str, Any],
+                       contract: dict[str, Any], *, runner) -> str:
+    """p0620 修正 1g：防 generic-theme 假绿（"某种刻板印象被打破"≠PASS）。"""
+    payload = json.dumps(
+        {"A": {"inferred_theme": blind.get("inferred_theme"),
+               "cognition_arc": blind.get("cognition_arc"),
+               "turning_what": blind.get("turning_what")},
+         "B": {"theme": contract.get("theme"),
+               "invariants": contract.get("narrative_invariants")}},
+        ensure_ascii=False, separators=(",", ":"))
+    answer = runner.ask(BLIND_CAUSAL_JUDGE_PROMPT + payload,
+                        max_new_tokens=512,
+                        stop_after_json_object=True)
+    raw = getattr(answer, "text", str(answer))
+    from src.agentic_video.reference_program_v9 import _parse_one_object
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.startswith("json"):
+            text = text[4:]
+    value = _parse_one_object(text, stage="ragen_edit_judge")
+    verdict = str(value.get("directly_contradicts") or "")
+    if verdict not in {"yes", "no", "partially"}:
+        raise ReGenBlocked("edit_judge", "blind_judge_verdict_invalid", verdict)
+    return verdict

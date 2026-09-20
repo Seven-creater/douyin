@@ -78,6 +78,30 @@ def build_section_take_request(story: dict[str, Any], role: str,
     return request
 
 
+def ref2va_identity_prompt(base_description: str,
+                           identity_anchor: dict[str, Any]) -> str:
+    """有 Story Identity Anchor 时的 Ref2VA 六段 prompt（修正 1d：grammar
+    跟随 conditions；1f：Anchor 只锁身份，服装由段级文字描述）。"""
+    parts = [
+        "subject_definitions:\n"
+        "<Subject 1> is the same person as shown in <Picture 1> (facial "
+        "identity, age, hair, and body build). Wardrobe for this clip "
+        "follows the description below and may differ from <Picture 1>.",
+        "summary:\n[reference generation] Generate one coherent clip "
+        "featuring <Subject 1> as described. Preserve <Subject 1>'s "
+        "identity throughout.",
+        "retention_analysis:\n"
+        "<Subject 1> identity (throughout): fully_preserved - face, age, "
+        "hair, body build from <Picture 1>.\n"
+        "<Picture 1> (source for <Subject 1>): attribute_transfer - facial "
+        "identity and body build only, not wardrobe.",
+        "detailed_description:\n" + base_description,
+        "overall_soundscape:\nNatural ambient sound consistent with the "
+        "depicted activity.",
+        "non_diegetic_music:\nNone."]
+    return "\n\n".join(parts)
+
+
 def run_section_takes(cfg: Any, output_dir: Path, *, story: dict[str, Any],
                       contract: dict[str, Any], endpoints: str,
                       gpu_set: str, h3_python_bin: str | None = None,
