@@ -302,6 +302,44 @@ def test_agent_loop_survives_blocked(tmp_path: Path) -> None:
 
 # ---- 帧对 L1 ----
 
+def test_inspect_never_commits(tmp_path: Path) -> None:
+    """M3-A dry-run 教训：无 validator 的只读动作不得触发 commit。"""
+    from src.agentic_video.agent_v4 import agent_loop
+    ws = _ws(tmp_path / "no_commit")
+    bad = _plan([_shot(), _shot("SH02", "B2", characters=["C9"],
+                                duration_budget_s=[5.0, 6.5],
+                                start_state="a", end_state="b"),
+                 _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+                       start_state="a", end_state="b")])
+    ws.write_draft("shot_plan", bad)  # draft，会被校验打挂
+    registry = build_m3_registry(runner=None)
+    runner = _Runner(ask_texts=['{"skill": "inspect_shot_plan"}'] * 4)
+    result = agent_loop(ws, registry, controller_runner=runner,
+                        max_steps=4)
+    # inspect 循环跑了，但 shot_plan 绝不能变成 committed
+    assert ws.get_status("shot_plan") != "committed"
+    assert not result["goal_satisfied"]
+
+
+def test_repair_unwraps_current_shot_plan_wrapper(tmp_path: Path) -> None:
+    """Omni 照抄 payload 键 current_shot_plan → 必须剥出内层。"""
+    ws = _ws(tmp_path / "unwrap")
+    ws.write_draft("shot_plan", _plan([_shot()]))
+    good = _plan([_shot(), _shot("SH02", "B2",
+                                 duration_budget_s=[5.0, 6.5],
+                                 start_state="a", end_state="b"),
+                  _shot("SH03", "B3", duration_budget_s=[5.0, 6.5],
+                       start_state="a", end_state="b")])
+    runner = _Runner(ask_texts=[
+        json.dumps({"current_shot_plan": good})])  # 镜像包装
+    registry = build_m3_registry(runner=runner)
+    registry.execute({"skill": "repair_shot_plan"}, ws,
+                     test_failures=[{"shot_id": "_root",
+                                     "check": "beat_coverage"}])
+    repaired = ws.read_artifact("shot_plan")
+    assert len(repaired.get("shots") or []) == 3  # 剥出了内层
+
+
 def test_frame_pair_l1_and_l2(tmp_path: Path) -> None:
     ws = _ws(tmp_path / "frames", with_c0="committed")
     files = ws.root / "04_storyboard" / "files"

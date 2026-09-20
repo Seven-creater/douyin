@@ -115,9 +115,13 @@ def build_m3_registry(*, runner=None, storyboard_backend=None
             if text.startswith("json"):
                 text = text[4:]
         value = _parse_one_object(text, stage="m3_skill")
-        if (isinstance(value, dict) and "shot_plan" in value
-                and "shots" not in value):
-            value = value["shot_plan"]  # 剥镜像包装
+        if isinstance(value, dict) and "shots" not in value:
+            # 剥镜像包装（Omni 照抄 payload 外层键——Run A-v2 第 N 课）
+            for key in ("shot_plan", "current_shot_plan",
+                        "repaired_shot_plan"):
+                inner = value.get(key)
+                if isinstance(inner, dict):
+                    return inner
         return value
 
     def run_plan_storyboard(workspace: Workspace, **kw) -> dict:

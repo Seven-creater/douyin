@@ -124,8 +124,12 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
         workspace.record_trace(step, action, result, test_report)
 
         if test_report.get("passed"):
-            workspace.record_dependency_snapshot(artifact_name)
-            workspace.commit(artifact_name)
+            # 无 validator 的动作（inspect 等只读诊断）不得触发 commit
+            # ——M3-A dry-run 教训：inspect auto-pass 把垃圾 draft
+            # commit 了，goal 假 satisfied
+            if test_report.get("validators_run"):
+                workspace.record_dependency_snapshot(artifact_name)
+                workspace.commit(artifact_name)
             last_failure = None
         else:
             workspace.set_status(artifact_name, "draft")
