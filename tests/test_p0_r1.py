@@ -8,7 +8,8 @@ import pytest
 
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
-    DNAV2Error, build_writer_payload, compile_interpretation_plan,
+    DNAV2Error, _interpretation_plan_catalog, build_writer_payload,
+    compile_interpretation_plan,
     normalize_interpretation_roles, normalize_interpretation_text, publish_dna,
     validate_interpretation, validate_editing_analysis,
     validate_interpretation_audit, validate_interpretation_plan,
@@ -377,6 +378,31 @@ def test_interpretation_plan_compiles_canonical_relations() -> None:
     assert value["propositions"][0]["statement"] == "broad assertion"
     assert [row["type"] for row in value["relations"]] == [
         "contradicts", "qualifies"]
+
+
+def test_interpretation_plan_catalog_exposes_temporal_choices() -> None:
+    reference = {"accepted_claims": [
+        {"claim_id": "T1", "modality": "T", "interval": [0, 1]},
+        {"claim_id": "T2", "modality": "T", "interval": [2, 3]},
+        {"claim_id": "V0", "modality": "V", "interval": [0, 1],
+         "predicate": "visible_body_region"},
+        {"claim_id": "V1", "modality": "V", "interval": [2, 3],
+         "predicate": "performs_action"},
+        {"claim_id": "ID1", "modality": "V", "interval": [0, 3],
+         "predicate": "same_entity_as"}]}
+    semantics = {"items": [
+        {"semantic_id": "TP1", "source_ids": ["T1"],
+         "proposition": "broad assertion", "semantic_role": "assertion",
+         "scope": "general"},
+        {"semantic_id": "TP2", "source_ids": ["T2"],
+         "proposition": "bounded evidence", "semantic_role": "assertion",
+         "scope": "specific"}]}
+    catalog = _interpretation_plan_catalog(reference, semantics)
+    assert catalog["semantic_candidates"][1]["interval"] == [2.0, 3.0]
+    assert catalog["broad_target_ids"] == ["TP1"]
+    assert catalog["opening_direct_visual_ids"] == ["V0"]
+    assert catalog["later_direct_visual_ids"] == ["V1"]
+    assert catalog["identity_ids"] == ["ID1"]
 
 
 def test_interpretation_semantic_audit_rejects_missing_relation() -> None:

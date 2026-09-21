@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v10"
+INTERPRETATION_VERSION = "reference_interpretation_v11"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -57,23 +57,28 @@ every check is true. JSON only. Input:
 """
 
 INTERPRETATION_PLAN_PROMPT = """You are an evidence-grounded relation planner.
-Read the canonical text_semantics and compact source catalog. Select evidence;
-do not write narrative prose. Choose an earlier broad assertion as the exact
-target, later bounded capability propositions that bear on that target, a later
-specific limitation, visual observations from both the opening and later
-segments, and explicit same_entity_as claims connecting the subject.
+Read the canonical text_semantics, compact source catalog, and the derived
+planning_catalog. Select evidence; do not write narrative prose. The planning
+catalog gives every proposition's actual interval and separately lists allowed
+broad targets, opening direct-visual observations, later direct-visual
+observations, and identity links. Choose an earlier broad assertion as the
+exact target, every later bounded capability proposition that bears on that
+target, and the final later proposition that limits the demonstrated capability
+range. The scope limit must be later than every selected counter proposition.
+Select at least one relevant ID from BOTH opening_direct_visual_ids and
+later_direct_visual_ids. Select same_entity_as IDs only from identity_ids.
 
-Return exactly one JSON object:
-{"relation_supported":true,"target_semantic_id":"TP1",
-"counter_semantic_ids":["TP2"],"scope_semantic_id":"TP3",
-"visual_support_ids":["V claim id"],
-"identity_support_ids":["same_entity_as claim id"],"confidence":0.0,
-"reason_codes":[]}
+Return exactly one JSON object with these keys: relation_supported (boolean),
+target_semantic_id (one supplied semantic ID), counter_semantic_ids (array of
+supplied semantic IDs), scope_semantic_id (one supplied semantic ID),
+visual_support_ids (array of supplied direct-visual IDs), identity_support_ids
+(array of supplied same_entity_as IDs), confidence (number above zero and at
+most one), and reason_codes (array of short strings).
 
-Use TP IDs only for semantic fields and V claim IDs only for visual/identity
-fields. A different activity is not itself a contradiction. Set
-relation_supported=false when the exact target is not refuted or subject
-alignment is unsupported. JSON only. Input:
+Use semantic IDs only for semantic fields and claim IDs only for visual or
+identity fields. Do not copy placeholder identifiers. A different activity is
+not itself a contradiction. Set relation_supported=false when the exact target
+is not refuted or subject alignment is unsupported. JSON only. Input:
 """
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded interpretation analyst.
@@ -752,10 +757,9 @@ def compile_interpretation_plan(
              "epistemic_role": "initial_assertion",
              "scope": target["scope"]},
             {"proposition_id": "P2",
-             "statement": "The sequence presents one identity-aligned subject "
-                          "in the opening category context and supplies multiple "
-                          "bounded capability claims and observable actions for "
-                          "that subject.",
+             "statement": "The sequence supplies multiple bounded capability "
+                          "claims and observable actions for one "
+                          "identity-aligned subject.",
              "source_ids": counter_refs, "semantic_ids": counter_ids,
              "epistemic_role": "counterevidence",
              "scope": "domain_bounded"},
@@ -894,6 +898,54 @@ def _interpretation_view(validated_reference: dict[str, Any]) -> dict[str, Any]:
         "artifact_sha": validated_reference.get("artifact_sha"),
         "source_catalog": claims,
         "events": events,
+    }
+
+
+def _interpretation_plan_catalog(
+        validated_reference: dict[str, Any],
+        text_semantics: dict[str, Any]) -> dict[str, Any]:
+    """Expose deterministic temporal choices without deciding their meaning."""
+    claims = {str(row.get("claim_id")): row
+              for row in validated_reference.get("accepted_claims") or []}
+
+    def bounds(refs: Iterable[Any]) -> list[float]:
+        intervals = [claims.get(str(ref), {}).get("interval") or []
+                     for ref in refs]
+        starts = [float(row[0]) for row in intervals if len(row) == 2]
+        ends = [float(row[1]) for row in intervals if len(row) == 2]
+        return [min(starts), max(ends)] if starts and ends else []
+
+    semantics = [{
+        "semantic_id": row.get("semantic_id"),
+        "proposition": row.get("proposition"),
+        "semantic_role": row.get("semantic_role"),
+        "scope": row.get("scope"),
+        "source_ids": row.get("source_ids") or [],
+        "interval": bounds(row.get("source_ids") or []),
+    } for row in text_semantics.get("items") or []]
+    broad = [str(row["semantic_id"]) for row in semantics
+             if row.get("semantic_role") == "assertion" and
+             row.get("scope") in {"general", "domain_bounded"}]
+    broad_ends = [float(row["interval"][1]) for row in semantics
+                  if str(row.get("semantic_id")) in broad and
+                  len(row.get("interval") or []) == 2]
+    opening_end = min(broad_ends) if broad_ends else 0.0
+    direct_visual = [row for row in claims.values()
+                     if row.get("modality") == "V" and
+                     row.get("predicate") != "same_entity_as"]
+    opening_visual = [str(row.get("claim_id")) for row in direct_visual
+                      if float((row.get("interval") or [1e9])[0]) <= opening_end]
+    later_visual = [str(row.get("claim_id")) for row in direct_visual
+                    if float((row.get("interval") or [1e9])[0]) > opening_end]
+    identity = [str(row.get("claim_id")) for row in claims.values()
+                if row.get("modality") == "V" and
+                row.get("predicate") == "same_entity_as"]
+    return {
+        "semantic_candidates": semantics,
+        "broad_target_ids": broad,
+        "opening_direct_visual_ids": opening_visual,
+        "later_direct_visual_ids": later_visual,
+        "identity_ids": identity,
     }
 
 
@@ -1050,6 +1102,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
     interpretation_input = {
         "validated_reference": _interpretation_view(validated_reference),
         "text_semantics": text_semantics,
+        "planning_catalog": _interpretation_plan_catalog(
+            validated_reference, text_semantics),
         "analysis_contract": analysis_contract or {},
     }
     base = json.dumps(interpretation_input, ensure_ascii=False,
