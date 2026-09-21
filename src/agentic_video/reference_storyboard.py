@@ -6,8 +6,9 @@ from typing import Any
 
 from src.agentic_video.manifest import json_hash
 
-SHOT_STORYBOARD_VERSION = "shot_storyboard_v1"
-AGENT_REFERENCE_VERSION = "agent_reference_v1"
+SHOT_STORYBOARD_VERSION = "shot_storyboard_v2"
+AGENT_REFERENCE_VERSION = "agent_reference_v2"
+IDENTITY_PREDICATES = {"same_entity_as", "different_entity_from"}
 
 
 class ReferenceStoryboardError(ValueError):
@@ -18,17 +19,29 @@ class ReferenceStoryboardError(ValueError):
 
 
 @dataclass
+class TransitionRef:
+    transition_id: str
+    transition_type: str | None
+    start_s: float
+    end_s: float
+    duration_s: float
+    from_shot_id: str | None
+    to_shot_id: str | None
+
+
+@dataclass
 class ShotCard:
     shot_id: str
     section_id: str
     start_s: float
     end_s: float
     duration_s: float
-    transition_in: str | None = None
-    transition_out: str | None = None
+    transition_in: TransitionRef | None = None
+    transition_out: TransitionRef | None = None
     visual_claim_ids: list[str] = field(default_factory=list)
     text_claim_ids: list[str] = field(default_factory=list)
     audio_claim_ids: list[str] = field(default_factory=list)
+    identity_claim_ids: list[str] = field(default_factory=list)
     event_ids: list[str] = field(default_factory=list)
     entity_ids: list[str] = field(default_factory=list)
     shot_size: str | None = None
@@ -55,10 +68,6 @@ def _interval(value: Any, *, reason_code: str) -> tuple[float, float]:
 
 def _overlaps(left: tuple[float, float], right: tuple[float, float]) -> bool:
     return max(left[0], right[0]) < min(left[1], right[1])
-
-
-def _transition_label(segment: dict[str, Any]) -> str:
-    return str(segment.get("transition_type") or segment.get("segment_id") or "transition")
 
 
 def _entity_root(value: Any) -> str | None:
@@ -88,6 +97,31 @@ def build_shot_storyboard(validated_reference: dict[str, Any]) -> dict[str, Any]
         raw_segments,
         key=lambda row: _interval(row.get("interval"), reason_code="segment_interval_invalid"),
     )
+    transition_refs: dict[str, TransitionRef] = {}
+    for index, segment in enumerate(ordered):
+        if segment.get("segment_kind") != "transition":
+            continue
+        transition_id = str(segment.get("segment_id") or "")
+        if not transition_id or transition_id in transition_refs:
+            raise ReferenceStoryboardError("transition_id_invalid", transition_id)
+        start, end = _interval(
+            segment.get("interval"), reason_code="transition_interval_invalid")
+        before = next((
+            row for row in reversed(ordered[:index])
+            if row.get("segment_kind") == "content"), None)
+        after = next((
+            row for row in ordered[index + 1:]
+            if row.get("segment_kind") == "content"), None)
+        transition_refs[transition_id] = TransitionRef(
+            transition_id=transition_id,
+            transition_type=(str(segment["transition_type"])
+                             if segment.get("transition_type") else None),
+            start_s=start,
+            end_s=end,
+            duration_s=round(end - start, 6),
+            from_shot_id=(str(before.get("segment_id")) if before else None),
+            to_shot_id=(str(after.get("segment_id")) if after else None),
+        )
     claim_ids: set[str] = set()
     claims: list[tuple[dict[str, Any], tuple[float, float]]] = []
     for claim in validated_reference.get("accepted_claims") or []:
@@ -123,11 +157,12 @@ def build_shot_storyboard(validated_reference: dict[str, Any]) -> dict[str, Any]
         transition_in = None
         transition_out = None
         if index > 0 and ordered[index - 1].get("segment_kind") == "transition":
-            transition_in = _transition_label(ordered[index - 1])
+            transition_in = transition_refs[str(ordered[index - 1]["segment_id"])]
         if index + 1 < len(ordered) and ordered[index + 1].get("segment_kind") == "transition":
-            transition_out = _transition_label(ordered[index + 1])
+            transition_out = transition_refs[str(ordered[index + 1]["segment_id"])]
 
         by_modality: dict[str, list[str]] = {"V": [], "T": [], "A": []}
+        identity_claim_ids: list[str] = []
         entities: set[str] = set()
         unresolved: list[str] = []
         for claim, interval in claims:
@@ -135,7 +170,9 @@ def build_shot_storyboard(validated_reference: dict[str, Any]) -> dict[str, Any]
                 continue
             claim_id = str(claim["claim_id"])
             modality = str(claim.get("modality") or "")
-            if modality in by_modality:
+            if claim.get("predicate") in IDENTITY_PREDICATES:
+                identity_claim_ids.append(claim_id)
+            elif modality in by_modality:
                 by_modality[modality].append(claim_id)
             else:
                 unresolved.append(f"unrouted_modality:{claim_id}:{modality}")
@@ -174,6 +211,7 @@ def build_shot_storyboard(validated_reference: dict[str, Any]) -> dict[str, Any]
             visual_claim_ids=sorted(by_modality["V"]),
             text_claim_ids=sorted(by_modality["T"]),
             audio_claim_ids=sorted(by_modality["A"]),
+            identity_claim_ids=sorted(identity_claim_ids),
             event_ids=sorted(overlapping_events),
             entity_ids=sorted(entities),
             shot_size=observed_fields["shot_size"],

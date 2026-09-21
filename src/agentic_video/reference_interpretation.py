@@ -9,7 +9,7 @@ from typing import Any
 from src.agentic_video.manifest import json_hash
 
 INTERPRETATION_VERSION = "reference_interpretation_v1"
-RELATION_AUDIT_VERSION = "reference_relation_audit_v1"
+RELATION_AUDIT_VERSION = "reference_relation_audit_v2"
 RELATION_TYPES = {
     "supports", "contradicts", "qualifies", "reframes", "causes",
     "enables", "precedes", "contrasts", "accumulates", "reveals",
@@ -39,20 +39,24 @@ Every support ID must exist in the input. A relation may not introduce an
 unstated proposition in its reason. JSON only. Input:
 """
 
-RELATION_AUDIT_PROMPT = """You are an independent relation auditor. Do not
-rewrite the candidate. For each supplied relation, check whether its source and
-target propositions are entailed by their cited evidence, whether the named
-relation holds, and whether proposition scope is preserved. When no relations
-are supplied, return checks=[] and pass=true.
+RELATION_AUDIT_PROMPT = """You are an independent evidence auditor. First
+audit every proposition, then audit every relation. Do not rewrite the
+candidate. For each proposition, check whether its cited evidence entails the
+statement and preserves its scope. For each relation, check whether its source
+and target propositions are entailed, whether the named relation holds, and
+whether proposition scope is preserved.
 
 Return exactly one JSON object:
-{"schema_version":"reference_relation_audit_v1",
-"checks":[{"relation_id":"R1","source_entailed":true,
+{"schema_version":"reference_relation_audit_v2",
+"proposition_checks":[{"proposition_id":"P1","entailed":true,
+"scope_valid":true,"reason_codes":[]}],
+"relation_checks":[{"relation_id":"R1","source_entailed":true,
 "target_entailed":true,"relation_valid":true,"scope_valid":true,
 "reason_codes":[]}],"pass":true}
 
-Include every relation ID exactly once. Set pass=true only when every boolean
-in every check is true. JSON only. Input:
+Include every proposition ID and relation ID exactly once. An empty relation
+list requires relation_checks=[] but propositions still require checks. Set
+pass=true only when every boolean in every check is true. JSON only. Input:
 """
 
 
@@ -95,6 +99,25 @@ def _source_ids(agent_reference: dict[str, Any]) -> set[str]:
         for row in agent_reference.get("events") or []
         if row.get("event_id")
     }
+
+
+def interpretation_contract_sha() -> str:
+    return json_hash({
+        "interpretation_version": INTERPRETATION_VERSION,
+        "audit_version": RELATION_AUDIT_VERSION,
+        "relation_types": sorted(RELATION_TYPES),
+        "interpretation_prompt": INTERPRETATION_PROMPT,
+        "audit_prompt": RELATION_AUDIT_PROMPT,
+    })
+
+
+def analysis_fingerprint(interpreter_runner: Any, audit_runner: Any) -> str:
+    return json_hash({
+        "contract_sha": interpretation_contract_sha(),
+        "interpreter_model": str(
+            getattr(interpreter_runner, "model_id", "unknown")),
+        "auditor_model": str(getattr(audit_runner, "model_id", "unknown")),
+    })
 
 
 def build_interpretation_payload(agent_reference: dict[str, Any]) -> dict[str, Any]:
@@ -175,20 +198,43 @@ def validate_relation_audit(audit: dict[str, Any],
                             interpretation: dict[str, Any]) -> dict[str, Any]:
     if audit.get("schema_version") != RELATION_AUDIT_VERSION:
         raise ReferenceInterpretationError("relation_audit_schema_invalid")
-    checks = audit.get("checks")
-    if not isinstance(checks, list) or not isinstance(audit.get("pass"), bool):
+    proposition_checks = audit.get("proposition_checks")
+    relation_checks = audit.get("relation_checks")
+    if (not isinstance(proposition_checks, list) or
+            not isinstance(relation_checks, list) or
+            not isinstance(audit.get("pass"), bool)):
         raise ReferenceInterpretationError("relation_audit_shape_invalid")
-    expected = {
+    expected_props = {
+        str(row["proposition_id"])
+        for row in interpretation.get("propositions") or []
+    }
+    expected_relations = {
         str(row["relation_id"]) for row in interpretation.get("relations") or []
     }
-    actual: set[str] = set()
+    actual_props: set[str] = set()
+    actual_relations: set[str] = set()
     all_valid = True
-    for check in checks:
+    for check in proposition_checks:
+        proposition_id = str(check.get("proposition_id") or "")
+        if not proposition_id or proposition_id in actual_props:
+            raise ReferenceInterpretationError(
+                "proposition_audit_id_invalid", proposition_id)
+        actual_props.add(proposition_id)
+        for key in ("entailed", "scope_valid"):
+            if not isinstance(check.get(key), bool):
+                raise ReferenceInterpretationError(
+                    "proposition_audit_boolean_invalid",
+                    f"{proposition_id}:{key}")
+            all_valid = all_valid and bool(check[key])
+        if not isinstance(check.get("reason_codes"), list):
+            raise ReferenceInterpretationError(
+                "proposition_audit_reason_codes_invalid", proposition_id)
+    for check in relation_checks:
         relation_id = str(check.get("relation_id") or "")
-        if not relation_id or relation_id in actual:
+        if not relation_id or relation_id in actual_relations:
             raise ReferenceInterpretationError(
                 "relation_audit_id_invalid", relation_id)
-        actual.add(relation_id)
+        actual_relations.add(relation_id)
         for key in (
             "source_entailed", "target_entailed", "relation_valid", "scope_valid",
         ):
@@ -199,7 +245,9 @@ def validate_relation_audit(audit: dict[str, Any],
         if not isinstance(check.get("reason_codes"), list):
             raise ReferenceInterpretationError(
                 "relation_audit_reason_codes_invalid", relation_id)
-    if actual != expected:
+    if actual_props != expected_props:
+        raise ReferenceInterpretationError("proposition_audit_coverage_invalid")
+    if actual_relations != expected_relations:
         raise ReferenceInterpretationError("relation_audit_coverage_invalid")
     if bool(audit["pass"]) != all_valid:
         raise ReferenceInterpretationError("relation_audit_pass_invalid")
@@ -209,11 +257,21 @@ def validate_relation_audit(audit: dict[str, Any],
 def finalize_interpretation(interpretation: dict[str, Any],
                             audit: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(interpretation)
-    checks = {
-        str(row["relation_id"]): row for row in audit.get("checks") or []
+    proposition_checks = {
+        str(row["proposition_id"]): row
+        for row in audit.get("proposition_checks") or []
     }
+    relation_checks = {
+        str(row["relation_id"]): row
+        for row in audit.get("relation_checks") or []
+    }
+    for proposition in result.get("propositions") or []:
+        check = proposition_checks[str(proposition["proposition_id"])]
+        proposition["verification_status"] = (
+            "SUPPORTED" if check["entailed"] and check["scope_valid"]
+            else "UNRESOLVED")
     for relation in result.get("relations") or []:
-        check = checks[str(relation["relation_id"])]
+        check = relation_checks[str(relation["relation_id"])]
         relation["verification_status"] = (
             "SUPPORTED" if all(bool(check[key]) for key in (
                 "source_entailed", "target_entailed", "relation_valid", "scope_valid",
@@ -236,8 +294,9 @@ def _write_trace(trace_dir: Path | None, name: str, content: str) -> None:
 def run_reference_interpretation(
         interpreter_runner: Any, audit_runner: Any,
         agent_reference: dict[str, Any], *,
-        trace_dir: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    trace_dir: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Generate once, audit once, and never retry unchanged evidence."""
+    fingerprint = analysis_fingerprint(interpreter_runner, audit_runner)
     payload = build_interpretation_payload(agent_reference)
     request = INTERPRETATION_PROMPT + json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"))
@@ -264,9 +323,11 @@ def run_reference_interpretation(
     validate_relation_audit(audit, interpretation)
     result = finalize_interpretation(interpretation, audit)
     result["agent_reference_sha"] = agent_reference.get("artifact_sha")
+    result["analysis_fingerprint"] = fingerprint
     result.pop("artifact_sha", None)
     result["artifact_sha"] = json_hash(result)
     audit["agent_reference_sha"] = agent_reference.get("artifact_sha")
+    audit["analysis_fingerprint"] = fingerprint
     audit["interpretation_sha"] = result["artifact_sha"]
     audit["artifact_sha"] = json_hash(audit)
     return result, audit
@@ -276,7 +337,7 @@ def run_reference_interpretation_checkpointed(
         interpreter_runner: Any, audit_runner: Any,
         agent_reference: dict[str, Any], *, checkpoint_dir: Path,
         trace_dir: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Reuse semantic output until its evidence artifact SHA changes."""
+    """Reuse output only while evidence and the analysis contract match."""
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     interpretation_path = checkpoint_dir / "reference_interpretation.json"
     audit_path = checkpoint_dir / "reference_relation_audit.json"
@@ -292,8 +353,11 @@ def run_reference_interpretation_checkpointed(
             raise ReferenceInterpretationError(
                 "interpretation_checkpoint_invalid") from exc
         evidence_sha = agent_reference.get("artifact_sha")
+        fingerprint = analysis_fingerprint(interpreter_runner, audit_runner)
         if (interpretation.get("agent_reference_sha") == evidence_sha and
-                audit.get("agent_reference_sha") == evidence_sha):
+                audit.get("agent_reference_sha") == evidence_sha and
+                interpretation.get("analysis_fingerprint") == fingerprint and
+                audit.get("analysis_fingerprint") == fingerprint):
             validate_interpretation(interpretation, agent_reference)
             validate_relation_audit(audit, interpretation)
             return interpretation, audit

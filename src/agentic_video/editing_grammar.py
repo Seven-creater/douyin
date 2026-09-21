@@ -5,12 +5,15 @@ import copy
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import mean, median
 from typing import Any
 
 from src.agentic_video.manifest import json_hash
 
-MEASURED_EDITING_VERSION = "measured_editing_facts_v1"
-EDITING_GRAMMAR_VERSION = "editing_grammar_v1"
+MEASURED_EDITING_VERSION = "measured_editing_facts_v2"
+EDITING_PATTERN_VERSION = "editing_patterns_v1"
+EDITING_FUNCTION_VERSION = "editing_functions_v1"
+EDITING_GRAMMAR_VERSION = "editing_grammar_v2"
 
 PATTERN_TYPES = {
     "long_hold", "rapid_montage", "rhythmic_acceleration",
@@ -28,32 +31,45 @@ PACE_PATTERN_TYPES = {
     "rhythmic_deceleration",
 }
 
-EDITING_GRAMMAR_PROMPT = """You are an editing-pattern analyst. The supplied
-durations, order, transitions, and density values are immutable measurements.
-First identify local editing patterns; then assign a separate information
-function to each pattern. Do not recalculate timing and do not infer character
-motives or audience beliefs.
+EDITING_PATTERN_PROMPT = """You are an editing-pattern recognition analyst.
+The supplied durations, order, transitions, rates, claims, and events are the
+complete observation input. Identify editing techniques only; do not infer
+narrative function, motives, or audience beliefs. The measured values are
+immutable and must not be recalculated.
 
 Allowed pattern types: long_hold, rapid_montage, rhythmic_acceleration,
 rhythmic_deceleration, reaction_cut, contrast_cut, delayed_reveal,
 cut_on_action, match_cut, shot_reverse_shot, transition_chain,
 parallel_editing, insert_shot, audio_bridge.
 
+Return exactly one JSON object:
+{"schema_version":"editing_patterns_v1",
+"patterns":[{"pattern_id":"EP1","type":"rapid_montage",
+"scope":"local|global","shot_ids":["..."],"fact_ids":["..."],
+"evidence_ids":["claim or event ID"],"confidence":0.0}],
+"limitations":["..."]}
+
+Every pattern requires at least two shots and semantic evidence IDs. A local
+pattern must not cover most of the full video. A deterministic pace change is
+context, not a required semantic label. JSON only. Input:
+"""
+
+EDITING_FUNCTION_PROMPT = """You are an editing-function reasoning analyst.
+The supplied editing patterns have already passed recognition validation. Read
+them with the verified narrative interpretation and assign only the function
+supported in this case. Do not rename, add, or remove patterns.
+
 Allowed functions: establish, withhold, escalate, demonstrate, accumulate,
 reveal, reframe, contrast, release, humanize.
 
 Return exactly one JSON object:
-{"schema_version":"editing_grammar_v1",
-"patterns":[{"pattern_id":"EP1","type":"rapid_montage",
-"scope":"local|global","shot_ids":["..."],"fact_ids":["..."],
-"confidence":0.0}],
+{"schema_version":"editing_functions_v1",
 "functions":[{"pattern_id":"EP1","function":"accumulate",
-"relation_to_story":["relation ID"],"confidence":0.0}],
+"relation_to_story":["verified relation ID"],"confidence":0.0}],
 "limitations":["..."]}
 
-Every pattern requires at least two shots. A local pattern must not cover most
-of the full video. A significant density change requires a local pace pattern.
-It is valid to leave relation_to_story empty. JSON only. Input:
+Return one function for every supplied pattern. relation_to_story may be empty.
+JSON only. Input:
 """
 
 
@@ -71,9 +87,12 @@ class EditingFact:
     section_id: str
     interval: list[float]
     duration_s: float
-    transition_in: str | None
-    transition_out: str | None
-    local_cut_density: float
+    transition_in: dict[str, Any] | None
+    transition_out: dict[str, Any] | None
+    local_shot_rate: float
+    local_cut_rate: float
+    local_transition_rate: float
+    local_raw_segment_rate: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -91,8 +110,32 @@ def _interval(value: Any, *, reason_code: str) -> tuple[float, float]:
     return start, end
 
 
+def _rate(count: int, duration: float) -> float:
+    return round(count / duration, 6)
+
+
+def _pace_changes(curve: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    changes = []
+    for left, right in zip(curve, curve[1:]):
+        before = float(left["shot_rate"])
+        after = float(right["shot_rate"])
+        low = min(before, after)
+        high = max(before, after)
+        ratio = high / low if low > 0 else float("inf")
+        if abs(after - before) < 0.25 or ratio < 1.5:
+            continue
+        changes.append({
+            "from_section": str(left["section_id"]),
+            "to_section": str(right["section_id"]),
+            "direction": "accelerates" if after > before else "decelerates",
+            "shot_rate_before": before,
+            "shot_rate_after": after,
+        })
+    return changes
+
+
 def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, Any]:
-    """Measure timing and density without assigning editing functions."""
+    """Measure shot, cut and transition pace without semantic labels."""
     timeline = agent_reference.get("deterministic_timeline") or {}
     sections = list(timeline.get("sections") or [])
     segments = list(timeline.get("segments") or [])
@@ -112,19 +155,40 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
         member_segments = [
             row for row in segments if str(row.get("section_id") or "") == section_id
         ]
-        member_shots = [
-            str(row.get("shot_id")) for row in cards
-            if str(row.get("section_id") or "") == section_id
+        content_segments = [
+            row for row in member_segments if row.get("segment_kind") == "content"
+        ]
+        transition_segments = [
+            row for row in member_segments if row.get("segment_kind") == "transition"
         ]
         duration = end - start
-        density = round(len(member_segments) / duration, 6)
+        shot_durations = [
+            shot_end - shot_start for shot_start, shot_end in (
+                _interval(row.get("interval"), reason_code="shot_interval_invalid")
+                for row in content_segments)
+        ]
+        if not shot_durations:
+            raise EditingGrammarError("section_content_shots_missing", section_id)
+        shot_count = len(content_segments)
+        cut_count = max(shot_count - 1, 0)
+        transition_count = len(transition_segments)
         row = {
             "section_id": section_id,
             "interval": [start, end],
             "duration_s": round(duration, 6),
-            "segment_count": len(member_segments),
-            "shot_ids": member_shots,
-            "density": density,
+            "content_shot_count": shot_count,
+            "cut_count": cut_count,
+            "transition_count": transition_count,
+            "shot_rate": _rate(shot_count, duration),
+            "cut_rate": _rate(cut_count, duration),
+            "transition_rate": _rate(transition_count, duration),
+            "mean_shot_duration_s": round(mean(shot_durations), 6),
+            "median_shot_duration_s": round(median(shot_durations), 6),
+            "raw_segment_count": len(member_segments),
+            "raw_segment_rate": _rate(len(member_segments), duration),
+            "shot_ids": [str(row.get("segment_id")) for row in content_segments],
+            "transition_ids": [
+                str(row.get("segment_id")) for row in transition_segments],
         }
         section_rows[section_id] = row
         pace_curve.append(row)
@@ -138,6 +202,7 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
         start, end = _interval(
             [card.get("start_s"), card.get("end_s")],
             reason_code="shot_card_interval_invalid")
+        section = section_rows[section_id]
         facts.append(EditingFact(
             fact_id=f"EF{index}",
             shot_id=str(card.get("shot_id") or ""),
@@ -146,7 +211,10 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
             duration_s=round(end - start, 6),
             transition_in=card.get("transition_in"),
             transition_out=card.get("transition_out"),
-            local_cut_density=float(section_rows[section_id]["density"]),
+            local_shot_rate=float(section["shot_rate"]),
+            local_cut_rate=float(section["cut_rate"]),
+            local_transition_rate=float(section["transition_rate"]),
+            local_raw_segment_rate=float(section["raw_segment_rate"]),
         ).to_dict())
 
     start_s = min(row["interval"][0] for row in pace_curve)
@@ -158,47 +226,76 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
         "duration_s": round(end_s - start_s, 6),
         "facts": facts,
         "pace_curve": pace_curve,
+        "pace_changes": _pace_changes(pace_curve),
     }
     result["artifact_sha"] = json_hash(result)
     return result
 
 
-def _significant_pace_changes(measured: dict[str, Any]) -> list[dict[str, Any]]:
-    curve = list(measured.get("pace_curve") or [])
-    changes = []
-    for left, right in zip(curve, curve[1:]):
-        before = float(left.get("density") or 0.0)
-        after = float(right.get("density") or 0.0)
-        low = min(before, after)
-        high = max(before, after)
-        ratio = high / low if low > 0 else float("inf")
-        if abs(after - before) < 0.25 or ratio < 1.5:
-            continue
-        changes.append({
-            "from_section": str(left.get("section_id")),
-            "to_section": str(right.get("section_id")),
-            "direction": "accelerates" if after > before else "decelerates",
+def build_editing_payload(agent_reference: dict[str, Any],
+                          measured: dict[str, Any]) -> dict[str, Any]:
+    """Dereference ShotCard IDs into the semantics used for recognition."""
+    claims = {
+        str(row.get("claim_id")): row for row in agent_reference.get("claims") or []
+    }
+    events = {
+        str(row.get("event_id")): row for row in agent_reference.get("events") or []
+    }
+
+    def resolve(ids: list[str], index: dict[str, dict[str, Any]],
+                reason_code: str) -> list[dict[str, Any]]:
+        missing = [str(value) for value in ids if str(value) not in index]
+        if missing:
+            raise EditingGrammarError(reason_code, ",".join(missing))
+        return [index[str(value)] for value in ids]
+
+    shot_rows = []
+    for card in (agent_reference.get("shot_storyboard") or {}).get(
+            "shot_cards") or []:
+        shot_rows.append({
+            "shot_id": card.get("shot_id"),
+            "section_id": card.get("section_id"),
+            "interval": [card.get("start_s"), card.get("end_s")],
+            "transition_in": card.get("transition_in"),
+            "transition_out": card.get("transition_out"),
+            "visual_claims": resolve(
+                list(card.get("visual_claim_ids") or []), claims,
+                "editing_visual_claim_missing"),
+            "text_claims": resolve(
+                list(card.get("text_claim_ids") or []), claims,
+                "editing_text_claim_missing"),
+            "audio_claims": resolve(
+                list(card.get("audio_claim_ids") or []), claims,
+                "editing_audio_claim_missing"),
+            "identity_claims": resolve(
+                list(card.get("identity_claim_ids") or []), claims,
+                "editing_identity_claim_missing"),
+            "events": resolve(
+                list(card.get("event_ids") or []), events,
+                "editing_event_missing"),
         })
-    return changes
+    return {"measured_editing": measured, "shots": shot_rows}
 
 
-def validate_editing_grammar(
+def _confidence(value: Any, reason_code: str, detail: str) -> None:
+    if not isinstance(value, (int, float)) or not 0 < value <= 1:
+        raise EditingGrammarError(reason_code, detail)
+
+
+def validate_editing_patterns(
         value: dict[str, Any], measured: dict[str, Any], *,
-        relation_ids: set[str]) -> dict[str, Any]:
-    if value.get("schema_version") != EDITING_GRAMMAR_VERSION:
-        raise EditingGrammarError("editing_grammar_schema_invalid")
+        evidence_ids: set[str]) -> dict[str, Any]:
+    if value.get("schema_version") != EDITING_PATTERN_VERSION:
+        raise EditingGrammarError("editing_pattern_schema_invalid")
     patterns = value.get("patterns")
-    functions = value.get("functions")
-    if not isinstance(patterns, list) or not isinstance(functions, list):
-        raise EditingGrammarError("editing_grammar_shape_invalid")
-    if not isinstance(value.get("limitations"), list):
-        raise EditingGrammarError("editing_grammar_limitations_invalid")
-
+    if not isinstance(patterns, list) or not isinstance(value.get("limitations"), list):
+        raise EditingGrammarError("editing_pattern_shape_invalid")
     facts = {str(row.get("fact_id")): row for row in measured.get("facts") or []}
     shots = {str(row.get("shot_id")): row for row in measured.get("facts") or []}
     total = float(measured.get("duration_s") or 0.0)
     if total <= 0:
         raise EditingGrammarError("editing_duration_invalid")
+
     result = copy.deepcopy(value)
     pattern_ids: set[str] = set()
     pattern_sections: dict[str, set[str]] = {}
@@ -222,9 +319,10 @@ def validate_editing_grammar(
         fact_ids = list(map(str, pattern.get("fact_ids") or []))
         if not fact_ids or not set(fact_ids).issubset(facts):
             raise EditingGrammarError("pattern_fact_invalid", pattern_id)
-        confidence = pattern.get("confidence")
-        if not isinstance(confidence, (int, float)) or not 0 < confidence <= 1:
-            raise EditingGrammarError("pattern_confidence_invalid", pattern_id)
+        cited = list(map(str, pattern.get("evidence_ids") or []))
+        if not cited or not set(cited).issubset(evidence_ids):
+            raise EditingGrammarError("pattern_evidence_invalid", pattern_id)
+        _confidence(pattern.get("confidence"), "pattern_confidence_invalid", pattern_id)
         start = min(float(shots[shot_id]["interval"][0]) for shot_id in shot_ids)
         end = max(float(shots[shot_id]["interval"][1]) for shot_id in shot_ids)
         pattern["span"] = [start, end]
@@ -234,26 +332,9 @@ def validate_editing_grammar(
             str(shots[shot_id]["section_id"]) for shot_id in shot_ids
         }
 
-    function_patterns: set[str] = set()
-    for function in result["functions"]:
-        pattern_id = str(function.get("pattern_id") or "")
-        if pattern_id not in pattern_ids or pattern_id in function_patterns:
-            raise EditingGrammarError("function_pattern_invalid", pattern_id)
-        function_patterns.add(pattern_id)
-        if function.get("function") not in FUNCTION_TYPES:
-            raise EditingGrammarError("function_type_invalid", pattern_id)
-        links = function.get("relation_to_story")
-        if not isinstance(links, list) or not set(map(str, links)).issubset(relation_ids):
-            raise EditingGrammarError("function_story_relation_invalid", pattern_id)
-        confidence = function.get("confidence")
-        if not isinstance(confidence, (int, float)) or not 0 < confidence <= 1:
-            raise EditingGrammarError("function_confidence_invalid", pattern_id)
-    if function_patterns != pattern_ids:
-        raise EditingGrammarError("pattern_function_coverage_invalid")
-
-    for change in _significant_pace_changes(measured):
-        right_section = change["to_section"]
-        direction = change["direction"]
+    warnings = []
+    for change in measured.get("pace_changes") or []:
+        direction = str(change.get("direction"))
         allowed = (
             {"rapid_montage", "rhythmic_acceleration"}
             if direction == "accelerates"
@@ -261,15 +342,46 @@ def validate_editing_grammar(
         )
         covered = any(
             pattern_types[pattern_id] in allowed and
-            right_section in pattern_sections[pattern_id]
+            str(change.get("to_section")) in pattern_sections[pattern_id]
             for pattern_id in pattern_ids
         )
         if not covered:
-            raise EditingGrammarError(
-                "pace_change_uncovered",
-                f"{change['from_section']}->{right_section}")
-
+            warnings.append(
+                "pace_change_unexplained:"
+                f"{change.get('from_section')}->{change.get('to_section')}")
+    result["coverage_warnings"] = warnings
     result["measured_editing_sha"] = measured.get("artifact_sha")
+    result["artifact_sha"] = json_hash(result)
+    return result
+
+
+def validate_editing_functions(
+        value: dict[str, Any], patterns: dict[str, Any], *,
+        relation_ids: set[str]) -> dict[str, Any]:
+    if value.get("schema_version") != EDITING_FUNCTION_VERSION:
+        raise EditingGrammarError("editing_function_schema_invalid")
+    functions = value.get("functions")
+    if not isinstance(functions, list) or not isinstance(value.get("limitations"), list):
+        raise EditingGrammarError("editing_function_shape_invalid")
+    pattern_ids = {
+        str(row.get("pattern_id")) for row in patterns.get("patterns") or []
+    }
+    actual: set[str] = set()
+    result = copy.deepcopy(value)
+    for function in result["functions"]:
+        pattern_id = str(function.get("pattern_id") or "")
+        if pattern_id not in pattern_ids or pattern_id in actual:
+            raise EditingGrammarError("function_pattern_invalid", pattern_id)
+        actual.add(pattern_id)
+        if function.get("function") not in FUNCTION_TYPES:
+            raise EditingGrammarError("function_type_invalid", pattern_id)
+        links = function.get("relation_to_story")
+        if not isinstance(links, list) or not set(map(str, links)).issubset(relation_ids):
+            raise EditingGrammarError("function_story_relation_invalid", pattern_id)
+        _confidence(function.get("confidence"), "function_confidence_invalid", pattern_id)
+    if actual != pattern_ids:
+        raise EditingGrammarError("pattern_function_coverage_invalid")
+    result["patterns_sha"] = patterns.get("artifact_sha")
     result["artifact_sha"] = json_hash(result)
     return result
 
@@ -292,35 +404,63 @@ def _parse_object(raw: str) -> dict[str, Any]:
     return value
 
 
+def _write_trace(trace_dir: Path | None, name: str, content: str) -> None:
+    if trace_dir is None:
+        return
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    (trace_dir / name).write_text(content, encoding="utf-8")
+
+
 def analyze_editing_grammar(
-        runner: Any, agent_reference: dict[str, Any],
-        interpretation: dict[str, Any], *,
+        pattern_runner: Any, function_runner: Any,
+        agent_reference: dict[str, Any], interpretation: dict[str, Any], *,
         trace_dir: Path | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Measure deterministically, then make one pattern/function request."""
+    """Measure once, recognize patterns once, then reason functions once."""
     measured = build_measured_editing_facts(agent_reference)
-    payload = {
-        "measured_editing": measured,
-        "shot_cards": list(
-            (agent_reference.get("shot_storyboard") or {}).get("shot_cards") or []),
+    pattern_payload = build_editing_payload(agent_reference, measured)
+    pattern_request = EDITING_PATTERN_PROMPT + json.dumps(
+        pattern_payload, ensure_ascii=False, separators=(",", ":"))
+    _write_trace(trace_dir, "editing_pattern_request.txt", pattern_request)
+    pattern_answer = pattern_runner.ask(
+        pattern_request, max_new_tokens=4096, stop_after_json_object=True)
+    pattern_raw = str(getattr(pattern_answer, "text", pattern_answer))
+    _write_trace(trace_dir, "editing_pattern_response.txt", pattern_raw)
+    evidence_ids = {
+        str(row.get("claim_id")) for row in agent_reference.get("claims") or []
+    } | {
+        str(row.get("event_id")) for row in agent_reference.get("events") or []
+    }
+    patterns = validate_editing_patterns(
+        _parse_object(pattern_raw), measured, evidence_ids=evidence_ids)
+
+    function_payload = {
+        "validated_patterns": patterns,
         "verified_interpretation": interpretation,
     }
-    request = EDITING_GRAMMAR_PROMPT + json.dumps(
-        payload, ensure_ascii=False, separators=(",", ":"))
-    if trace_dir is not None:
-        trace_dir.mkdir(parents=True, exist_ok=True)
-        (trace_dir / "editing_grammar_request.txt").write_text(
-            request, encoding="utf-8")
-    answer = runner.ask(
-        request, max_new_tokens=4096, stop_after_json_object=True)
-    raw = str(getattr(answer, "text", answer))
-    if trace_dir is not None:
-        (trace_dir / "editing_grammar_response.txt").write_text(
-            raw, encoding="utf-8")
-    value = _parse_object(raw)
+    function_request = EDITING_FUNCTION_PROMPT + json.dumps(
+        function_payload, ensure_ascii=False, separators=(",", ":"))
+    _write_trace(trace_dir, "editing_function_request.txt", function_request)
+    function_answer = function_runner.ask(
+        function_request, max_new_tokens=3072, stop_after_json_object=True)
+    function_raw = str(getattr(function_answer, "text", function_answer))
+    _write_trace(trace_dir, "editing_function_response.txt", function_raw)
     relation_ids = {
         str(row.get("relation_id"))
         for row in interpretation.get("relations") or []
         if row.get("verification_status") == "SUPPORTED"
     }
-    return validate_editing_grammar(
-        value, measured, relation_ids=relation_ids), measured
+    functions = validate_editing_functions(
+        _parse_object(function_raw), patterns, relation_ids=relation_ids)
+    result = {
+        "schema_version": EDITING_GRAMMAR_VERSION,
+        "patterns": patterns["patterns"],
+        "functions": functions["functions"],
+        "coverage_warnings": patterns["coverage_warnings"],
+        "pattern_limitations": patterns["limitations"],
+        "function_limitations": functions["limitations"],
+        "measured_editing_sha": measured.get("artifact_sha"),
+        "patterns_sha": patterns.get("artifact_sha"),
+        "functions_sha": functions.get("artifact_sha"),
+    }
+    result["artifact_sha"] = json_hash(result)
+    return result, measured
