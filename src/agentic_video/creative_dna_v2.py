@@ -8,9 +8,9 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v4"
+INTERPRETATION_VERSION = "reference_interpretation_v5"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
-TEXT_SEMANTICS_VERSION = "text_semantics_v2"
+TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
 DNA_PUBLISH_VERSION = "creative_dna_v2"
 
@@ -358,7 +358,8 @@ def validate_text_semantics(value: dict[str, Any],
         if not proposition:
             raise DNAV2Error("text_semantics_proposition_missing")
         if re.search(
-                r"\b(?:text|caption|overlay).{0,40}\b(?:contains?|reads?|shows?|states?)\b",
+                r"\b(?:text|caption|overlay).{0,40}\b(?:contains?|reads?|shows?|states?)\b|"
+                r"(?:文本|文字|字幕).{0,20}(?:包含|显示|写着|写有)",
                 proposition.casefold()):
             raise DNAV2Error("text_semantics_literal_transcription")
     if covered != valid_ids:
@@ -530,13 +531,6 @@ def validate_interpretation(value: dict[str, Any],
                 "qualification_source_modalities") or []))
             if not required.issubset(observed):
                 raise DNAV2Error("interpretation_qualification_modality_invalid")
-            if text_semantics is not None and not any(
-                    semantic_by_id.get(str(semantic_id), {}).get(
-                        "semantic_role") == "qualification"
-                    for item in scope_rows
-                    for semantic_id in item.get("semantic_ids") or []):
-                raise DNAV2Error(
-                    "interpretation_qualification_semantics_invalid")
     relation_types = {str(row.get("type")) for row in relations}
     if not set(map(str, contract.get(
             "required_relation_types") or [])).issubset(relation_types):
@@ -735,13 +729,16 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
                 json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
     view = _analysis_view(validated_reference)
+    analysis_contract_sha = json_hash(analysis_contract or {})
     text_claims = [row for row in validated_reference.get("accepted_claims") or []
                    if row.get("modality") == "T"]
     text_semantics = load_cache("text_semantics.json")
     if text_semantics is not None:
         if text_semantics.get("schema_version") != TEXT_SEMANTICS_VERSION or \
                 text_semantics.get("validated_reference_sha") != \
-                validated_reference.get("artifact_sha"):
+                validated_reference.get("artifact_sha") or \
+                text_semantics.get("analysis_contract_sha") != \
+                analysis_contract_sha:
             text_semantics = None
         else:
             try:
@@ -763,6 +760,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
         text_semantics = {
             "schema_version": TEXT_SEMANTICS_VERSION,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
+            "analysis_contract_sha": analysis_contract_sha,
             **proposed_text,
         }
         text_semantics["artifact_sha"] = json_hash(text_semantics)
@@ -785,7 +783,9 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
                 interpretation.get("validated_reference_sha") != \
                 validated_reference.get("artifact_sha") or \
                 interpretation.get("text_semantics_sha") != \
-                text_semantics.get("artifact_sha"):
+                text_semantics.get("artifact_sha") or \
+                interpretation.get("analysis_contract_sha") != \
+                analysis_contract_sha:
             interpretation = None
         else:
             try:
@@ -818,6 +818,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             "schema_version": INTERPRETATION_VERSION,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
             "text_semantics_sha": text_semantics.get("artifact_sha"),
+            "analysis_contract_sha": analysis_contract_sha,
             **proposed_interpretation,
             **audit_result,
         }
