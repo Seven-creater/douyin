@@ -15,6 +15,8 @@ def _args() -> argparse.Namespace:
                         required=True)
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--run-config", default="config/p0_r1_current.json")
+    parser.add_argument("--source-video", default=None)
+    parser.add_argument("--p04e-dir", default=None)
     parser.add_argument("--review-file")
     parser.add_argument("--holdout")
     parser.add_argument("--gpu-pair", default="0,1")
@@ -28,8 +30,8 @@ def main() -> None:
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     run_config = json.loads(Path(args.run_config).read_text(encoding="utf-8"))
-    source = Path(run_config["source_video"])
-    p04e = Path(run_config["legacy_p04e_dir"])
+    source = Path(args.source_video or run_config["source_video"])
+    p04e = Path(args.p04e_dir or run_config["legacy_p04e_dir"])
     from src.agentic_video.p0_r1 import (
         build_release_candidate, compile_validated_reference,
         run_visual_perception)
