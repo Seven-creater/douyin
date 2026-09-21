@@ -200,16 +200,20 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
         if last_error is not None:
             guidance = {
                 "interpretation_required_role_missing": (
-                    "Do not label every later fact as an initial assertion. "
-                    "Semantically test later evidence against the earlier "
-                    "proposition and assign counterevidence or scope_limit when "
-                    "the cited evidence supports those roles."),
+                    "The fresh object must contain every epistemic_role named "
+                    "by analysis_contract. Do not label every later fact as an "
+                    "initial assertion. Aggregate bounded competence evidence "
+                    "as counterevidence when it refutes the exact broad "
+                    "negative assertion, and mark a real closing exception as "
+                    "scope_limit. Emit every required relation type too."),
                 "interpretation_roles_collapsed": (
-                    "Do not label every proposition as an initial assertion. "
-                    "Aggregate later bounded competence evidence with relevant "
-                    "visual presentation and identity support, then test it "
-                    "against the exact earlier general assertion. Mark a real "
-                    "closing exception as scope_limit."),
+                    "The fresh object must contain every epistemic_role and "
+                    "relation type named by analysis_contract. Aggregate later "
+                    "bounded competence evidence with relevant visual "
+                    "presentation and identity support as counterevidence, "
+                    "then test it against the exact earlier broad negative "
+                    "assertion. Mark the real closing exception as scope_limit. "
+                    "Do not emit a one-item-per-claim inventory."),
                 "interpretation_required_relation_missing": (
                     "Use contradicts only for evidence bearing on the exact "
                     "target proposition, and qualifies only for a real scope "
@@ -817,7 +821,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             validator=lambda value: validate_interpretation(
                 value, validated_reference, analysis_contract, text_semantics),
             post_validator=semantic_post_validator, trace_dir=trace_dir,
-            trace_name="interpretation", attempts=3)
+            trace_name="interpretation", attempts=5)
         _attach_interpretation_provenance(
             proposed_interpretation, validated_reference)
         interpretation = {
