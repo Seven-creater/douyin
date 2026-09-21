@@ -497,6 +497,8 @@ def _validate_dna_supports(audit: dict[str, Any], *,
                            interpretation: dict[str, Any],
                            editing_analysis: dict[str, Any]) -> None:
     valid_support = (_source_ids(validated_reference) |
+                     _ids(interpretation.get("propositions") or [],
+                          "proposition_id") |
                      _ids(interpretation.get("relations") or [], "relation_id") |
                      _ids(editing_analysis.get("functional_relations") or [],
                           "relation_id"))
@@ -516,7 +518,8 @@ def _validate_dna_supports(audit: dict[str, Any], *,
 
 
 def run_director(validated_reference: dict[str, Any], interpretation: dict[str, Any],
-                 editing_analysis: dict[str, Any], *, runner: Any
+                 editing_analysis: dict[str, Any], *, runner: Any,
+                 trace_dir: Path | None = None
                  ) -> tuple[dict[str, Any], dict[str, Any]]:
     if interpretation.get("validated_reference_sha") != \
             validated_reference.get("artifact_sha"):
@@ -531,7 +534,10 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
         payload, ensure_ascii=False, separators=(",", ":"))
     proposed_publish: tuple[dict[str, Any], dict[str, Any]] | None = None
     last_error: DNAV2Error | None = None
-    for _attempt in range(2):
+    trace_path = Path(trace_dir) if trace_dir is not None else None
+    if trace_path is not None:
+        trace_path.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, 3):
         suffix = ""
         if last_error is not None:
             suffix = ("\nCORRECTION: the previous object failed gate "
@@ -540,8 +546,12 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
                       "previous response or any source phrase.\n")
         answer = runner.ask(base_prompt + suffix, max_new_tokens=4096,
                             stop_after_json_object=True)
+        raw = _answer_text(answer)
+        if trace_path is not None:
+            (trace_path / f"director_attempt_{attempt:03d}.txt").write_text(
+                raw, encoding="utf-8")
         try:
-            candidate = _parse_object(_answer_text(answer))
+            candidate = _parse_object(raw)
             validate_dna_audit(candidate)
             _validate_dna_supports(
                 candidate, validated_reference=validated_reference,
@@ -550,9 +560,17 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
             candidate_publish = publish_dna(
                 candidate, validated_reference=validated_reference)
             proposed_publish = (candidate, candidate_publish)
+            if trace_path is not None:
+                (trace_path / f"director_attempt_{attempt:03d}_gate.json").write_text(
+                    json.dumps({"passed": True}, indent=2), encoding="utf-8")
             break
         except DNAV2Error as exc:
             last_error = exc
+            if trace_path is not None:
+                (trace_path / f"director_attempt_{attempt:03d}_gate.json").write_text(
+                    json.dumps({"passed": False,
+                                "reason_code": exc.reason_code}, indent=2),
+                    encoding="utf-8")
     if proposed_publish is None:
         assert last_error is not None
         raise last_error
