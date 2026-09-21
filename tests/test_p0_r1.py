@@ -10,7 +10,9 @@ from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
     DNAV2Error, build_writer_payload, publish_dna)
 from src.agentic_video.migration_eval import judge_case
-from src.agentic_video.p0_r1 import P0R1Blocked, _absolute_response_times
+from src.agentic_video.p0_r1 import (
+    P0R1Blocked, _absolute_response_times, compile_validated_reference)
+from src.agentic_video.recipe_v2 import sha256_file
 from src.agentic_video.provenance import (
     APPROVAL_POLICY_VERSION, propagate_revocation,
     validate_approval_binding)
@@ -132,6 +134,45 @@ def test_clip_local_times_are_validated_then_shifted() -> None:
             {"claims": [{"claim_id": "C1", "interval": [0, 2]}],
              "events": [], "coverage": {}},
             start_s=0, duration_s=1, stage="test")
+
+
+def test_manual_review_claims_can_validate_without_promoting_model_draft(
+        tmp_path: Path) -> None:
+    media = tmp_path / "source.mp4"
+    media.write_bytes(b"source")
+    source_sha = sha256_file(media)
+    perception = {
+        "source_sha": source_sha, "calls": {},
+        "deterministic_timeline": {"segments": [
+            {"segment_id": "S1", "section_id": "section_01",
+             "segment_kind": "content", "interval": [0.0, 1.0]}]}}
+    perception_path = tmp_path / "perception.json"
+    perception_path.write_text(json.dumps(perception), encoding="utf-8")
+    p04e = tmp_path / "p04e"
+    p04e.mkdir()
+    (p04e / "montage_shot_observations.json").write_text(
+        json.dumps({"sections": []}), encoding="utf-8")
+    review = {
+        "reviewer": "human", "claim_decisions": {},
+        "manual_support_template": {"kind": "human_review",
+                                    "path": str(media), "sha": source_sha},
+        "manual_claims": [{
+            "claim_id": "S1_V01", "subject": "E1",
+            "predicate": "appears_in", "object": "segment S1",
+            "interval": [0.0, 1.0], "modality": "V",
+            "visibility": "VISIBLE"}],
+        "manual_events": [{
+            "event_id": "EV1", "participants": ["E1"],
+            "action_claim_ids": ["S1_V01"], "object_ids": [],
+            "ordering": "observed", "outcome_claim_ids": [],
+            "interval": [0.0, 1.0]}],
+        "critical_claim_ids": ["S1_V01"], "edges": []}
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review), encoding="utf-8")
+    validated, ledger, _ = compile_validated_reference(
+        perception_path, p04e, review_path, tmp_path / "out")
+    assert [row["claim_id"] for row in validated["accepted_claims"]] == ["S1_V01"]
+    assert ledger["claims"][0]["producer"] == "human_frame_review"
 
 
 def test_claim_conflict_requires_exact_alignment_and_comparable_modality() -> None:

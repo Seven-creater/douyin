@@ -321,6 +321,7 @@ def _claim_from_model(row: dict[str, Any], *, claim_id: str, call_id: str,
     decision = review.get(claim_id) or {}
     accepted = decision.get("decision") == "supports"
     interval = [float(value) for value in row.get("interval") or []]
+    raw_object = row.get("object")
     support_refs = [{
         "ref_id": f"{call_id}:{row.get('claim_id')}", "kind": "frame_range",
         "path": perception["visual_mask"]["artifact_path"],
@@ -332,7 +333,9 @@ def _claim_from_model(row: dict[str, Any], *, claim_id: str, call_id: str,
     return {
         "claim_id": claim_id, "subject": str(row.get("subject") or "E_UNKNOWN"),
         "predicate": str(row.get("predicate") or "unmapped_observation"),
-        "object": str(row.get("object") or "unknown"), "interval": interval,
+        "object": str(raw_object if raw_object not in (None, "") else
+                      "UNSPECIFIED"),
+        "raw_object": raw_object, "interval": interval,
         "modality": "V", "polarity": str(row.get("polarity") or "POSITIVE"),
         "visibility": str(row.get("visibility") or "UNKNOWN"),
         "epistemic_status": "SUPPORTED" if accepted else "INSUFFICIENT",
@@ -382,12 +385,37 @@ def compile_validated_reference(perception_path: Path, p04e_dir: Path,
                                       event.get("outcome_claim_ids") or []],
                 "interval": list(event.get("interval") or []),
             })
+    for row in review_file.get("manual_claims") or []:
+        claim = dict(row)
+        claim.setdefault("modality", "V")
+        claim.setdefault("polarity", "POSITIVE")
+        claim.setdefault("visibility", "VISIBLE")
+        claim.setdefault("epistemic_status", "SUPPORTED")
+        claim.setdefault("producer", "human_frame_review")
+        claim["source_sha"] = perception["source_sha"]
+        claim["schema_version"] = CLAIM_LEDGER_VERSION
+        claim.setdefault("record_status", "ACTIVE")
+        claim.setdefault("supersedes", None)
+        if not claim.get("support_refs"):
+            support = dict(review_file.get("manual_support_template") or {})
+            support["ref_id"] = f"human:{claim.get('claim_id')}"
+            support.setdefault("coverage", {
+                "kind": "sampled", "interval": claim.get("interval")})
+            claim["support_refs"] = [support]
+        claim.setdefault("semantic_review", {
+            "decision": "supports", "reviewer": review_file.get("reviewer"),
+            "basis": "manual review of source-bound frames"})
+        ledger.add_claim(claim)
+    event_rows.extend(list(review_file.get("manual_events") or []))
     legacy_value = json.loads((Path(p04e_dir) /
                                "montage_shot_observations.json").read_text(
                                    encoding="utf-8"))
     legacy = import_legacy_montage(legacy_value, source_sha=perception["source_sha"])
     for claim in legacy.claims:
         ledger.add_claim(claim, verify_files=False)
+    for edge in review_file.get("edges") or []:
+        ledger.add_edge(str(edge.get("type")), str(edge.get("source")),
+                        str(edge.get("target")), basis=str(edge.get("basis") or ""))
     conflicts = ledger.find_conflicts()
     event_draft = build_event_draft(event_rows, ledger)
     coverage = {call_id: call["response"].get("coverage") or {}
