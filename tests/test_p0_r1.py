@@ -8,9 +8,9 @@ import pytest
 
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
-    DNAV2Error, build_writer_payload, publish_dna, validate_interpretation,
-    validate_editing_analysis, validate_interpretation_audit,
-    validate_text_semantics)
+    DNAV2Error, build_writer_payload, normalize_interpretation_roles,
+    publish_dna, validate_interpretation, validate_editing_analysis,
+    validate_interpretation_audit, validate_text_semantics)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
@@ -311,6 +311,22 @@ def test_interpretation_semantic_audit_requires_every_relation_to_pass() -> None
     with pytest.raises(DNAV2Error) as excinfo:
         validate_interpretation_audit(invalid, interpretation)
     assert excinfo.value.reason_code == "interpretation_semantic_audit_failed"
+
+
+def test_interpretation_roles_are_canonicalized_from_relations() -> None:
+    value = {"propositions": [
+        {"proposition_id": "P1", "epistemic_role": "initial_assertion"},
+        {"proposition_id": "P2", "epistemic_role": "initial_assertion"},
+        {"proposition_id": "P3", "epistemic_role": "initial_assertion"}],
+        "relations": [
+            {"type": "contradicts", "source_proposition_ids": ["P2"],
+             "target_proposition_id": "P1"},
+            {"type": "qualifies", "source_proposition_ids": ["P3"],
+             "target_proposition_id": "P2"}]}
+    normalize_interpretation_roles(value)
+    assert [row["epistemic_role"] for row in value["propositions"]] == [
+        "initial_assertion", "counterevidence", "scope_limit"]
+    assert len(value["role_normalization"]["changes"]) == 2
 
 
 def test_interpretation_semantic_audit_rejects_missing_relation() -> None:

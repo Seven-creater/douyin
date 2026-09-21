@@ -547,6 +547,42 @@ def validate_interpretation(value: dict[str, Any],
         raise DNAV2Error("interpretation_required_relation_missing")
 
 
+def normalize_interpretation_roles(value: dict[str, Any]) -> None:
+    """Canonicalize roles already implied by explicit logical relations."""
+    expected: dict[str, set[str]] = {}
+    for relation in value.get("relations") or []:
+        relation_type = relation.get("type")
+        if relation_type == "contradicts":
+            expected.setdefault(
+                str(relation.get("target_proposition_id")), set()).add(
+                    "initial_assertion")
+            for proposition_id in relation.get("source_proposition_ids") or []:
+                expected.setdefault(str(proposition_id), set()).add(
+                    "counterevidence")
+        elif relation_type == "qualifies":
+            for proposition_id in relation.get("source_proposition_ids") or []:
+                expected.setdefault(str(proposition_id), set()).add(
+                    "scope_limit")
+    conflicts = {key: roles for key, roles in expected.items()
+                 if len(roles) > 1}
+    if conflicts:
+        raise DNAV2Error("interpretation_role_relation_conflict")
+    changes = []
+    for proposition in value.get("propositions") or []:
+        proposition_id = str(proposition.get("proposition_id"))
+        roles = expected.get(proposition_id) or set()
+        if not roles:
+            continue
+        canonical = next(iter(roles))
+        previous = proposition.get("epistemic_role")
+        if previous != canonical:
+            proposition["epistemic_role"] = canonical
+            changes.append({"proposition_id": proposition_id,
+                            "from": previous, "to": canonical})
+    value["role_normalization"] = {
+        "rule": "relation_implied_roles_v1", "changes": changes}
+
+
 def validate_interpretation_audit(value: dict[str, Any],
                                   interpretation: dict[str, Any]) -> None:
     relation_ids = _ids(interpretation.get("relations") or [], "relation_id")
@@ -815,11 +851,15 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
                 text_semantics=text_semantics, interpretation=value,
                 trace_dir=trace_dir, attempt=attempt)
 
+        def validate_interpretation_candidate(value: dict[str, Any]) -> None:
+            normalize_interpretation_roles(value)
+            validate_interpretation(
+                value, validated_reference, analysis_contract, text_semantics)
+
         proposed_interpretation = _ask_validated_object(
             runner=runner, prompt=INTERPRETATION_PROMPT + base,
             max_new_tokens=3072,
-            validator=lambda value: validate_interpretation(
-                value, validated_reference, analysis_contract, text_semantics),
+            validator=validate_interpretation_candidate,
             post_validator=semantic_post_validator, trace_dir=trace_dir,
             trace_name="interpretation", attempts=5)
         _attach_interpretation_provenance(
