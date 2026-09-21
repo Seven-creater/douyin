@@ -17,12 +17,15 @@ from typing import Any
 DEFAULT_NEGATIVE_PROMPT = (
     "extra people, duplicate person, mirrored duplicate, text, "
     "watermark, logo, dramatic pose, distorted anatomy, extra limbs, "
-    "cluttered background, scene context")
+    "cluttered background, scene context, light stands, tripods, "
+    "softboxes, studio equipment, backdrop frame, backdrop edges")
 
 # 通用棚拍条款（所有视图共用）
 STUDIO_BASE = (
     "9:16 vertical portrait, soft even studio lighting, "
-    "neutral gray seamless studio backdrop, eye-level camera, "
+    "uniform neutral gray background filling the entire frame edge to edge, "
+    "invisible backdrop boundaries, all lighting equipment outside the frame, "
+    "eye-level camera, "
     "minimal perspective distortion, sharp focus, high detail, "
     "photorealistic")
 
@@ -40,7 +43,7 @@ MASTER_VIEW_SPECS = {
     "front": (
         "full-body front view, head facing forward toward the camera, "
         "relaxed natural stance, neutral expression, mouth closed, "
-        "eyes open looking at the camera, entire body from head to "
+        "eye appearance consistent with the canonical identity, entire body from head to "
         "feet visible, full body visible"),
     "profile": (
         "full-body strict 90-degree side profile view, head facing "
@@ -54,7 +57,7 @@ MASTER_VIEW_SPECS = {
     "face": (
         "head-and-shoulders facial close-up portrait, head facing "
         "forward toward the camera, neutral expression, mouth closed, "
-        "eyes open looking at the camera, face fully visible and "
+        "eye appearance consistent with the canonical identity, face fully visible and "
         "evenly lit"),
 }
 

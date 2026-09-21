@@ -219,7 +219,10 @@ def build_m2a_registry(*, t2i, multiview, upscale,
             ((workspace.read_artifact(master_art) or {}
               ).get("master") or {})) + 1
         seed = SEED_BASE + attempt * 1000
-        prompt = studio_prompts.build_master_prompt(identity)
+        spec = {k: asset[k] for k in ("pose_profile", "anatomy_constraints",
+                                     "mobility_aids", "identity_accessories")
+                if k in asset}
+        prompt = studio_prompts.build_master_prompt(identity, spec or None)
         if failures:
             notes = "\n".join(
                 f"- ({f.get('check')}) {f.get('detail')}" for f in failures)

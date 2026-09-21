@@ -36,30 +36,49 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
     """
     step = 0
     last_failure: dict[str, Any] | None = None
+    failure_artifact = ""
+    # Resume the latest unresolved validation, including across read-only steps.
+    for entry in reversed(workspace.recent_trace(1000)):
+        previous = entry.get("result") or {}
+        name = str(previous.get("artifact") or "")
+        tests = entry.get("tests") or {}
+        active = (workspace.state["artifacts"].get(name) or {}).get(
+            "active_version")
+        if (name and active and previous.get("version") == active
+                and tests.get("passed") is False
+                and workspace.effective_status(name) != "committed"):
+            last_failure, failure_artifact = tests, name
+            break
+    recovery_used = False
     stop_reason = "max_steps"
 
     while not workspace.goal_satisfied() and step < max_steps:
         step += 1
 
+        runnable = registry.runnable_skills(workspace, budget)
+        recovery_mode = False
         if no_progress_detector is not None:
             progress = no_progress_detector.step(workspace, last_failure)
             if progress["stalled"]:
                 stagnant = progress["consecutive_stagnant_steps"]
-                workspace.record_trace(
-                    step,
-                    {"skill": "NO_PROGRESS", "event": stagnant},
-                    {"artifact": "-"},
-                    {"passed": False,
-                     "failures": [{
-                         "check": "no_progress",
-                         "detail": f"stagnant steps: {stagnant}"}],
-                     "restricted_actions":
-                         no_progress_detector.restricted_actions()})
-                stop_reason = "no_progress"
-                break
+                allowed = no_progress_detector.restricted_actions(
+                    runnable, failure_artifact)
+                repairs = [row for row in runnable if row["name"] in allowed]
+                if recovery_used or not last_failure or not repairs:
+                    workspace.record_trace(
+                        step, {"skill": "NO_PROGRESS", "event": stagnant},
+                        {"artifact": "-"},
+                        {"passed": False,
+                         "failures": [{"check": "no_progress",
+                                       "detail": f"stagnant steps: {stagnant}"}],
+                         "restricted_actions": allowed})
+                    stop_reason = "no_progress"
+                    break
+                # One bounded recovery opportunity; validate_action enforces it.
+                runnable = repairs
+                recovery_used = recovery_mode = True
 
         state_map = workspace.build_map()
-        runnable = registry.runnable_skills(workspace, budget)
         recent = workspace.recent_trace(3)
 
         if not runnable:
@@ -74,10 +93,13 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
              "workspace_map": state_map,
              "runnable_skills": runnable,
              "recent_failure": last_failure,
+             "failure_artifact": failure_artifact,
+             "recovery_mode": recovery_mode,
              "recent_trace": [
                  {"step": t.get("step"),
                   "action": t.get("action", {}).get("skill"),
-                  "tests_passed": t.get("tests", {}).get("passed")}
+                  "tests_passed": t.get("tests", {}).get("passed"),
+                  "observation": t.get("result", {})}
                  for t in recent]},
             ensure_ascii=False, separators=(",", ":"))
         answer = controller_runner.ask(
@@ -142,6 +164,8 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
                 action, registry, workspace, controller_runner)
 
         # 落档 trace
+        if recovery_mode:
+            test_report["recovery_mode"] = True
         workspace.record_trace(step, action, result, test_report)
 
         if test_report.get("passed"):
@@ -151,11 +175,16 @@ def agent_loop(workspace: Workspace, registry: SkillRegistry, *,
             if test_report.get("validators_run"):
                 workspace.record_dependency_snapshot(artifact_name)
                 workspace.commit(artifact_name)
-            last_failure = None
+                if artifact_name == failure_artifact:
+                    last_failure = None
+                    failure_artifact = ""
         else:
             if artifact_name:
                 workspace.set_status(artifact_name, "draft")
-            last_failure = test_report
+            # A rejected action does not erase the unresolved artifact failure.
+            if artifact_name or last_failure is None:
+                last_failure = test_report
+                failure_artifact = artifact_name
 
     if workspace.goal_satisfied():
         stop_reason = "goal_satisfied"

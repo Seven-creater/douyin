@@ -57,7 +57,6 @@ class SkillSpec:
             if not artifact:
                 artifact, required = pre, "committed"
             status = workspace.effective_status(artifact)
-            status = workspace.get_status(artifact)
             if required == "committed" and status != "committed":
                 return False, f"precondition {pre} unmet ({status})"
             if required == "exists" and status == "not_started":

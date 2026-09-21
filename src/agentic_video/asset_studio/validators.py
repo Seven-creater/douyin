@@ -28,6 +28,10 @@ Hero Master 全身照，以及该角色的期望规格（来自剧本资产表�
 4. neutral_bg：中性灰无缝棚拍背景，无场景元素
 5. no_text：无文字/水印/logo
 6. neutral_look：中性表情闭嘴、自然站姿、中性深灰基础服装
+7. 只检验可见且有明确规格依据的特征，不得根据眼罩、闭眼或睁眼推断
+   医学意义上的视力状态。剧本明确要求的眼罩不能仅因“无法证明失明”
+   而判 FAIL。剧情道具不等于永久身份特征；身份主图允许不戴可拆卸道具。
+   若画面有摄影棚支架、灯具、背景纸边框，neutral_bg 必须 FAIL。
 期望角色规格：{expected_spec}
 你没有看过任何生成过程——只根据当前图像与期望规格判断。图像："""
 
@@ -100,6 +104,14 @@ def _expected_spec(workspace: Workspace, asset_id: str = "C0") -> str:
             for key in ("identity", "face", "body_build", "hair"):
                 if immutable.get(key):
                     keep[key] = immutable[key]
+            screenplay = workspace.read_artifact("screenplay") or {}
+            for character in screenplay.get("characters") or []:
+                if str(character.get("id")) == asset_id:
+                    keep["screenplay_description"] = character.get("description")
+            for key in ("pose_profile", "anatomy_constraints", "mobility_aids",
+                        "identity_accessories"):
+                if key in asset:
+                    keep[key] = asset[key]
             return _json.dumps(keep, ensure_ascii=False)
     return "{}"
 

@@ -34,9 +34,12 @@ def _repair_counts(workspace: Workspace) -> dict[str, int]:
         except Exception:  # noqa: BLE001
             continue
         action = entry.get("action") or {}
-        if action.get("skill") == "repair_character_view":
-            view = str(action.get("target")
-                       or entry.get("result", {}).get("target") or "?")
+        result = entry.get("result") or {}
+        if action.get("skill") in ("repair_character_view",
+                                   "repair_character_master") and result.get(
+                                       "action") not in ("blocked", "execution_failed"):
+            view = ("front" if action["skill"] == "repair_character_master"
+                    else str(result.get("target") or action.get("target") or "?"))
             counts[view] = counts.get(view, 0) + 1
     return counts
 
@@ -58,6 +61,8 @@ def build_acceptance_report(workspace: Workspace,
     final_status = workspace.effective_status(f"asset:{asset_id}")
     candidate_status = workspace.effective_status(
         f"asset:{asset_id}_candidate")
+    master_status = workspace.effective_status(f"asset:{asset_id}_master")
+    views_status = workspace.effective_status(f"asset:{asset_id}_views")
     if final_status == "committed":
         overall = "committed"
     elif candidate_status == "committed":
@@ -69,7 +74,7 @@ def build_acceptance_report(workspace: Workspace,
     for view, entry in (views_manifest.get("views") or {}).items():
         sha4k = entry.get("sha4k") or entry.get("sha")
         views_report[view] = {
-            "status": "pass" if overall != "not_ready" else "pending",
+            "status": "pass" if views_status == "committed" else views_status,
             "sha": sha4k,
             "file": entry.get("file4k") or entry.get("file"),
             "repair_count": repairs.get(view, 0),
@@ -77,7 +82,8 @@ def build_acceptance_report(workspace: Workspace,
 
     # 推荐参考角色：结构化 metadata（P1-5——view id 永远合法，
     # 修复史/降级用显式字段表达，Reference Router 不会读到伪 ID）
-    available = set(views_report)
+    available = {v for v, entry in views_report.items()
+                 if entry["status"] == "pass"}
     repaired = {v for v, c in repairs.items() if c > 0}
     recommended: dict[str, dict[str, Any]] = {}
     for role, candidates in ROLE_VIEW_CANDIDATES.items():
@@ -100,13 +106,14 @@ def build_acceptance_report(workspace: Workspace,
             "identity_description")
         or master.get("identity_description"),
         "master": {
-            "status": "pass" if master else "missing",
+            "status": ("pass" if master_status == "committed"
+                       else master_status if master else "missing"),
             "sha": (master.get("master") or {}).get("sha"),
             "generator": (master.get("master") or {}).get("generator")},
         "views": views_report,
         "identity_consistency": "pass" if overall != "not_ready"
         else "pending",
-        "human_review": "approved" if final else "pending",
+        "human_review": "approved" if final_status == "committed" else "pending",
         "repair_history": repairs,
         "recommended_reference_roles": recommended,
         "identity_sheet": ((candidate or final).get("sheet")

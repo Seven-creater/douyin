@@ -21,6 +21,9 @@ workspace 状态、可用 Skills 列表（含 cost/描述/前置条件）、最�
 1. 优先 cheap_text（诊断/修复），能用文本解决不烧 GPU
 2. 最小修复：只修失败部分，不重写全局
 3. 如果有测试失败，优先 repair 而非重新 write
+4. inspect 的成功只表示读取成功，不表示资产已通过验收；看过一次诊断后，
+   使用 recent_failure 和 observation 修复失败资产，不重复读取相同状态。
+5. recovery_mode=true 时仅从缩减后的 runnable_skills 中选择修复动作。
 输入："""
 
 WRITE_SCREENPLAY_PROMPT = """你是编剧。输入 Creative DNA（一条参考短片

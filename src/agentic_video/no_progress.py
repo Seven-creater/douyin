@@ -86,10 +86,15 @@ class NoProgressDetector:
             "event": "NO_PROGRESS" if stalled else None,
         }
 
-    def restricted_actions(self) -> list[str]:
-        """NO_PROGRESS 后动作空间收缩：只能 repair/rewrite/stop。
+    def restricted_actions(self, runnable: list[dict[str, Any]],
+                           artifact: str) -> list[str]:
+        """Only runnable, validated writers of the failed artifact may recover.
 
-        M1 真实技能名（asset_graph 的修复动作是带失败反馈的
-        re-extract，不存在 repair_asset_graph 这个 skill）。"""
-        return ["repair_screenplay", "write_screenplay",
-                "extract_assets", "stop"]
+        Prefer a local repair when available; read-only inspection cannot repair.
+        Budget and dependency filtering has already happened in the registry.
+        """
+        writers = [row["name"] for row in runnable
+                   if artifact and artifact in row.get("outputs", [])
+                   and row.get("validators")]
+        repairs = [name for name in writers if name.startswith("repair_")]
+        return repairs or writers

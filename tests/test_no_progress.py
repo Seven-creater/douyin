@@ -110,9 +110,13 @@ def test_no_progress_detects_stagnation(tmp_path: Path) -> None:
     assert r4["consecutive_stagnant_steps"] == 3
 
     # 动作空间收缩
-    restricted = detector.restricted_actions()
+    restricted = detector.restricted_actions([
+        {"name": "repair_screenplay", "outputs": ["screenplay"],
+         "validators": ["test_screenplay"]},
+        {"name": "inspect_screenplay", "outputs": [], "validators": []}],
+        "screenplay")
     assert "repair_screenplay" in restricted
-    assert "stop" in restricted
+    assert "inspect_screenplay" not in restricted
 
 
 def test_no_progress_resets_on_world_change(tmp_path: Path) -> None:
