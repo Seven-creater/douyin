@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v5"
+INTERPRETATION_VERSION = "reference_interpretation_v6"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -78,6 +78,12 @@ not permission to infer a pattern absent from the evidence.
 An optional analysis_contract lists per-reference review questions as required
 roles/relation types and, when supplied, target/source modalities. Satisfy it
 only with cited evidence; never invent a relation to make the contract pass.
+When the contract requires initial_assertion, counterevidence, and scope_limit,
+emit one canonical broad target assertion, one aggregated counterevidence
+proposition containing every relevant T/V source, and one real scope-limit
+proposition. At most two additional context propositions are allowed. Keep
+supporting literal facts inside the aggregate's source_ids/semantic_ids instead
+of making an item-per-claim inventory. Honor analysis_contract.max_propositions.
 
 Return exactly one JSON object:
 {"propositions":[{"proposition_id":"P1","statement":"abstract proposition",
@@ -261,8 +267,11 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "Ground the scope limit in a canonical qualification "
                     "proposition."),
                 "interpretation_not_aggregated": (
-                    "Aggregate claims into the smallest cross-segment "
-                    "propositions allowed by the declared limit."),
+                    "Return no more propositions than max_propositions. Use one "
+                    "canonical broad target, one aggregated counterevidence "
+                    "proposition containing all relevant T and V sources, one "
+                    "scope limit, and at most two context propositions. Do not "
+                    "emit supporting facts as separate inventory items."),
                 "text_semantics_literal_transcription": (
                     "Paraphrase the meaning as a proposition. Do not say that "
                     "text, a caption, or an overlay contains, reads, shows, or "
