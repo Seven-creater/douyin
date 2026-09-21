@@ -25,6 +25,9 @@ are support for cross-segment alignment, not standalone story propositions.
 Represent the strongest opening assertion, the evidence that bears on it, and
 any closing scope limit when they are supported. If no proposition revision is
 supported, use context and ordering roles rather than inventing one.
+An optional analysis_contract lists per-reference review questions as required
+roles/relation types. Satisfy it only with cited evidence; never invent a
+relation to make the contract pass.
 
 Return exactly one JSON object:
 {"propositions":[{"proposition_id":"P1","statement":"abstract proposition",
@@ -184,13 +187,25 @@ def _source_modalities(validated_reference: dict[str, Any]) -> dict[str, list[st
 
 
 def validate_interpretation(value: dict[str, Any],
-                            validated_reference: dict[str, Any]) -> None:
+                            validated_reference: dict[str, Any],
+                            analysis_contract: dict[str, Any] | None = None) -> None:
+    contract = analysis_contract or {}
+    allowed_roles = {"initial_assertion", "counterevidence", "scope_limit",
+                     "context"}
+    allowed_relation_types = {"supports", "contradicts", "qualifies",
+                              "reframes", "orders"}
+    if not set(map(str, contract.get("required_roles") or [])).issubset(
+            allowed_roles) or not set(map(str, contract.get(
+                "required_relation_types") or [])).issubset(
+                    allowed_relation_types):
+        raise DNAV2Error("interpretation_contract_invalid")
     valid = _source_ids(validated_reference)
     propositions = value.get("propositions")
     relations = value.get("relations")
     if not isinstance(propositions, list) or not propositions:
         raise DNAV2Error("interpretation_propositions_missing")
-    if not 3 <= len(propositions) <= 10:
+    maximum = int(contract.get("max_propositions", 10))
+    if not 3 <= len(propositions) <= maximum:
         raise DNAV2Error("interpretation_not_aggregated")
     if not isinstance(relations, list) or not relations:
         raise DNAV2Error("interpretation_relations_missing")
@@ -201,20 +216,20 @@ def validate_interpretation(value: dict[str, Any],
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
             raise DNAV2Error("interpretation_proposition_evidence_invalid")
-        if row.get("epistemic_role") not in {
-                "initial_assertion", "counterevidence", "scope_limit", "context"}:
+        if row.get("epistemic_role") not in allowed_roles:
             raise DNAV2Error("interpretation_role_invalid")
         if row.get("scope") not in {"specific", "domain_bounded", "general"}:
             raise DNAV2Error("interpretation_scope_invalid")
     roles = {str(row.get("epistemic_role")) for row in propositions}
     if len(roles) < 2:
         raise DNAV2Error("interpretation_roles_collapsed")
+    if not set(map(str, contract.get("required_roles") or [])).issubset(roles):
+        raise DNAV2Error("interpretation_required_role_missing")
     for row in relations:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
             raise DNAV2Error("interpretation_evidence_invalid")
-        if row.get("type") not in {
-                "supports", "contradicts", "qualifies", "reframes", "orders"}:
+        if row.get("type") not in allowed_relation_types:
             raise DNAV2Error("interpretation_relation_type_invalid")
         source_props = set(map(str, row.get("source_proposition_ids") or []))
         if not source_props or not source_props.issubset(proposition_ids):
@@ -224,6 +239,10 @@ def validate_interpretation(value: dict[str, Any],
         confidence = row.get("confidence")
         if not isinstance(confidence, (int, float)) or not 0 < float(confidence) <= 1:
             raise DNAV2Error("interpretation_confidence_invalid")
+    relation_types = {str(row.get("type")) for row in relations}
+    if not set(map(str, contract.get(
+            "required_relation_types") or [])).issubset(relation_types):
+        raise DNAV2Error("interpretation_required_relation_missing")
 
 
 def _attach_interpretation_provenance(
@@ -293,6 +312,7 @@ def validate_editing_analysis(value: dict[str, Any],
                               validated_reference: dict[str, Any]) -> None:
     valid_ids = {str(row.get("timeline_id"))
                  for row in measurements.get("segments") or []}
+    valid_ids.update(map(str, (measurements.get("sections") or {}).keys()))
     valid_event_ids = {str(row.get("event_id"))
                        for row in validated_reference.get("accepted_events") or []}
     relations = value.get("functional_relations")
@@ -328,22 +348,28 @@ def validate_editing_analysis(value: dict[str, Any],
         str(row.get("section_id")) for row in measurements.get("segments") or []
         if str(row.get("timeline_id")) in covered_ids
     }
+    covered_sections.update(required_sections.intersection(covered_ids))
     if not required_sections.issubset(covered_sections):
         raise DNAV2Error("editing_event_section_uncovered")
 
 
 def run_independent_analyses(validated_reference: dict[str, Any], *,
-                             runner: Any, trace_dir: Path | None = None
+                             runner: Any, trace_dir: Path | None = None,
+                             analysis_contract: dict[str, Any] | None = None
                              ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Use two clean text calls; neither draft appears in the other request."""
     view = _analysis_view(validated_reference)
-    base = json.dumps(view, ensure_ascii=False,
+    interpretation_input = {
+        "validated_reference": view,
+        "analysis_contract": analysis_contract or {},
+    }
+    base = json.dumps(interpretation_input, ensure_ascii=False,
                       separators=(",", ":"))
     interpretation = _ask_validated_object(
         runner=runner, prompt=INTERPRETATION_PROMPT + base,
         max_new_tokens=3072,
         validator=lambda value: validate_interpretation(
-            value, validated_reference), trace_dir=trace_dir,
+            value, validated_reference, analysis_contract), trace_dir=trace_dir,
         trace_name="interpretation")
     _attach_interpretation_provenance(interpretation, validated_reference)
     interpretation = {

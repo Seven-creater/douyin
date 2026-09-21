@@ -72,7 +72,8 @@ def main() -> None:
         run_dir / "perception" / "visual_perception_draft.json",
         run_dir / "candidate", runner=runner, model_config=omni_config,
         repo_root=repo,
-        holdout_path=Path(args.holdout) if args.holdout else None)
+        holdout_path=Path(args.holdout) if args.holdout else None,
+        analysis_contract=run_config.get("analysis_contract") or {})
     print(json.dumps({"status": result["release_decision"]["status"],
                       "second_commit_allowed": result["release_decision"][
                           "second_commit_allowed"],

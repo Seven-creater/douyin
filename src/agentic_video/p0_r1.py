@@ -454,7 +454,9 @@ def compile_validated_reference(perception_path: Path, p04e_dir: Path,
 def build_release_candidate(validated_path: Path, perception_path: Path,
                             output_dir: Path, *, runner: Any,
                             model_config: dict[str, Any], repo_root: Path,
-                            holdout_path: Path | None = None) -> dict[str, Any]:
+                            holdout_path: Path | None = None,
+                            analysis_contract: dict[str, Any] | None = None
+                            ) -> dict[str, Any]:
     validated = json.loads(Path(validated_path).read_text(encoding="utf-8"))
     perception = json.loads(Path(perception_path).read_text(encoding="utf-8"))
     output = Path(output_dir)
@@ -490,7 +492,8 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
         trace_index += 1
     trace_dir = trace_root / f"attempt_{trace_index:03d}"
     interpretation, editing = run_independent_analyses(
-        validated, runner=runner, trace_dir=trace_dir)
+        validated, runner=runner, trace_dir=trace_dir,
+        analysis_contract=analysis_contract)
     for name, value in (("interpretation.json", interpretation),
                         ("editing_analysis.json", editing)):
         (output / name).write_text(json.dumps(value, ensure_ascii=False, indent=2),

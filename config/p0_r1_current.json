@@ -1,5 +1,5 @@
 {
-  "schema_version": "p0_r1_run_config_v1",
+  "schema_version": "p0_r1_run_config_v2",
   "source_video": "data/videos/7682719919410072847/video.mp4",
   "legacy_p04e_dir": "data/review_p04e",
   "mask_version": "current_reference_text_mask_v1",
@@ -10,5 +10,10 @@
   ],
   "forbidden_markers": [
     "握个手", "失去了双手", "跆拳道全国冠军", "会用双脚化妆", "不会剪脚指甲"
-  ]
+  ],
+  "analysis_contract": {
+    "required_roles": ["initial_assertion", "counterevidence", "scope_limit"],
+    "required_relation_types": ["contradicts", "qualifies"],
+    "max_propositions": 8
+  }
 }
