@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v8"
+INTERPRETATION_VERSION = "reference_interpretation_v9"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -593,6 +593,34 @@ def normalize_interpretation_roles(value: dict[str, Any]) -> None:
         "rule": "relation_implied_roles_v1", "changes": changes}
 
 
+def normalize_interpretation_text(
+        value: dict[str, Any], validated_reference: dict[str, Any],
+        text_semantics: dict[str, Any]) -> None:
+    """Replace redundant pure-T paraphrases with their canonical proposition."""
+    source_modalities = _source_modalities(validated_reference)
+    semantic_by_id = {
+        str(row.get("semantic_id")): row
+        for row in text_semantics.get("items") or []}
+    changes = []
+    for proposition in value.get("propositions") or []:
+        semantic_ids = list(map(str, proposition.get("semantic_ids") or []))
+        refs = list(map(str, proposition.get("source_ids") or []))
+        if len(semantic_ids) != 1 or not refs or not all(
+                source_modalities.get(ref) == ["T"] for ref in refs):
+            continue
+        canonical = semantic_by_id.get(semantic_ids[0], {}).get("proposition")
+        if not str(canonical or "").strip():
+            continue
+        previous = proposition.get("statement")
+        if previous != canonical:
+            proposition["statement"] = canonical
+            changes.append({
+                "proposition_id": proposition.get("proposition_id"),
+                "semantic_id": semantic_ids[0]})
+    value["canonical_text_normalization"] = {
+        "rule": "single_pure_t_semantic_v1", "changes": changes}
+
+
 def validate_interpretation_audit(value: dict[str, Any],
                                   interpretation: dict[str, Any]) -> None:
     relation_ids = _ids(interpretation.get("relations") or [], "relation_id")
@@ -893,6 +921,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
                 trace_dir=trace_dir, attempt=attempt)
 
         def validate_interpretation_candidate(value: dict[str, Any]) -> None:
+            normalize_interpretation_text(
+                value, validated_reference, text_semantics)
             normalize_interpretation_roles(value)
             validate_interpretation(
                 value, validated_reference, analysis_contract, text_semantics)
