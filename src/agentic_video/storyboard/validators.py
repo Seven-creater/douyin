@@ -127,7 +127,8 @@ def _test_frame_pair(workspace: Workspace, runner) -> dict[str, Any]:
     images = [frames["start_frame"][0], frames["end_frame"][0]]
     images += [workspace.root / p for p in
                (manifest.get("identity_refs") or [])]
-    answer = runner.inspect_media(image_paths=images, prompt=prompt)
+    answer = runner.inspect_media(image_paths=images, prompt=prompt,
+                             stop_after_json_object=True)
     from src.agentic_video.asset_studio.validators import _parse_omni_json
     try:
         value = _parse_omni_json(answer)

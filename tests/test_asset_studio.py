@@ -345,6 +345,23 @@ def test_unknown_validator_fails_closed(tmp_path: Path) -> None:
     assert report["failures"][0]["check"] == "validator_registry"
 
 
+def test_omni_json_tolerates_trailing_text() -> None:
+    """夜链真机教训：Omni 视觉模式在 JSON 后追加说明文字——
+    raw_decode 提取首个完整对象，解析不再挂（Extra data）。"""
+    from types import SimpleNamespace
+    from src.agentic_video.asset_studio.validators import _parse_omni_json
+    trailing = ('{"passed": true, "target_fidelity": {"passed": true},'
+                '\n "failures": []}\n'
+                '根据以上检查，这张全身照符合所有要求。人物姿态自然，'
+                '背景为中性灰无缝背景。')
+    value = _parse_omni_json(SimpleNamespace(text=trailing))
+    assert value["passed"] is True
+    fenced = ('```json\n{"passed": false, "failures": '
+              '[{"check": "x"}]}\n```\n补充说明文字')
+    value2 = _parse_omni_json(SimpleNamespace(text=fenced))
+    assert value2["passed"] is False
+
+
 def test_front_view_repair_forbidden(tmp_path: Path) -> None:
     """P1-3：front = canonical master，禁止局部修（必须重修 master）。"""
     from src.agentic_video.skills.registry import SkillBlocked

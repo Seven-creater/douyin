@@ -142,13 +142,33 @@ def _view_of(rel: str) -> str:
 
 
 def _parse_omni_json(answer) -> dict[str, Any]:
+    """Omni 验收输出解析（夜链真机教训：视觉模式下 Omni 常在 JSON
+    后追加说明文字——"Extra data: line N"）。
+
+    三层：剥代码块 → raw_decode 取首个完整对象 → 公共解析器。
+    """
+    import json as _json
+
     from src.agentic_video.reference_program_v9 import _parse_one_object
     text = str(getattr(answer, "text", "") or "").strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.startswith("json"):
             text = text[4:]
-    return _parse_one_object(text, stage="m2_validator")
+    try:
+        return _parse_one_object(text, stage="m2_validator")
+    except Exception:
+        pass
+    # raw_decode：从首个 '{' 起提取第一个完整 JSON 对象（吞掉尾随文字）
+    start = text.find("{")
+    if start >= 0:
+        try:
+            value, _ = _json.JSONDecoder().raw_decode(text[start:])
+            if isinstance(value, dict):
+                return value
+        except Exception:  # noqa: BLE001
+            pass
+    raise ValueError(f"unparseable validator output: {text[:200]}")
 
 
 # ---- Validators ----
@@ -172,6 +192,7 @@ def _test_character_master(workspace: Workspace, runner) -> dict[str, Any]:
     prompt = VALIDATE_MASTER_PROMPT.replace(
         "{expected_spec}", _expected_spec(workspace))
     answer = runner.inspect_media(
+        stop_after_json_object=True,
         image_paths=[_resolve(workspace, rel)], prompt=prompt)
     try:
         value = _parse_omni_json(answer)
@@ -214,6 +235,7 @@ def _test_character_multiview(workspace: Workspace, runner) -> dict[str, Any]:
         return {"passed": False, "failures": failures,
                 "validators_run": ["test_character_multiview"]}
     answer = runner.inspect_media(
+        stop_after_json_object=True,
         image_paths=[_resolve(workspace, paths[v]) for v in VIEW_IDS],
         prompt=VALIDATE_VIEWS_PROMPT)
     try:
@@ -311,6 +333,7 @@ def _test_character_asset(workspace: Workspace, runner) -> dict[str, Any]:
         return {"passed": False, "failures": failures,
                 "validators_run": ["test_character_asset"]}
     answer = runner.inspect_media(
+        stop_after_json_object=True,
         image_paths=[_resolve(workspace, views_4k[v]["file"])
                      for v in VIEW_IDS if v in views_4k],
         prompt=VALIDATE_ASSET_PROMPT)
