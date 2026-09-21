@@ -204,6 +204,12 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "Semantically test later evidence against the earlier "
                     "proposition and assign counterevidence or scope_limit when "
                     "the cited evidence supports those roles."),
+                "interpretation_roles_collapsed": (
+                    "Do not label every proposition as an initial assertion. "
+                    "Aggregate later bounded competence evidence with relevant "
+                    "visual presentation and identity support, then test it "
+                    "against the exact earlier general assertion. Mark a real "
+                    "closing exception as scope_limit."),
                 "interpretation_required_relation_missing": (
                     "Use contradicts only for evidence bearing on the exact "
                     "target proposition, and qualifies only for a real scope "
