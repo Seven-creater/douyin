@@ -370,7 +370,8 @@ def test_interpretation_plan_compiles_canonical_relations() -> None:
     plan = {"relation_supported": True, "target_semantic_id": "TP1",
             "counter_semantic_ids": ["TP2"],
             "scope_semantic_id": "TP3",
-            "visual_support_ids": ["V0", "V1"],
+            "opening_visual_support_ids": ["V0"],
+            "later_visual_support_ids": ["V1"],
             "identity_support_ids": ["ID1"], "confidence": 0.9,
             "reason_codes": []}
     validate_interpretation_plan(plan, reference, semantics)
@@ -378,6 +379,12 @@ def test_interpretation_plan_compiles_canonical_relations() -> None:
     assert value["propositions"][0]["statement"] == "broad assertion"
     assert [row["type"] for row in value["relations"]] == [
         "contradicts", "qualifies"]
+    swapped = {**plan, "opening_visual_support_ids": ["V1"],
+               "later_visual_support_ids": ["V0"]}
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_interpretation_plan(swapped, reference, semantics)
+    assert excinfo.value.reason_code == \
+        "interpretation_plan_visual_coverage_invalid"
 
 
 def test_interpretation_plan_catalog_exposes_temporal_choices() -> None:

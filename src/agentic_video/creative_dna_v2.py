@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v11"
+INTERPRETATION_VERSION = "reference_interpretation_v12"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -65,15 +65,20 @@ observations, and identity links. Choose an earlier broad assertion as the
 exact target, every later bounded capability proposition that bears on that
 target, and the final later proposition that limits the demonstrated capability
 range. The scope limit must be later than every selected counter proposition.
-Select at least one relevant ID from BOTH opening_direct_visual_ids and
-later_direct_visual_ids. Select same_entity_as IDs only from identity_ids.
+Select at least one relevant ID from opening_direct_visual_ids and at least one
+from later_direct_visual_ids. When a target attributes a belief, test the later
+evidence against the proposition embedded in that belief, not against the fact
+that somebody holds it. This remains a presentation-level relation and must not
+upgrade a visual appearance into an anatomical fact. Select same_entity_as IDs
+only from identity_ids.
 
 Return exactly one JSON object with these keys: relation_supported (boolean),
 target_semantic_id (one supplied semantic ID), counter_semantic_ids (array of
 supplied semantic IDs), scope_semantic_id (one supplied semantic ID),
-visual_support_ids (array of supplied direct-visual IDs), identity_support_ids
-(array of supplied same_entity_as IDs), confidence (number above zero and at
-most one), and reason_codes (array of short strings).
+opening_visual_support_ids (array from opening_direct_visual_ids),
+later_visual_support_ids (array from later_direct_visual_ids),
+identity_support_ids (array of supplied same_entity_as IDs), confidence (number
+above zero and at most one), and reason_codes (array of short strings).
 
 Use semantic IDs only for semantic fields and claim IDs only for visual or
 identity fields. Do not copy placeholder identifiers. A different activity is
@@ -318,7 +323,9 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                 "interpretation_plan_relation_unsupported": (
                     "Select relation_supported=true only if a later bounded "
                     "counterexample bears on the exact earlier assertion and "
-                    "identity alignment is evidenced."),
+                    "identity alignment is evidenced. For an attributed "
+                    "belief, judge its embedded asserted content separately "
+                    "from the fact that the belief is held."),
                 "interpretation_plan_semantic_ids_invalid": (
                     "Use distinct supplied TP IDs: one target, one or more "
                     "counter propositions, and one scope limit."),
@@ -329,14 +336,16 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "The broad target must precede every counter proposition, "
                     "and the scope limit must follow them."),
                 "interpretation_plan_visual_support_invalid": (
-                    "visual_support_ids must be supplied direct V observations; "
-                    "put same_entity_as V claims only in identity_support_ids."),
+                    "Both visual support fields must contain supplied direct V "
+                    "observations; put same_entity_as V claims only in "
+                    "identity_support_ids."),
                 "interpretation_plan_identity_support_invalid": (
                     "identity_support_ids must contain only supplied V-channel "
                     "same_entity_as claims."),
                 "interpretation_plan_visual_coverage_invalid": (
-                    "Select relevant direct V observations from both the "
-                    "opening interval and later capability intervals."),
+                    "Fill opening_visual_support_ids from the supplied opening "
+                    "list and later_visual_support_ids from the supplied later "
+                    "list; do not merge the two fields."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Return a complete fresh JSON "
@@ -702,7 +711,11 @@ def validate_interpretation_plan(
     counter_starts = [semantic_start(item) for item in counter_ids]
     if not all(target_start < start < scope_start for start in counter_starts):
         raise DNAV2Error("interpretation_plan_temporal_order_invalid")
-    visual_ids = list(map(str, value.get("visual_support_ids") or []))
+    opening_visual_ids = list(map(
+        str, value.get("opening_visual_support_ids") or []))
+    later_visual_ids = list(map(
+        str, value.get("later_visual_support_ids") or []))
+    visual_ids = opening_visual_ids + later_visual_ids
     identity_ids = list(map(str, value.get("identity_support_ids") or []))
     if len(set(visual_ids)) != len(visual_ids) or \
             len(set(identity_ids)) != len(identity_ids) or \
@@ -721,10 +734,13 @@ def validate_interpretation_plan(
                         for item in target_refs]
     opening_end = max((float(row[1]) for row in target_intervals
                        if len(row) == 2), default=target_start)
-    visual_starts = [float((claims[item].get("interval") or [1e9])[0])
-                     for item in visual_ids]
-    if not any(start <= opening_end for start in visual_starts) or \
-            not any(start > opening_end for start in visual_starts):
+    opening_starts = [float((claims[item].get("interval") or [1e9])[0])
+                      for item in opening_visual_ids]
+    later_starts = [float((claims[item].get("interval") or [1e9])[0])
+                    for item in later_visual_ids]
+    if not opening_visual_ids or not later_visual_ids or \
+            any(start > opening_end for start in opening_starts) or \
+            any(start <= opening_end for start in later_starts):
         raise DNAV2Error("interpretation_plan_visual_coverage_invalid")
     confidence = value.get("confidence")
     if not isinstance(confidence, (int, float)) or not 0 < float(confidence) <= 1:
@@ -746,7 +762,9 @@ def compile_interpretation_plan(
         str(ref) for semantic_id in counter_ids
         for ref in semantic_by_id[semantic_id].get("source_ids") or []]
     counter_refs = list(dict.fromkeys(
-        counter_text_refs + list(map(str, plan["visual_support_ids"])) +
+        counter_text_refs + list(map(
+            str, plan["opening_visual_support_ids"])) + list(map(
+                str, plan["later_visual_support_ids"])) +
         list(map(str, plan["identity_support_ids"]))))
     target_refs = list(map(str, target.get("source_ids") or []))
     scope_refs = list(map(str, scope.get("source_ids") or []))
@@ -757,8 +775,8 @@ def compile_interpretation_plan(
              "epistemic_role": "initial_assertion",
              "scope": target["scope"]},
             {"proposition_id": "P2",
-             "statement": "The sequence supplies multiple bounded capability "
-                          "claims and observable actions for one "
+             "statement": "The sequence supplies bounded capability evidence "
+                          "and observable actions for one "
                           "identity-aligned subject.",
              "source_ids": counter_refs, "semantic_ids": counter_ids,
              "epistemic_role": "counterevidence",
@@ -772,7 +790,8 @@ def compile_interpretation_plan(
              "source_proposition_ids": ["P2"],
              "target_proposition_id": "P1", "source_ids": counter_refs,
              "interpretation": "The later bounded evidence contradicts the "
-                               "exact earlier general assertion as presented.",
+                               "absolute content of the earlier general "
+                               "assertion within the reference presentation.",
              "confidence": plan["confidence"]},
             {"relation_id": "IR2", "type": "qualifies",
              "source_proposition_ids": ["P3"],
