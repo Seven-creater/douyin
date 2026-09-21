@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v7"
+INTERPRETATION_VERSION = "reference_interpretation_v8"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -467,7 +467,8 @@ def validate_interpretation(value: dict[str, Any],
                 if text_refs != canonical_refs:
                     raise DNAV2Error(
                         "interpretation_text_semantic_binding_invalid")
-                if len(semantic_ids) == 1:
+                non_text_refs = refs - text_refs
+                if len(semantic_ids) == 1 and not non_text_refs:
                     canonical = semantic_by_id[next(iter(semantic_ids))]
                     if str(row.get("statement") or "").strip() != str(
                             canonical.get("proposition") or "").strip():
