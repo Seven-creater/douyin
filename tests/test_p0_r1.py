@@ -8,7 +8,8 @@ import pytest
 
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
-    DNAV2Error, build_writer_payload, publish_dna, validate_interpretation)
+    DNAV2Error, build_writer_payload, publish_dna, validate_interpretation,
+    validate_text_semantics)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
@@ -285,6 +286,22 @@ def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:
     with pytest.raises(DNAV2Error) as excinfo:
         validate_interpretation(value, reference)
     assert excinfo.value.reason_code == "interpretation_roles_collapsed"
+
+
+def test_text_semantics_covers_only_text_claims() -> None:
+    reference = {"accepted_claims": [
+        {"claim_id": "T1", "modality": "T"},
+        {"claim_id": "V1", "modality": "V"}]}
+    validate_text_semantics({"items": [{
+        "semantic_id": "TP1", "source_ids": ["T1"],
+        "proposition": "a bounded assertion", "semantic_role": "assertion",
+        "scope": "domain_bounded"}]}, reference)
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_text_semantics({"items": [{
+            "semantic_id": "TP1", "source_ids": ["V1"],
+            "proposition": "visual leak", "semantic_role": "assertion",
+            "scope": "specific"}]}, reference)
+    assert excinfo.value.reason_code == "text_semantics_source_invalid"
 
 
 def test_blocked_candidate_freeze_is_not_labeled_release_candidate(

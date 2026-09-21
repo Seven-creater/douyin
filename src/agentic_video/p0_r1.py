@@ -477,7 +477,9 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
     workspace = Workspace(output / "workspace")
     workspace.state["goal"] = {"target_artifact": "creative_dna_v2_candidate",
                                "required_status": "tested"}
+    workspace.set_dependency("text_semantics", "validated_reference")
     workspace.set_dependency("reference_interpretation", "validated_reference")
+    workspace.set_dependency("reference_interpretation", "text_semantics")
     workspace.set_dependency("editing_analysis", "validated_reference")
     workspace.set_dependency("creative_dna_v2_candidate", "validated_reference")
     workspace.set_dependency("creative_dna_v2_candidate", "reference_interpretation")
@@ -495,7 +497,11 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
         validated, runner=runner, trace_dir=trace_dir,
         analysis_contract=analysis_contract,
         cache_dir=output / "analysis_checkpoint")
-    for name, value in (("interpretation.json", interpretation),
+    text_semantics = json.loads((
+        output / "analysis_checkpoint" / "text_semantics.json").read_text(
+            encoding="utf-8"))
+    for name, value in (("text_semantics.json", text_semantics),
+                        ("interpretation.json", interpretation),
                         ("editing_analysis.json", editing)):
         (output / name).write_text(json.dumps(value, ensure_ascii=False, indent=2),
                                    encoding="utf-8")
@@ -533,13 +539,23 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
     (output / "release_freeze.json").write_text(
         json.dumps(freeze, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    workspace.write_draft("text_semantics", text_semantics, metadata={
+        "created_by": "text_channel_semantic_normalizer",
+        "derived_from": [{"artifact_id": "validated_reference",
+                          "version": "v1",
+                          "sha": workspace.get_sha("validated_reference")}],
+    })
+    workspace.commit("text_semantics")
     for name, value in (("reference_interpretation", interpretation),
                         ("editing_analysis", editing)):
+        parents = [{"artifact_id": "validated_reference", "version": "v1",
+                    "sha": workspace.get_sha("validated_reference")}]
+        if name == "reference_interpretation":
+            parents.append({"artifact_id": "text_semantics", "version": "v1",
+                            "sha": workspace.get_sha("text_semantics")})
         workspace.write_draft(name, value, metadata={
             "created_by": "independent_text_analysis",
-            "derived_from": [{"artifact_id": "validated_reference",
-                              "version": "v1",
-                              "sha": workspace.get_sha("validated_reference")}],
+            "derived_from": parents,
         })
         workspace.commit(name)
     workspace.write_draft("creative_dna_v2_candidate", publish, metadata={
@@ -554,7 +570,8 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
     lineage = build_lineage_report(workspace)
     (output / "lineage_report.json").write_text(
         json.dumps(lineage, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"interpretation": interpretation, "editing_analysis": editing,
+    return {"text_semantics": text_semantics,
+            "interpretation": interpretation, "editing_analysis": editing,
             "dna_audit": audit, "dna_publish": publish,
             "dev_report": dev, "regression_report": regression,
             "holdout_report": holdout, "release_decision": decision,

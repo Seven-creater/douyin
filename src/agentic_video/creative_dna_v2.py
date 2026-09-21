@@ -10,8 +10,25 @@ from src.agentic_video.manifest import json_hash
 
 INTERPRETATION_VERSION = "reference_interpretation_v2"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v2"
+TEXT_SEMANTICS_VERSION = "text_semantics_v1"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
 DNA_PUBLISH_VERSION = "creative_dna_v2"
+
+TEXT_SEMANTICS_PROMPT = """You are a text-channel semantic normalizer. Read
+only the supplied accepted T-channel claims. You receive no image and must not
+infer any visual fact, identity, motive, or audience response. Convert the
+semantic content of every claim into one concise proposition while retaining
+its claim ID and epistemic scope.
+
+Return exactly one JSON object:
+{"items":[{"semantic_id":"TP1","source_ids":["T claim id"],
+"proposition":"semantic paraphrase, not 'text appears'",
+"semantic_role":"assertion|instruction|label|qualification",
+"scope":"specific|domain_bounded|general"}],"limitations":["..."]}
+
+Every supplied claim ID must be covered at least once. Do not merge unrelated
+claims and do not import information absent from the text. JSON only. Input:
+"""
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded interpretation analyst.
 Read only the supplied accepted claims, accepted events, timeline, and coverage.
@@ -47,7 +64,8 @@ Return exactly one JSON object:
 
 Every proposition and relation must cite supplied claim/event IDs. Use an
 identity-alignment claim before treating anonymous entities from different
-segments as one subject. Do not invent motives, audience reactions, unseen
+segments as one subject. The text_semantics table is a semantic aid; cite its
+original source_ids, never its TP semantic IDs. Do not invent motives, audience reactions, unseen
 training, or facts absent from the input. JSON only. Input:
 """
 
@@ -220,6 +238,34 @@ def _source_modalities(validated_reference: dict[str, Any]) -> dict[str, list[st
             if str(ref) in claim_modalities
         })
     return result
+
+
+def validate_text_semantics(value: dict[str, Any],
+                            validated_reference: dict[str, Any]) -> None:
+    valid_ids = {str(row.get("claim_id"))
+                 for row in validated_reference.get("accepted_claims") or []
+                 if row.get("modality") == "T"}
+    items = value.get("items")
+    if not valid_ids or not isinstance(items, list) or not items:
+        raise DNAV2Error("text_semantics_items_missing")
+    semantic_ids = _ids(items, "semantic_id")
+    if len(semantic_ids) != len(items):
+        raise DNAV2Error("text_semantics_id_invalid")
+    covered: set[str] = set()
+    for row in items:
+        refs = set(map(str, row.get("source_ids") or []))
+        if not refs or not refs.issubset(valid_ids):
+            raise DNAV2Error("text_semantics_source_invalid")
+        covered.update(refs)
+        if row.get("semantic_role") not in {
+                "assertion", "instruction", "label", "qualification"}:
+            raise DNAV2Error("text_semantics_role_invalid")
+        if row.get("scope") not in {"specific", "domain_bounded", "general"}:
+            raise DNAV2Error("text_semantics_scope_invalid")
+        if not str(row.get("proposition") or "").strip():
+            raise DNAV2Error("text_semantics_proposition_missing")
+    if covered != valid_ids:
+        raise DNAV2Error("text_semantics_coverage_incomplete")
 
 
 def validate_interpretation(value: dict[str, Any],
@@ -452,8 +498,44 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
                 json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
 
     view = _analysis_view(validated_reference)
+    text_claims = [row for row in validated_reference.get("accepted_claims") or []
+                   if row.get("modality") == "T"]
+    text_semantics = load_cache("text_semantics.json")
+    if text_semantics is not None:
+        if text_semantics.get("schema_version") != TEXT_SEMANTICS_VERSION or \
+                text_semantics.get("validated_reference_sha") != \
+                validated_reference.get("artifact_sha"):
+            text_semantics = None
+        else:
+            try:
+                validate_text_semantics(text_semantics, validated_reference)
+            except DNAV2Error:
+                text_semantics = None
+    if text_semantics is None:
+        proposed_text = _ask_validated_object(
+            runner=runner,
+            prompt=TEXT_SEMANTICS_PROMPT + json.dumps(
+                {"accepted_text_claims": text_claims}, ensure_ascii=False,
+                separators=(",", ":")),
+            max_new_tokens=2048,
+            validator=lambda value: validate_text_semantics(
+                value, validated_reference), trace_dir=trace_dir,
+            trace_name="text_semantics", attempts=2)
+        text_semantics = {
+            "schema_version": TEXT_SEMANTICS_VERSION,
+            "validated_reference_sha": validated_reference.get("artifact_sha"),
+            **proposed_text,
+        }
+        text_semantics["artifact_sha"] = json_hash(text_semantics)
+        save_cache("text_semantics.json", text_semantics)
+    elif trace_dir is not None:
+        (Path(trace_dir) / "text_semantics_reuse_gate.json").write_text(
+            json.dumps({"passed": True, "reused": True}, indent=2),
+            encoding="utf-8")
+
     interpretation_input = {
         "validated_reference": view,
+        "text_semantics": text_semantics,
         "analysis_contract": analysis_contract or {},
     }
     base = json.dumps(interpretation_input, ensure_ascii=False,
@@ -462,7 +544,9 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
     if interpretation is not None:
         if interpretation.get("schema_version") != INTERPRETATION_VERSION or \
                 interpretation.get("validated_reference_sha") != \
-                validated_reference.get("artifact_sha"):
+                validated_reference.get("artifact_sha") or \
+                interpretation.get("text_semantics_sha") != \
+                text_semantics.get("artifact_sha"):
             interpretation = None
         else:
             try:
@@ -482,6 +566,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
         interpretation = {
             "schema_version": INTERPRETATION_VERSION,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
+            "text_semantics_sha": text_semantics.get("artifact_sha"),
             **proposed_interpretation,
         }
         interpretation["artifact_sha"] = json_hash(interpretation)
