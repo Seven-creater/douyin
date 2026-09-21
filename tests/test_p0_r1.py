@@ -14,7 +14,7 @@ from src.agentic_video.creative_dna_v2 import (
     normalize_interpretation_text, publish_dna,
     validate_interpretation, validate_editing_analysis,
     validate_interpretation_audit, validate_interpretation_plan,
-    validate_text_semantics)
+    validate_dna_audit, validate_text_semantics)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
@@ -284,6 +284,42 @@ def test_dna_relation_aliases_are_normalized_without_changing_meaning() -> None:
     normalize_dna_relation_schema(audit)
     assert audit["relations"][0]["type"] == "logical"
     assert audit["relations"][0]["mechanism"] == "reframes_context"
+
+
+def test_dna_reframe_requires_exact_evidence_constraints() -> None:
+    audit = _dna_audit()
+    audit["relations"][0]["mechanism"] = "reframes_context"
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_dna_audit(audit)
+    assert excinfo.value.reason_code == "dna_reframe_constraints_missing"
+    audit["constraints"].extend([
+        {"constraint_id": "C2", "rule_type": "exact_proposition_match",
+         "rule": "evidence bears on the exact target", "required": True},
+        {"constraint_id": "C3", "rule_type": "evidence_required",
+         "rule": "revision requires observable evidence", "required": True},
+    ])
+    validate_dna_audit(audit)
+
+
+def test_dna_qualification_requires_preserved_scope_constraint() -> None:
+    audit = _dna_audit()
+    audit["relations"][0]["mechanism"] = "qualifies_scope"
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_dna_audit(audit)
+    assert excinfo.value.reason_code == "dna_qualification_constraints_missing"
+    audit["constraints"].append({
+        "constraint_id": "C2", "rule_type": "qualification_preserved",
+        "rule": "the boundary narrows the target evidence", "required": True})
+    validate_dna_audit(audit)
+
+
+def test_dna_publish_rejects_entity_continuity_scaffolding() -> None:
+    audit = _dna_audit()
+    audit["editing_relations"][0]["conditions"] = [
+        "Entities maintain continuity"]
+    with pytest.raises(DNAV2Error) as excinfo:
+        publish_dna(audit, validated_reference={})
+    assert excinfo.value.reason_code == "dna_publish_audit_scaffolding_leak"
 
 
 def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:

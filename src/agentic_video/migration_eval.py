@@ -20,7 +20,15 @@ reference instance or the expected label. Return one JSON object:
 "unsupported_relation_ids":["..."],"accept":true,"reason_codes":["..."]}
 Judge relational and causal correspondence, not shared topic words or literary
 quality. A surface-similar candidate with a different mechanism must fail; a
-surface-different candidate preserving the relations may pass. JSON only. Input:
+surface-different candidate preserving the relations may pass. Test every
+relation and every required constraint explicitly. reframes_context requires
+evidence that bears on the exact earlier proposition. An event that leaves the
+target proposition's truth conditions unchanged is not a reframe merely because
+it repeats the topic or adds affect. qualifies_scope requires an evidence-backed
+boundary that logically narrows what the target evidence establishes; a detail
+that changes only tone or belongs to a disjoint scope is not a qualification.
+Set accept=true only when no required constraint is violated and no relation is
+unsupported. JSON only. Input:
 """
 
 

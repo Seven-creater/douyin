@@ -189,7 +189,12 @@ negate the actual proposition it challenges. Evidence in one domain cannot
 establish universal ability without additional support. Source-modality and
 provenance rules stay in the audit system; they are not creative invariants for
 a new story. Entity-resolution and identity-alignment claims are also audit
-scaffolding, not transferable story mechanisms. Use abstract roles only. Never copy source wording, media paths,
+scaffolding, not transferable story mechanisms. A reframes_context relation
+requires both exact_proposition_match and evidence_required constraints. A
+qualifies_scope relation requires both scope_bound and
+qualification_preserved constraints. These constraints must be required=true
+and state the actual cross-domain acceptance rule. Use abstract roles only.
+Never copy source wording, media paths,
 named activities, physical action forms, body properties, or identity
 descriptions into variables, relations, constraints, free slots, or editing
 relations. Concrete details are allowed only in concrete_bindings and
@@ -1376,6 +1381,15 @@ def validate_dna_audit(value: dict[str, Any]) -> None:
             raise DNAV2Error("dna_constraint_rule_type_invalid")
         if constraint.get("required") is not True:
             raise DNAV2Error("dna_constraint_not_required")
+    mechanisms = {str(row.get("mechanism")) for row in relations}
+    rule_types = {str(row.get("rule_type")) for row in constraints}
+    if "reframes_context" in mechanisms and not {
+            "exact_proposition_match", "evidence_required"}.issubset(
+                rule_types):
+        raise DNAV2Error("dna_reframe_constraints_missing")
+    if "qualifies_scope" in mechanisms and not {
+            "scope_bound", "qualification_preserved"}.issubset(rule_types):
+        raise DNAV2Error("dna_qualification_constraints_missing")
     for slot in slots:
         if not set(map(str, slot.get("constraint_ids") or [])).issubset(constraint_ids):
             raise DNAV2Error("dna_slot_constraint_missing")
@@ -1480,6 +1494,7 @@ def _validate_no_audit_scaffolding(publish: dict[str, Any]) -> None:
         r"(?:textual|visual|audio) evidence",
         r"(?:text|visual|audio) claims?",
         r"claim ids?|event ids?|timeline ids?",
+        r"entit(?:y|ies).{0,24}continuit",
     )
     if any(re.search(pattern, serialized) for pattern in patterns):
         raise DNAV2Error("dna_publish_audit_scaffolding_leak")
@@ -1577,6 +1592,14 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
                 "dna_reframe_mechanism_missing": (
                     "Preserve an interpretation reframes relation with the "
                     "reframes_context mechanism."),
+                "dna_reframe_constraints_missing": (
+                    "Add required exact_proposition_match and evidence_required "
+                    "constraints for reframes_context. The evidence must bear "
+                    "on the exact earlier proposition."),
+                "dna_qualification_constraints_missing": (
+                    "Add required scope_bound and qualification_preserved "
+                    "constraints for qualifies_scope. The boundary must "
+                    "actually narrow what the target evidence establishes."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Re-run structure abduction and "
