@@ -9,7 +9,8 @@ import pytest
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
     DNAV2Error, build_writer_payload, publish_dna, validate_interpretation,
-    validate_interpretation_audit, validate_text_semantics)
+    validate_editing_analysis, validate_interpretation_audit,
+    validate_text_semantics)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
@@ -322,6 +323,74 @@ def test_interpretation_semantic_audit_rejects_missing_relation() -> None:
     with pytest.raises(DNAV2Error) as excinfo:
         validate_interpretation_audit(audit, interpretation)
     assert excinfo.value.reason_code == "interpretation_audit_coverage_invalid"
+
+
+def test_interpretation_binds_t_sources_to_canonical_semantics() -> None:
+    reference = {"accepted_claims": [
+        {"claim_id": "T1", "modality": "T"},
+        {"claim_id": "T2", "modality": "T"},
+        {"claim_id": "T3", "modality": "T"}], "accepted_events": []}
+    semantics = {"items": [
+        {"semantic_id": "TP1", "source_ids": ["T1"],
+         "proposition": "A broad negative assertion.",
+         "semantic_role": "assertion", "scope": "general"},
+        {"semantic_id": "TP2", "source_ids": ["T2"],
+         "proposition": "A bounded counterexample.",
+         "semantic_role": "assertion", "scope": "specific"},
+        {"semantic_id": "TP3", "source_ids": ["T3"],
+         "proposition": "A remaining limitation.",
+         "semantic_role": "qualification", "scope": "specific"}]}
+    contract = {
+        "required_roles": ["initial_assertion", "counterevidence",
+                           "scope_limit"],
+        "required_relation_types": ["contradicts", "qualifies"],
+        "contradiction_target_modalities": ["T"],
+        "qualification_source_modalities": ["T"],
+        "text_semantics_required_scopes": ["general"],
+    }
+    value = {"propositions": [
+        {"proposition_id": "P1", "statement": "A nearby assertion.",
+         "source_ids": ["T1"], "semantic_ids": ["TP1"],
+         "epistemic_role": "initial_assertion", "scope": "general"},
+        {"proposition_id": "P2", "statement": "A bounded counterexample.",
+         "source_ids": ["T2"], "semantic_ids": ["TP2"],
+         "epistemic_role": "counterevidence", "scope": "specific"},
+        {"proposition_id": "P3", "statement": "A remaining limitation.",
+         "source_ids": ["T3"], "semantic_ids": ["TP3"],
+         "epistemic_role": "scope_limit", "scope": "specific"}],
+        "relations": [
+            {"relation_id": "IR1", "type": "contradicts",
+             "source_proposition_ids": ["P2"],
+             "target_proposition_id": "P1", "source_ids": ["T2"],
+             "interpretation": "counterexample", "confidence": 0.9},
+            {"relation_id": "IR2", "type": "qualifies",
+             "source_proposition_ids": ["P3"],
+             "target_proposition_id": "P2", "source_ids": ["T3"],
+             "interpretation": "limit", "confidence": 0.9}]}
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_interpretation(value, reference, contract, semantics)
+    assert excinfo.value.reason_code == \
+        "interpretation_single_semantic_statement_mismatch"
+    value["propositions"][0]["statement"] = "A broad negative assertion."
+    validate_interpretation(value, reference, contract, semantics)
+
+
+def test_editing_analysis_rejects_identity_audit_scaffolding() -> None:
+    measurements = {"segments": [{
+        "timeline_id": "S1", "section_id": "section_01",
+        "interval": [0, 1]}], "sections": {"section_01": {}}}
+    reference = {"accepted_events": [{"event_id": "E1",
+                                        "interval": [0, 1]}]}
+    value = {"functional_relations": [{
+        "relation_id": "ER1", "timeline_ids": ["S1"],
+        "event_ids": ["E1"], "editing_operation": "bridge",
+        "information_before": "separate events",
+        "information_after": "shared identity claims",
+        "ordering_effect": "continuity", "confidence": 0.9}],
+        "limitations": []}
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_editing_analysis(value, measurements, reference)
+    assert excinfo.value.reason_code == "editing_audit_scaffolding_leak"
 
 
 def test_text_semantics_covers_only_text_claims() -> None:

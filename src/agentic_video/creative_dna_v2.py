@@ -8,8 +8,8 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v3"
-EDITING_ANALYSIS_VERSION = "editing_analysis_v2"
+INTERPRETATION_VERSION = "reference_interpretation_v4"
+EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v1"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
 DNA_PUBLISH_VERSION = "creative_dna_v2"
@@ -37,9 +37,11 @@ auditor. You receive validated evidence, normalized text propositions, and a
 candidate interpretation. Do not rewrite it. For every candidate relation,
 check whether the cited evidence entails its source and target propositions,
 whether the named logical relation actually holds, and whether proposition
-scope is preserved. A different action, setting, or identity context is not by
-itself a contradiction. Additional evidence contradicts a target only when it
-negates that target or a necessary implication of it.
+scope is preserved. Judge only the explicit source and target proposition
+statements. The relation's explanation may not introduce a hidden target or an
+unstated implication. A different action, setting, or identity context is not
+by itself a contradiction. Additional evidence contradicts a target only when
+it negates that explicit target or a necessary implication of it.
 
 Return exactly one JSON object:
 {"checks":[{"relation_id":"IR1","source_entailed":true,
@@ -76,24 +78,33 @@ only with cited evidence; never invent a relation to make the contract pass.
 
 Return exactly one JSON object:
 {"propositions":[{"proposition_id":"P1","statement":"abstract proposition",
-"source_ids":["claim/event id"],"epistemic_role":"initial_assertion|counterevidence|scope_limit|context",
+"source_ids":["claim/event id"],"semantic_ids":["TP id for every T source"],
+"epistemic_role":"initial_assertion|counterevidence|scope_limit|context",
 "scope":"specific|domain_bounded|general"}],
 "relations":[{"relation_id":"IR1","type":"supports|contradicts|qualifies|reframes|orders",
 "source_proposition_ids":["P2"],"target_proposition_id":"P1",
 "source_ids":["claim/event id"],"interpretation":"abstract relational claim",
 "confidence":0.0}],"limitations":["..."]}
 
-Every proposition and relation must cite supplied claim/event IDs. Use an
+Every proposition and relation must cite supplied claim/event IDs. For every
+T-channel source in a proposition, cite the corresponding text_semantics TP ID
+in semantic_ids; the T source IDs must match that semantic record exactly. If a
+proposition uses one TP ID, copy its canonical proposition exactly. Aggregate
+only when multiple TP IDs are cited. The target of a contradiction must state
+the challenged assertion itself, not a nearby identity/action fact or a hidden
+implication introduced only in the relation explanation. Use an
 identity-alignment claim before treating anonymous entities from different
 segments as one subject. The text_semantics table is a semantic aid; cite its
-original source_ids, never its TP semantic IDs. Do not invent motives, audience reactions, unseen
+original source_ids as well as its TP semantic IDs. Do not invent motives, audience reactions, unseen
 training, or facts absent from the input. JSON only. Input:
 """
 
 EDITING_ANALYSIS_PROMPT = """You are an editing-function analyst. Deterministic
 timing measurements are immutable. Separate measured order/density/duration
 from a proposed information function. Analyze changes in information state,
-not the source topic or literal action.
+not the source topic or literal action. Entity resolution, shared-identity
+assertions, provenance, and modality bookkeeping are audit scaffolding, not an
+editing function.
 
 Return exactly one JSON object:
 {"functional_relations":[{"relation_id":"ER1","timeline_ids":["..."],
@@ -212,6 +223,21 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "evidence, or the named relation does not logically hold. "
                     "Preserve the exact meaning and scope of the cited target; "
                     "do not replace it with a nearby proposition."),
+                "interpretation_text_semantic_binding_invalid": (
+                    "Bind every T-channel source to its canonical semantic_id. "
+                    "Do not mix unrelated text claims into one proposition."),
+                "interpretation_single_semantic_statement_mismatch": (
+                    "When one semantic_id is cited, copy that canonical "
+                    "proposition exactly without adding an implication."),
+                "interpretation_relation_evidence_mismatch": (
+                    "A relation's source_ids must exactly match the evidence "
+                    "of its source propositions."),
+                "interpretation_contradiction_semantics_invalid": (
+                    "Target the explicit broad assertion identified by the "
+                    "canonical text semantics, not a nearby specific fact."),
+                "interpretation_qualification_semantics_invalid": (
+                    "Ground the scope limit in a canonical qualification "
+                    "proposition."),
                 "interpretation_not_aggregated": (
                     "Aggregate claims into the smallest cross-segment "
                     "propositions allowed by the declared limit."),
@@ -225,6 +251,10 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                 "text_semantics_required_scope_missing": (
                     "Classify proposition scope from its wording rather than "
                     "defaulting every item to specific."),
+                "editing_audit_scaffolding_leak": (
+                    "Describe only information ordering and presentation. "
+                    "Remove identity resolution, modality, provenance, and "
+                    "artifact bookkeeping from editing functions."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Return a complete fresh JSON "
@@ -327,7 +357,8 @@ def validate_text_semantics(value: dict[str, Any],
 
 def validate_interpretation(value: dict[str, Any],
                             validated_reference: dict[str, Any],
-                            analysis_contract: dict[str, Any] | None = None) -> None:
+                            analysis_contract: dict[str, Any] | None = None,
+                            text_semantics: dict[str, Any] | None = None) -> None:
     contract = analysis_contract or {}
     allowed_roles = {"initial_assertion", "counterevidence", "scope_limit",
                      "context"}
@@ -365,6 +396,12 @@ def validate_interpretation(value: dict[str, Any],
     relation_ids = _ids(relations, "relation_id")
     if len(relation_ids) != len(relations):
         raise DNAV2Error("interpretation_relation_id_invalid")
+    source_modalities = _source_modalities(validated_reference)
+    semantic_items = (text_semantics or {}).get("items") or []
+    semantic_by_id = {str(row.get("semantic_id")): row
+                      for row in semantic_items}
+    if text_semantics is not None and len(semantic_by_id) != len(semantic_items):
+        raise DNAV2Error("interpretation_text_semantic_binding_invalid")
     for row in propositions:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
@@ -373,6 +410,28 @@ def validate_interpretation(value: dict[str, Any],
             raise DNAV2Error("interpretation_role_invalid")
         if row.get("scope") not in {"specific", "domain_bounded", "general"}:
             raise DNAV2Error("interpretation_scope_invalid")
+        if text_semantics is not None:
+            semantic_ids = set(map(str, row.get("semantic_ids") or []))
+            text_refs = {ref for ref in refs
+                         if "T" in source_modalities.get(ref, [])}
+            if text_refs:
+                if not semantic_ids or not semantic_ids.issubset(semantic_by_id):
+                    raise DNAV2Error(
+                        "interpretation_text_semantic_binding_invalid")
+                canonical_refs = {
+                    str(ref) for semantic_id in semantic_ids
+                    for ref in semantic_by_id[semantic_id].get("source_ids") or []}
+                if text_refs != canonical_refs:
+                    raise DNAV2Error(
+                        "interpretation_text_semantic_binding_invalid")
+                if len(semantic_ids) == 1:
+                    canonical = semantic_by_id[next(iter(semantic_ids))]
+                    if str(row.get("statement") or "").strip() != str(
+                            canonical.get("proposition") or "").strip():
+                        raise DNAV2Error(
+                            "interpretation_single_semantic_statement_mismatch")
+            elif semantic_ids:
+                raise DNAV2Error("interpretation_text_semantic_binding_invalid")
     roles = {str(row.get("epistemic_role")) for row in propositions}
     if len(roles) < 2:
         raise DNAV2Error("interpretation_roles_collapsed")
@@ -380,7 +439,6 @@ def validate_interpretation(value: dict[str, Any],
         raise DNAV2Error("interpretation_required_role_missing")
     proposition_by_id = {str(row.get("proposition_id")): row
                          for row in propositions}
-    source_modalities = _source_modalities(validated_reference)
     for row in relations:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
@@ -396,6 +454,11 @@ def validate_interpretation(value: dict[str, Any],
         if not isinstance(confidence, (int, float)) or not 0 < float(confidence) <= 1:
             raise DNAV2Error("interpretation_confidence_invalid")
         source_rows = [proposition_by_id[item] for item in source_props]
+        proposition_refs = {
+            str(ref) for source_row in source_rows
+            for ref in source_row.get("source_ids") or []}
+        if refs != proposition_refs:
+            raise DNAV2Error("interpretation_relation_evidence_mismatch")
         target_row = proposition_by_id[str(row.get("target_proposition_id"))]
         relation_type = row.get("type")
         if relation_type == "contradicts":
@@ -411,6 +474,18 @@ def validate_interpretation(value: dict[str, Any],
                 "contradiction_target_modalities") or []))
             if not required.issubset(target_modalities):
                 raise DNAV2Error("interpretation_contradiction_modality_invalid")
+            if text_semantics is not None:
+                target_semantics = [
+                    semantic_by_id.get(str(semantic_id), {})
+                    for semantic_id in target_row.get("semantic_ids") or []]
+                required_scopes = set(map(str, contract.get(
+                    "text_semantics_required_scopes") or [
+                        "general", "domain_bounded"]))
+                if not any(item.get("semantic_role") == "assertion" and
+                           item.get("scope") in required_scopes
+                           for item in target_semantics):
+                    raise DNAV2Error(
+                        "interpretation_contradiction_semantics_invalid")
         if relation_type == "qualifies":
             scope_rows = [item for item in source_rows
                           if item.get("epistemic_role") == "scope_limit"]
@@ -423,6 +498,13 @@ def validate_interpretation(value: dict[str, Any],
                 "qualification_source_modalities") or []))
             if not required.issubset(observed):
                 raise DNAV2Error("interpretation_qualification_modality_invalid")
+            if text_semantics is not None and not any(
+                    semantic_by_id.get(str(semantic_id), {}).get(
+                        "semantic_role") == "qualification"
+                    for item in scope_rows
+                    for semantic_id in item.get("semantic_ids") or []):
+                raise DNAV2Error(
+                    "interpretation_qualification_semantics_invalid")
     relation_types = {str(row.get("type")) for row in relations}
     if not set(map(str, contract.get(
             "required_relation_types") or [])).issubset(relation_types):
@@ -552,6 +634,12 @@ def validate_editing_analysis(value: dict[str, Any],
     relations = value.get("functional_relations")
     if not isinstance(relations, list) or not relations:
         raise DNAV2Error("editing_relations_missing")
+    serialized = json.dumps(value, ensure_ascii=False).casefold()
+    if any(re.search(pattern, serialized) for pattern in (
+            r"identity[- ]?(?:alignment|claim|assertion|resolution)",
+            r"shared identity", r"cross-event identity", r"entity identit",
+            r"\bmodality\b", r"\bprovenance\b", r"\bartifact ids?\b")):
+        raise DNAV2Error("editing_audit_scaffolding_leak")
     for row in relations:
         refs = set(map(str, row.get("timeline_ids") or []))
         if not refs or not refs.issubset(valid_ids):
@@ -670,7 +758,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
         else:
             try:
                 validate_interpretation(
-                    interpretation, validated_reference, analysis_contract)
+                    interpretation, validated_reference, analysis_contract,
+                    text_semantics)
                 validate_interpretation_audit(
                     interpretation.get("semantic_audit") or {}, interpretation)
             except DNAV2Error:
@@ -688,7 +777,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             runner=runner, prompt=INTERPRETATION_PROMPT + base,
             max_new_tokens=3072,
             validator=lambda value: validate_interpretation(
-                value, validated_reference, analysis_contract),
+                value, validated_reference, analysis_contract, text_semantics),
             post_validator=semantic_post_validator, trace_dir=trace_dir,
             trace_name="interpretation", attempts=3)
         _attach_interpretation_provenance(
@@ -730,7 +819,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             max_new_tokens=3072,
             validator=lambda value: validate_editing_analysis(
                 value, measurements, validated_reference), trace_dir=trace_dir,
-            trace_name="editing")
+            trace_name="editing", attempts=3)
         editing = {
             "schema_version": EDITING_ANALYSIS_VERSION,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
