@@ -10,7 +10,7 @@ from src.agentic_video.manifest import json_hash
 
 INTERPRETATION_VERSION = "reference_interpretation_v13"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
-TEXT_SEMANTICS_VERSION = "text_semantics_v3"
+TEXT_SEMANTICS_VERSION = "text_semantics_v4"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
 DNA_PUBLISH_VERSION = "creative_dna_v2"
 
@@ -457,6 +457,18 @@ def validate_text_semantics(value: dict[str, Any],
             r"relations? between (?:claims|items|propositions)",
             limitation_text.casefold()):
         raise DNAV2Error("text_semantics_interpretive_limitation")
+
+
+def _text_semantics_contract_sha(
+        analysis_contract: dict[str, Any] | None) -> str:
+    """Hash only contract fields the text normalizer is allowed to read."""
+    contract = analysis_contract or {}
+    return json_hash({
+        "text_semantics_required_roles": sorted(map(
+            str, contract.get("text_semantics_required_roles") or [])),
+        "text_semantics_required_scopes": sorted(map(
+            str, contract.get("text_semantics_required_scopes") or [])),
+    })
 
 
 def validate_interpretation(value: dict[str, Any],
@@ -1091,15 +1103,19 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
 
     view = _analysis_view(validated_reference)
     analysis_contract_sha = json_hash(analysis_contract or {})
+    text_contract_sha = _text_semantics_contract_sha(analysis_contract)
     text_claims = [row for row in validated_reference.get("accepted_claims") or []
                    if row.get("modality") == "T"]
     text_semantics = load_cache("text_semantics.json")
     if text_semantics is not None:
-        if text_semantics.get("schema_version") != TEXT_SEMANTICS_VERSION or \
-                text_semantics.get("validated_reference_sha") != \
-                validated_reference.get("artifact_sha") or \
-                text_semantics.get("analysis_contract_sha") != \
-                analysis_contract_sha:
+        same_reference = text_semantics.get("validated_reference_sha") == \
+            validated_reference.get("artifact_sha")
+        current_contract = text_semantics.get(
+            "text_semantics_contract_sha") == text_contract_sha
+        legacy = text_semantics.get("schema_version") == "text_semantics_v3"
+        if not same_reference or not (legacy or (
+                text_semantics.get("schema_version") == TEXT_SEMANTICS_VERSION and
+                current_contract)):
             text_semantics = None
         else:
             try:
@@ -1107,6 +1123,18 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
                                         analysis_contract)
             except DNAV2Error:
                 text_semantics = None
+            else:
+                if legacy:
+                    text_semantics = {
+                        "schema_version": TEXT_SEMANTICS_VERSION,
+                        "validated_reference_sha": validated_reference.get(
+                            "artifact_sha"),
+                        "text_semantics_contract_sha": text_contract_sha,
+                        "items": text_semantics.get("items") or [],
+                        "limitations": text_semantics.get("limitations") or [],
+                    }
+                    text_semantics["artifact_sha"] = json_hash(text_semantics)
+                    save_cache("text_semantics.json", text_semantics)
     if text_semantics is None:
         proposed_text = _ask_validated_object(
             runner=runner,
@@ -1121,7 +1149,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
         text_semantics = {
             "schema_version": TEXT_SEMANTICS_VERSION,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
-            "analysis_contract_sha": analysis_contract_sha,
+            "text_semantics_contract_sha": text_contract_sha,
             **proposed_text,
         }
         text_semantics["artifact_sha"] = json_hash(text_semantics)

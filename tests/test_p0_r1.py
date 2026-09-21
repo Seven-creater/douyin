@@ -8,8 +8,8 @@ import pytest
 
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
-    DNAV2Error, _interpretation_plan_catalog, build_writer_payload,
-    compile_interpretation_plan,
+    DNAV2Error, _interpretation_plan_catalog, _text_semantics_contract_sha,
+    build_writer_payload, compile_interpretation_plan,
     normalize_interpretation_roles, normalize_interpretation_text, publish_dna,
     validate_interpretation, validate_editing_analysis,
     validate_interpretation_audit, validate_interpretation_plan,
@@ -534,6 +534,15 @@ def test_text_semantics_covers_only_text_claims() -> None:
             reference)
     assert excinfo.value.reason_code == \
         "text_semantics_interpretive_limitation"
+
+
+def test_text_semantics_contract_ignores_interpretation_relations() -> None:
+    base = {"text_semantics_required_roles": ["assertion"],
+            "text_semantics_required_scopes": ["general"]}
+    assert _text_semantics_contract_sha({
+        **base, "required_relation_types": ["contradicts"]}) == \
+        _text_semantics_contract_sha({
+            **base, "required_relation_types": ["reframes"]})
 
 
 def test_blocked_candidate_freeze_is_not_labeled_release_candidate(
