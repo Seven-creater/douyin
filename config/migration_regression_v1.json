@@ -1,0 +1,34 @@
+{
+  "schema_version": "migration_suite_v1",
+  "tier": "regression",
+  "cases": [
+    {
+      "case_id": "reg_same_structure_new_surface",
+      "relation_family": "belief-scope-correction",
+      "contrast_type": "different_surface_same_structure",
+      "expected_accept": true,
+      "candidate": {
+        "domain": "emergency logistics",
+        "events": [
+          "An observer turns one superficial cue into an absolute judgment about a coordinator's operational competence.",
+          "A directly observable routing decision contradicts that exact operational judgment and has a visible result.",
+          "Additional evidence stays within its supported scope; the closing detail humanizes the coordinator without undoing the correction."
+        ]
+      }
+    },
+    {
+      "case_id": "reg_same_topic_wrong_cause",
+      "relation_family": "topic-only-resemblance",
+      "contrast_type": "similar_surface_different_structure",
+      "expected_accept": false,
+      "candidate": {
+        "domain": "athletic training",
+        "events": [
+          "A skilled athlete is introduced as skilled from the first shot.",
+          "A montage repeats the already accepted skill without contradicting any prior proposition.",
+          "A comic ending changes tone but not the interpretation of earlier evidence."
+        ]
+      }
+    }
+  ]
+}

@@ -309,20 +309,23 @@ def build_m2a_registry(*, t2i, multiview, upscale,
             raise SkillBlocked(
                 "approval_rejected",
                 f"decision={approval.get('decision')!r}")
-        if str(approval.get("candidate_sha") or "") != \
-                str(workspace.get_sha(candidate_art) or ""):
-            raise SkillBlocked(
-                "approval_stale",
-                "approval is bound to a different candidate sha — "
-                "re-review required")
-        for view, sha in (approval.get("views") or {}).items():
-            bound = str(((candidate.get("views_4k") or {})
-                         .get(view) or {}).get("sha") or "")
-            if str(sha) != bound:
-                raise SkillBlocked(
-                    "approval_stale",
-                    f"view {view} sha mismatch: approval={sha} "
-                    f"candidate={bound}")
+        from src.agentic_video.provenance import (
+            APPROVAL_POLICY_VERSION, validate_approval_binding)
+        expected_parents = [
+            {"artifact_id": candidate_art,
+             "sha": workspace.get_sha(candidate_art)},
+            *[{"artifact_id": f"view:{view}", "sha": entry.get("sha")}
+              for view, entry in (candidate.get("views_4k") or {}).items()],
+            {"artifact_id": "identity_sheet",
+             "sha": (candidate.get("sheet") or {}).get("sha")},
+        ]
+        problems = validate_approval_binding(
+            approval, candidate_id=candidate_art,
+            candidate_sha=str(workspace.get_sha(candidate_art) or ""),
+            parent_shas=expected_parents,
+            policy_version=APPROVAL_POLICY_VERSION)
+        if problems:
+            raise SkillBlocked("approval_stale", ",".join(problems))
         final_manifest = {**candidate,
                           "approval": {k: approval[k] for k in
                                        ("decision", "reviewer", "note")

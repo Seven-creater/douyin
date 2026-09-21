@@ -24,6 +24,7 @@ def main():
     from src.agentic_video.asset_studio.workspace_setup import prepare_m2a_workspace
     from src.agentic_video.no_progress import NoProgressDetector
     from src.agentic_video.workspace import Workspace
+    from src.agentic_video.provenance import assert_production_sources_current
 
     run_dir = Path("data/agentic_runs/v4_run_m2a")
     if not (run_dir / "workspace.json").is_file():
@@ -40,6 +41,11 @@ def main():
             if memory.get(gpu, 999999) > 500:
                 raise RuntimeError(f"GPU {gpu} is occupied; resume not started")
         ws = Workspace(run_dir)
+        # The archived youth-fencer chain predates exact lineage metadata and
+        # is intentionally barred from starting further expensive work.
+        assert_production_sources_current(
+            ws, ("creative_dna", "screenplay", "asset_graph"),
+            revocation_path=Path("config/agentic_revocations.json"))
         prepare_m2a_workspace(ws, "C0", night_goal=True)
         print(ws.build_map(), flush=True)
         print("Acceptance:", write_acceptance_report(ws), flush=True)

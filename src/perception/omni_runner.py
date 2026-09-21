@@ -264,7 +264,8 @@ class OmniRunner:
     def _build_media_inputs(self, image_paths: list[Path], prompt: str, *,
                             video_path: Path | None = None,
                             fps: float | None = None,
-                            source_origin_s: float = 0.0):
+                            source_origin_s: float = 0.0,
+                            use_audio_in_video: bool | None = None):
         """Build an audited image-only or images-plus-video Omni request.
 
         V7 identity checks need full frames, deterministic ROI crops and album
@@ -287,7 +288,13 @@ class OmniRunner:
 
         from qwen_omni_utils import process_audio_info, process_vision_info
 
-        use_audio = video_path is not None
+        # Keep the legacy default for callers that intentionally need a joint
+        # audio/video request, while allowing evidence-isolated visual probes
+        # to prove that no audio entered the model request.
+        use_audio = (video_path is not None if use_audio_in_video is None
+                     else bool(use_audio_in_video))
+        if video_path is None and use_audio:
+            raise ValueError("audio from video requested without a video")
         audios = (process_audio_info(conversation, use_audio_in_video=True)
                   if use_audio else None)
         images, video_records = process_vision_info(
@@ -375,6 +382,7 @@ class OmniRunner:
                       video_path: Path | None = None,
                       fps: float | None = None,
                       source_origin_s: float = 0.0,
+                      use_audio_in_video: bool | None = None,
                       max_new_tokens: int | None = None,
                       stop_after_json_object: bool = False) -> OmniAnswer:
         """Inspect images, optionally together with one already-cut video."""
@@ -383,7 +391,8 @@ class OmniRunner:
         inputs, use_audio = self._build_media_inputs(
             [Path(path) for path in image_paths], prompt,
             video_path=Path(video_path) if video_path is not None else None,
-            fps=fps, source_origin_s=source_origin_s)
+            fps=fps, source_origin_s=source_origin_s,
+            use_audio_in_video=use_audio_in_video)
         input_build_s = time.time() - t_pre0
         return self._generate(
             inputs, max_new_tokens=max_new_tokens,

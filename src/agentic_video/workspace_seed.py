@@ -34,7 +34,22 @@ def seed_from_previous_run(ws: Workspace, prev_root: Path,
         if not src.is_file():
             continue
         data = json.loads(src.read_text(encoding="utf-8"))
-        ws.write_draft(name, data)
+        source_version = (info.get("versions") or {}).get(version) or {}
+        source_sha = str(source_version.get("sha") or "")
+        if source_version.get("status") == "revoked":
+            continue
+        ws.write_draft(name, data, metadata={
+            "producer_run": str(ws.root),
+            "created_by": "workspace_seed",
+            "derived_from": [{
+                "artifact_id": ((source_version.get("provenance") or {}).get(
+                    "artifact_id") or f"{name}:{version}"),
+                "artifact_type": name.split(":")[0],
+                "version": version,
+                "sha": source_sha,
+                "producer_run": str(Path(prev_root)),
+            }],
+        })
         ws.record_dependency_snapshot(name)
         ws.commit(name)
         seeded.append(name)

@@ -376,9 +376,24 @@ def _test_asset_approved(workspace: Workspace) -> dict[str, Any]:
     if not approval or approval.get("decision") != "approve":
         failures.append({"check": "approval",
                          "detail": "no approving human_approval:C0"})
-    elif str(approval.get("candidate_sha") or "") != str(
-            workspace.get_sha("asset:C0_candidate") or ""):
-        failures.append({"check": "approval_binding",
-                         "detail": "approval bound to stale candidate"})
+    else:
+        from src.agentic_video.provenance import (
+            APPROVAL_POLICY_VERSION, validate_approval_binding)
+        candidate = workspace.read_artifact("asset:C0_candidate") or {}
+        expected_parents = [
+            {"artifact_id": "asset:C0_candidate",
+             "sha": workspace.get_sha("asset:C0_candidate")},
+            *[{"artifact_id": f"view:{view}", "sha": entry.get("sha")}
+              for view, entry in (candidate.get("views_4k") or {}).items()],
+            {"artifact_id": "identity_sheet",
+             "sha": (candidate.get("sheet") or {}).get("sha")},
+        ]
+        binding = validate_approval_binding(
+            approval, candidate_id="asset:C0_candidate",
+            candidate_sha=str(workspace.get_sha("asset:C0_candidate") or ""),
+            parent_shas=expected_parents,
+            policy_version=APPROVAL_POLICY_VERSION)
+        failures.extend({"check": "approval_binding", "detail": reason}
+                        for reason in binding)
     return {"passed": not failures, "failures": failures,
             "validators_run": ["test_asset_approved"]}

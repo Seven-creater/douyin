@@ -31,6 +31,7 @@ def main() -> None:
     args = parser.parse_args()
 
     from src.agentic_video.workspace import Workspace
+    from src.agentic_video.provenance import APPROVAL_POLICY_VERSION
     from src.agentic_video.skills.registry import SkillBlocked
     ws = Workspace(Path(args.run_dir))
     candidate = ws.read_artifact(f"asset:{args.asset}_candidate")
@@ -38,10 +39,20 @@ def main() -> None:
         sys.exit(f"no committed candidate at {args.run_dir}")
     approval = {
         "asset_id": args.asset,
+        "candidate_id": f"asset:{args.asset}_candidate",
         "candidate_sha": ws.get_sha(f"asset:{args.asset}_candidate"),
         "views": {view: entry.get("sha") for view, entry in
                   (candidate.get("views_4k") or {}).items()},
         "identity_sheet_sha": (candidate.get("sheet") or {}).get("sha"),
+        "parent_shas": [
+            {"artifact_id": f"asset:{args.asset}_candidate",
+             "sha": ws.get_sha(f"asset:{args.asset}_candidate")},
+            *[{"artifact_id": f"view:{view}", "sha": entry.get("sha")}
+              for view, entry in (candidate.get("views_4k") or {}).items()],
+            {"artifact_id": "identity_sheet",
+             "sha": (candidate.get("sheet") or {}).get("sha")},
+        ],
+        "approval_policy_version": APPROVAL_POLICY_VERSION,
         "decision": args.decision,
         "reviewer": args.reviewer,
         "note": args.note}

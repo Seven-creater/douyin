@@ -1,0 +1,5 @@
+{
+  "schema_version": "artifact_revocations_v1",
+  "revocations": [],
+  "policy": "Legacy production artifacts without artifact_provenance_v1 are blocked by preflight even when their SHA is not listed here."
+}

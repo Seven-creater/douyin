@@ -213,13 +213,24 @@ def test_human_gate_final_commit_flow(tmp_path: Path) -> None:
         reg.execute({"skill": "approve_character_asset"}, ws)
         raise AssertionError("must be blocked")
     except SkillBlocked as blocked:
-        assert "different candidate" in str(blocked)
+        assert "candidate_sha_mismatch" in str(blocked)
 
     # 正确绑定 → final COMMIT
     candidate = ws.read_artifact("asset:C0_candidate")
+    from src.agentic_video.provenance import APPROVAL_POLICY_VERSION
+    parent_shas = [
+        {"artifact_id": "asset:C0_candidate",
+         "sha": ws.get_sha("asset:C0_candidate")},
+        *[{"artifact_id": f"view:{view}", "sha": entry["sha"]}
+          for view, entry in candidate["views_4k"].items()],
+        {"artifact_id": "identity_sheet", "sha": candidate["sheet"]["sha"]},
+    ]
     ws.write_draft("human_approval:C0",
                    {"decision": "approve", "reviewer": "human",
+                    "candidate_id": "asset:C0_candidate",
                     "candidate_sha": ws.get_sha("asset:C0_candidate"),
+                    "parent_shas": parent_shas,
+                    "approval_policy_version": APPROVAL_POLICY_VERSION,
                     "views": {v: e["sha"] for v, e in
                               candidate["views_4k"].items()}})
     ws.commit("human_approval:C0")

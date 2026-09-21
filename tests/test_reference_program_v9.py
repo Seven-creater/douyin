@@ -540,13 +540,7 @@ def test_ocr_probe_carries_verified_text_events_and_source_interval(
                 "importance": "required", "gap_type": "text_claim",
                 "selected_probe": "ocr_context", "interval": [0.0, 10.0],
                 "status": "open"}
-    frame = tmp_path / "ocr_frame.jpg"
-    frame.write_bytes(b"frame")
-    monkeypatch.setattr(module, "_ocr_probe_frames", lambda *args, **kwargs: (
-        [frame], [{"claim_id": "ocr_001", "frame_id": "f000030",
-                   "pts_s": 1.0, "path": str(frame), "sha256": "frame_hash"}]))
-    monkeypatch.setattr(module, "cut_clip", lambda *args, **kwargs: tmp_path / "clip.mp4")
-    runner = FakeRunner(inspect=[{
+    runner = FakeRunner(ask=[{
         "question_id": "q_ocr", "status": "resolved", "answer": "text makes a claim",
         "evidence": [{"evidence_type": "observed_textual_claim",
                       "description": "words appear on screen"}],
@@ -555,9 +549,8 @@ def test_ocr_probe_carries_verified_text_events_and_source_interval(
         tmp_path / "reference.mp4", _draft(questions=[question]), ledger,
         tmp_path, runner=runner)
     assert not result["required_unresolved_ids"]
-    assert "ocr_001" in runner.inspect_calls[0][1]
-    assert runner.inspect_calls[0][0] == [frame]
-    assert runner.inspect_calls[0][2]["video_path"] == tmp_path / "clip.mp4"
+    assert "ocr_001" in runner.ask_calls[0][0]
+    assert runner.inspect_calls == []
     audit = result["probe_history"][0]
     assert "ocr_text_events" in audit["evidence_fields"]
     assert audit["evidence_provenance"]["source_sha256"] == "a" * 64

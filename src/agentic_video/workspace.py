@@ -9,16 +9,16 @@ p0626 八项设计原则：
 """
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
 from src.agentic_video.manifest import json_hash
 
-WORKSPACE_VERSION = "workspace_v1"
+WORKSPACE_VERSION = "workspace_v2"
 
-STATUSES = ("not_started", "in_progress", "draft", "tested", "committed", "stale")
+STATUSES = ("not_started", "in_progress", "draft", "tested", "committed",
+            "stale", "revoked")
 
 
 class WorkspaceBlocked(RuntimeError):
@@ -80,7 +80,8 @@ class Workspace:
 
     # ---- 版本化写入 ----
 
-    def write_draft(self, name: str, data: Any) -> str:
+    def write_draft(self, name: str, data: Any, *,
+                    metadata: dict[str, Any] | None = None) -> str:
         """写入新 draft 版本（不覆盖 committed 版本）。返回版本号。"""
         artifact = self.state["artifacts"].setdefault(
             name, {"versions": {}, "active_version": None})
@@ -88,7 +89,19 @@ class Workspace:
         next_num = len(versions) + 1
         version_id = f"v{next_num}"
         sha = json_hash(data)
-        versions[version_id] = {"sha": sha, "status": "draft"}
+        provenance = dict(metadata or {})
+        provenance.setdefault("artifact_id", f"{name}:{version_id}")
+        provenance.setdefault("artifact_type", name.split(":")[0])
+        provenance.setdefault("version", version_id)
+        provenance.setdefault("sha", sha)
+        provenance.setdefault("producer_run", str(self.root))
+        provenance.setdefault("derived_from", [])
+        provenance.setdefault("created_by", "workspace")
+        provenance.setdefault("schema_version", "artifact_provenance_v1")
+        if provenance["sha"] != sha or provenance["version"] != version_id:
+            raise WorkspaceBlocked("artifact_metadata_mismatch", name)
+        versions[version_id] = {
+            "sha": sha, "status": "draft", "provenance": provenance}
         artifact["active_version"] = version_id
         # 写入文件（JSON）
         stage_dir = self._stage_dir(name)
@@ -134,6 +147,26 @@ class Workspace:
             artifact["versions"][version]["status"] = status
         self._save()
 
+    def revoke(self, name: str, reason: str, *, reviewer: str = "human") -> None:
+        """Revoke the active version without deleting its immutable record."""
+        artifact = self.state["artifacts"].get(name) or {}
+        version = artifact.get("active_version")
+        if not version:
+            raise WorkspaceBlocked("revoke_no_active_version", name)
+        info = artifact["versions"][version]
+        info["status"] = "revoked"
+        info["revocation"] = {"reason": str(reason), "reviewer": str(reviewer)}
+        self._save()
+        self._invalidate_downstream(name)
+
+    def get_provenance(self, name: str) -> dict[str, Any]:
+        artifact = self.state["artifacts"].get(name) or {}
+        version = artifact.get("active_version")
+        if not version:
+            return {}
+        return dict((artifact.get("versions") or {}).get(
+            version, {}).get("provenance") or {})
+
     # ---- 依赖管理 ----
 
     def set_dependency(self, name: str, upstream: str,
@@ -159,6 +192,11 @@ class Workspace:
                 if child in visited:
                     continue
                 visited.add(child)
+                # Always continue through graph-only or draft intermediates.
+                # The previous implementation only enqueued a child after it
+                # marked a committed version stale, so revocation stopped at
+                # missing/draft nodes and never reached cross-run consumers.
+                queue.append(child)
                 artifact = self.state["artifacts"].get(child) or {}
                 version = artifact.get("active_version")
                 if version:
@@ -168,7 +206,6 @@ class Workspace:
                             != "committed"):
                         info["status"] = "stale"
                         self._save()
-                        queue.append(child)
 
     def effective_status(self, name: str,
                          _seen: set[str] | None = None) -> str:

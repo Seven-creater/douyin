@@ -1838,18 +1838,23 @@ def _run_reference_probe(reference: Path, question: dict[str, Any],
         raise V9Blocked("probe", "asr_segments_unavailable")
     if selected == "beat_audio" and not evidence["beat_points_s"]:
         raise V9Blocked("probe", "beat_points_unavailable")
+    request_text = question.get("question")
+    if selected in {"native_frames", "dense_video"}:
+        request_text = (
+            "Record observable anonymous entities, actions, contacts, scene "
+            "changes and temporal order within the interval. Mark occlusion "
+            "or insufficient visibility explicitly.")
     probe_input = {
-        "question_id": question.get("id"), "question": question.get("question"),
+        "question_id": question.get("id"), "observation_request": request_text,
         "probe_type": selected, "source_interval": interval,
         "source_sha256": ledger["reference"]["sha256"],
         "deterministic_evidence": evidence,
         "evidence_provenance": provenance.get(selected, {}),
     }
-    ocr_images: list[Path] = []
     if selected == "ocr_context":
-        ocr_images, probe_input["ocr_frames"] = _ocr_probe_frames(
-            reference, evidence["ocr_text_events"], ledger["native_frames"],
-            output / "ocr_frames", ffmpeg_bin=ffmpeg_bin)
+        probe_input["text_region_refs"] = [
+            {"claim_id": row.get("claim_id"), "interval": row.get("interval")}
+            for row in evidence["ocr_text_events"]]
     input_path = _write_json(output / "input.json", probe_input)
     prompt = PROBE_PROMPT + json.dumps(probe_input, ensure_ascii=False)
     if selected == "native_frames":
@@ -1865,21 +1870,22 @@ def _run_reference_probe(reference: Path, question: dict[str, Any],
             raise V9Blocked("probe", "native_frame_probe_unavailable")
         answer = runner.inspect_media(images, prompt, max_new_tokens=3072,
                                       stop_after_json_object=True)
-    elif selected == "ocr_context":
-        if not hasattr(runner, "inspect_media"):
-            raise V9Blocked("probe", "ocr_frame_probe_unavailable")
-        clip = cut_clip(ffmpeg_bin, reference, output / "clip", start_s=interval[0],
-                        end_s=interval[1])
-        answer = runner.inspect_media(
-            ocr_images, prompt, video_path=clip, fps=4.0,
-            source_origin_s=interval[0], max_new_tokens=3072,
-            stop_after_json_object=True)
+    elif selected in {"ocr_context", "audio_asr_context", "beat_audio"}:
+        # Modality-separated probes reason only over the already extracted
+        # channel record.  Supplying the source video here would silently add
+        # visual/audio evidence and destroy provenance attribution.
+        if not hasattr(runner, "ask"):
+            raise V9Blocked("probe", f"{selected}_text_probe_unavailable")
+        answer = runner.ask(prompt, max_new_tokens=3072,
+                            stop_after_json_object=True)
+    elif selected == "cross_modal_check":
+        raise V9Blocked("probe", "cross_modal_probe_requires_fusion_stage")
     else:
         fps = 12.0 if selected == "dense_video" else 4.0
         answer = runner.watch(
             reference, prompt, start_s=interval[0], end_s=interval[1],
             clip_dir=output / "clip", duration_s=interval[1] - interval[0],
-            fps=fps, use_audio_in_video=True, max_new_tokens=3072,
+            fps=fps, use_audio_in_video=False, max_new_tokens=3072,
             stop_after_json_object=True)
     raw = _answer_text(answer)
     output.mkdir(parents=True, exist_ok=True)
