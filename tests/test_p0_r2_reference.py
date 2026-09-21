@@ -13,12 +13,16 @@ from src.agentic_video.editing_grammar import (
     validate_editing_patterns,
 )
 from src.agentic_video.reference_interpretation import (
+    analysis_fingerprint,
     finalize_interpretation,
+    runner_identity,
     run_reference_interpretation,
     run_reference_interpretation_checkpointed,
     validate_interpretation,
 )
 from src.agentic_video.reference_storyboard import build_agent_reference
+from src.perception.omni_pool import OmniProcessPool
+from src.perception.omni_runner import OmniRunner
 
 
 def _validated_reference() -> dict:
@@ -27,10 +31,8 @@ def _validated_reference() -> dict:
          "interval": [0.0, 5.0]},
         {"segment_id": "S2", "section_id": "B", "segment_kind": "content",
          "interval": [5.0, 6.0]},
-        {"segment_id": "T1", "section_id": "B", "segment_kind": "transition",
-         "transition_type": "zoom_blur", "interval": [6.0, 6.1]},
         {"segment_id": "S3", "section_id": "B", "segment_kind": "content",
-         "interval": [6.1, 7.0]},
+         "interval": [6.0, 7.0]},
         {"segment_id": "S4", "section_id": "C", "segment_kind": "content",
          "interval": [7.0, 7.5]},
         {"segment_id": "T2", "section_id": "C", "segment_kind": "transition",
@@ -44,7 +46,9 @@ def _validated_reference() -> dict:
         "artifact_sha": "b" * 64,
         "accepted_claims": [
             {"claim_id": "V1", "subject": "E1", "predicate": "appears_in",
-             "object": "scene", "interval": [0.0, 5.0], "modality": "V"},
+             "object": "scene", "interval": [0.0, 5.0], "modality": "V",
+             "producer": "human", "source_sha": "secret", "reviewer": "R1",
+             "support_refs": [{"path": "C:/private/reference.mp4"}]},
             {"claim_id": "ID1", "subject": "E1", "predicate": "same_entity_as",
              "object": "E2", "interval": [0.0, 8.0], "modality": "V"},
             {"claim_id": "T01", "subject": "TEXT", "predicate": "contains_text",
@@ -56,7 +60,8 @@ def _validated_reference() -> dict:
             {"event_id": "EV1", "participants": ["E1"],
              "action_claim_ids": ["V1"], "object_ids": [],
              "ordering": "observed", "outcome_claim_ids": [],
-             "context_claim_ids": [], "interval": [0.0, 5.0]},
+             "context_claim_ids": [], "interval": [0.0, 5.0],
+             "producer": "human", "source_sha": "secret"},
         ],
         "deterministic_timeline": {
             "schema_version": "timeline_v1",
@@ -117,12 +122,12 @@ def test_agent_reference_separates_identity_and_structures_transitions() -> None
     assert cards[0]["visual_claim_ids"] == ["V1"]
     assert cards[0]["identity_claim_ids"] == ["ID1"]
     assert cards[0]["event_ids"] == ["EV1"]
-    assert cards[1]["transition_out"] == {
-        "transition_id": "T1", "transition_type": "zoom_blur",
-        "start_s": 6.0, "end_s": 6.1, "duration_s": 0.1,
-        "from_shot_id": "S2", "to_shot_id": "S3",
+    assert cards[3]["transition_out"] == {
+        "transition_id": "T2", "transition_type": "whip_pan",
+        "start_s": 7.5, "end_s": 7.6, "duration_s": 0.1,
+        "from_shot_id": "S4", "to_shot_id": "S5",
     }
-    assert cards[2]["transition_in"] == cards[1]["transition_out"]
+    assert cards[4]["transition_in"] == cards[3]["transition_out"]
     serialized = json.dumps(result)
     assert "analysis_contract" not in serialized
     assert "required_roles" not in serialized
@@ -212,35 +217,95 @@ def test_checkpoint_requires_evidence_and_analysis_fingerprint(tmp_path) -> None
     assert third["analysis_fingerprint"] != first["analysis_fingerprint"]
 
 
+def test_production_runner_config_is_part_of_analysis_fingerprint() -> None:
+    interpreter_v1 = OmniRunner({
+        "model_path": "models/omni-v1", "dtype": "bfloat16",
+        "repetition_penalty": 1.05,
+    })
+    interpreter_v2 = OmniRunner({
+        "model_path": "models/omni-v2", "dtype": "bfloat16",
+        "repetition_penalty": 1.05,
+    })
+    auditor = OmniRunner({
+        "model_path": "models/auditor", "dtype": "bfloat16",
+        "repetition_penalty": 1.0,
+    })
+
+    identity = runner_identity(interpreter_v1)
+    assert identity == {
+        "class": "OmniRunner", "model_path": "models/omni-v1",
+        "dtype": "bfloat16", "repetition_penalty": 1.05,
+    }
+    assert analysis_fingerprint(
+        interpreter_v1, auditor) != analysis_fingerprint(interpreter_v2, auditor)
+
+    pool = object.__new__(OmniProcessPool)
+    pool.omni_cfg = {
+        "model_path": "models/pooled-omni", "dtype": "float16",
+        "repetition_penalty": 1.1,
+    }
+    assert runner_identity(pool) == {
+        "class": "OmniProcessPool", "model_path": "models/pooled-omni",
+        "dtype": "float16", "repetition_penalty": 1.1,
+    }
+
+
 def test_measured_editing_metrics_split_shot_cut_transition_rates() -> None:
     measured = build_measured_editing_facts(
         build_agent_reference(_validated_reference()))
     rows = measured["pace_curve"]
 
     assert [row["content_shot_count"] for row in rows] == [1, 2, 2]
-    assert [row["cut_count"] for row in rows] == [0, 1, 1]
-    assert [row["transition_count"] for row in rows] == [0, 1, 1]
+    assert [row["edit_boundary_count"] for row in rows] == [0, 1, 1]
+    assert [row["hard_cut_count"] for row in rows] == [0, 1, 0]
+    assert [row["transition_count"] for row in rows] == [0, 0, 1]
     assert [row["shot_rate"] for row in rows] == [0.2, 1.0, 2.0]
-    assert [row["cut_rate"] for row in rows] == [0.0, 0.5, 1.0]
-    assert [row["transition_rate"] for row in rows] == [0.0, 0.5, 1.0]
-    assert [row["raw_segment_rate"] for row in rows] == [0.2, 1.5, 3.0]
-    assert rows[1]["mean_shot_duration_s"] == 0.95
-    assert rows[1]["median_shot_duration_s"] == 0.95
-    assert measured["facts"][1]["transition_out"]["transition_id"] == "T1"
+    assert [row["edit_boundary_rate"] for row in rows] == [0.0, 0.5, 1.0]
+    assert [row["hard_cut_rate"] for row in rows] == [0.0, 0.5, 0.0]
+    assert [row["transition_rate"] for row in rows] == [0.0, 0.0, 1.0]
+    assert [row["raw_segment_rate"] for row in rows] == [0.2, 1.0, 3.0]
+    assert rows[1]["mean_shot_duration_s"] == 1.0
+    assert rows[1]["median_shot_duration_s"] == 1.0
+    assert measured["facts"][3]["transition_out"]["transition_id"] == "T2"
     assert measured["pace_changes"][0]["shot_rate_before"] == 0.2
 
 
-def test_editing_payload_dereferences_claims_events_and_identity() -> None:
+def test_editing_payload_is_compact_indexed_and_excludes_identity_provenance() -> None:
     agent_reference = build_agent_reference(_validated_reference())
     measured = build_measured_editing_facts(agent_reference)
     payload = build_editing_payload(agent_reference, measured)
     first = payload["shots"][0]
 
-    assert first["visual_claims"][0]["claim_id"] == "V1"
-    assert first["identity_claims"][0]["claim_id"] == "ID1"
-    assert first["events"][0]["event_id"] == "EV1"
+    assert first["visual_claim_ids"] == ["V1"]
+    assert first["canonical_subject_ids"] == ["E1", "E2"]
+    assert first["event_ids"] == ["EV1"]
     assert first["transition_in"] is None
+    assert "identity_claim_ids" not in first
+    assert set(payload["claim_index"]) == {"V1", "T01", "A1"}
+    assert payload["claim_index"]["V1"] == {
+        "claim_id": "V1", "subject": "E1", "predicate": "appears_in",
+        "object": "scene", "interval": [0.0, 5.0], "modality": "V",
+    }
+    assert set(payload["event_index"]["EV1"]) == {
+        "event_id", "participants", "action_claim_ids", "object_ids",
+        "ordering", "outcome_claim_ids", "context_claim_ids", "interval",
+    }
+    serialized = json.dumps(payload)
+    assert "source_sha" not in serialized
+    assert "support_refs" not in serialized
+    assert "reviewer" not in serialized
+    assert "reference.mp4" not in serialized
     assert payload["measured_editing"]["pace_curve"][1]["shot_rate"] == 1.0
+
+
+def _shot_evidence_ids(payload: dict) -> dict[str, set[str]]:
+    fields = ("visual_claim_ids", "text_claim_ids", "audio_claim_ids", "event_ids")
+    return {
+        row["shot_id"]: {
+            value for field in fields for value in row.get(field, [])
+        }
+        for row in payload["shots"]
+    }
 
 
 def _pattern_value(pattern_type: str = "contrast_cut") -> dict:
@@ -260,21 +325,71 @@ def test_local_editing_pattern_cannot_span_most_of_video() -> None:
     measured = build_measured_editing_facts(agent_reference)
     value = _pattern_value("rapid_montage")
     value["patterns"][0]["shot_ids"] = ["S1", "S2", "S3", "S4", "S5"]
-    value["patterns"][0]["fact_ids"] = ["EF1", "EF2"]
+    value["patterns"][0]["fact_ids"] = ["EF1", "EF2", "EF3", "EF4", "EF5"]
     value["patterns"][0]["evidence_ids"] = ["V1"]
+    payload = build_editing_payload(agent_reference, measured)
 
     with pytest.raises(EditingGrammarError) as excinfo:
-        validate_editing_patterns(
-            value, measured, evidence_ids={"V1", "T01", "A1", "EV1"})
+        validate_editing_patterns(value, measured,
+                                  shot_evidence_ids=_shot_evidence_ids(payload))
     assert excinfo.value.reason_code == "local_pattern_too_broad"
 
 
-def test_unexplained_pace_change_is_warning_not_failure() -> None:
-    measured = build_measured_editing_facts(
-        build_agent_reference(_validated_reference()))
+def test_pattern_requirements_allow_single_long_hold_and_fact_only_patterns() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    measured = build_measured_editing_facts(agent_reference)
+    evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
+    value = {
+        "schema_version": "editing_patterns_v1",
+        "patterns": [
+            {"pattern_id": "EP1", "type": "long_hold", "scope": "local",
+             "shot_ids": ["S4"], "fact_ids": ["EF4"],
+             "evidence_ids": [], "confidence": 0.8},
+            {"pattern_id": "EP2", "type": "transition_chain", "scope": "local",
+             "shot_ids": ["S4", "S5"], "fact_ids": ["EF4", "EF5"],
+             "evidence_ids": [], "confidence": 0.8},
+        ],
+        "limitations": [],
+    }
+
     result = validate_editing_patterns(
-        _pattern_value(), measured,
-        evidence_ids={"V1", "T01", "A1", "EV1"})
+        value, measured, shot_evidence_ids=evidence)
+    assert [row["pattern_id"] for row in result["patterns"]] == ["EP1", "EP2"]
+
+
+def test_semantic_pattern_requires_local_evidence_and_exact_fact_scope() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    measured = build_measured_editing_facts(agent_reference)
+    evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
+
+    wrong_facts = _pattern_value()
+    wrong_facts["patterns"][0]["fact_ids"] = ["EF1", "EF2"]
+    with pytest.raises(EditingGrammarError) as fact_error:
+        validate_editing_patterns(
+            wrong_facts, measured, shot_evidence_ids=evidence)
+    assert fact_error.value.reason_code == "pattern_fact_scope_invalid"
+
+    wrong_evidence = _pattern_value()
+    wrong_evidence["patterns"][0]["evidence_ids"] = ["V1"]
+    with pytest.raises(EditingGrammarError) as evidence_error:
+        validate_editing_patterns(
+            wrong_evidence, measured, shot_evidence_ids=evidence)
+    assert evidence_error.value.reason_code == "pattern_evidence_scope_invalid"
+
+    missing_evidence = _pattern_value()
+    missing_evidence["patterns"][0]["evidence_ids"] = []
+    with pytest.raises(EditingGrammarError) as missing_error:
+        validate_editing_patterns(
+            missing_evidence, measured, shot_evidence_ids=evidence)
+    assert missing_error.value.reason_code == "pattern_evidence_required"
+
+
+def test_unexplained_pace_change_is_warning_not_failure() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    measured = build_measured_editing_facts(agent_reference)
+    evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
+    result = validate_editing_patterns(
+        _pattern_value(), measured, shot_evidence_ids=evidence)
 
     assert result["patterns"][0]["type"] == "contrast_cut"
     assert result["coverage_warnings"] == [
@@ -303,6 +418,8 @@ def test_editing_recognition_and_function_reasoning_are_two_single_calls() -> No
     assert "verified_interpretation" not in pattern_runner.prompts[0]
     assert '\"predicate\":\"audio_event\"' in pattern_runner.prompts[0]
     assert "verified_interpretation" in function_runner.prompts[0]
+    assert '\"object\":\"sound\"' in function_runner.prompts[0]
+    assert '\"object\":\"scene\"' not in function_runner.prompts[0]
     assert result["patterns"][0]["evidence_ids"] == ["A1"]
     assert result["functions"][0]["function"] == "accumulate"
-    assert measured["schema_version"] == "measured_editing_facts_v2"
+    assert measured["schema_version"] == "measured_editing_facts_v3"

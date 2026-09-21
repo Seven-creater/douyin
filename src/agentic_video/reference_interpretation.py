@@ -15,6 +15,9 @@ RELATION_TYPES = {
     "enables", "precedes", "contrasts", "accumulates", "reveals",
     "contextualizes",
 }
+INTERPRETATION_MAX_NEW_TOKENS = 4096
+AUDIT_MAX_NEW_TOKENS = 3072
+STOP_AFTER_JSON_OBJECT = True
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded relation analyst.
 Read only the supplied ShotCards, accepted atomic claims, and accepted events.
@@ -111,12 +114,34 @@ def interpretation_contract_sha() -> str:
     })
 
 
+def runner_identity(runner: Any) -> dict[str, Any]:
+    explicit = getattr(runner, "model_id", None)
+    if explicit:
+        return {"class": type(runner).__name__, "model_id": str(explicit)}
+
+    cfg = getattr(runner, "cfg", None)
+    if not isinstance(cfg, dict):
+        cfg = getattr(runner, "omni_cfg", None)
+    if isinstance(cfg, dict):
+        return {
+            "class": type(runner).__name__,
+            "model_path": str(cfg.get("model_path") or "unknown"),
+            "dtype": str(cfg.get("dtype") or "unknown"),
+            "repetition_penalty": cfg.get("repetition_penalty"),
+        }
+    return {"class": type(runner).__name__, "identity": "unknown"}
+
+
 def analysis_fingerprint(interpreter_runner: Any, audit_runner: Any) -> str:
     return json_hash({
         "contract_sha": interpretation_contract_sha(),
-        "interpreter_model": str(
-            getattr(interpreter_runner, "model_id", "unknown")),
-        "auditor_model": str(getattr(audit_runner, "model_id", "unknown")),
+        "interpreter": runner_identity(interpreter_runner),
+        "auditor": runner_identity(audit_runner),
+        "generation_contract": {
+            "interpretation_max_new_tokens": INTERPRETATION_MAX_NEW_TOKENS,
+            "audit_max_new_tokens": AUDIT_MAX_NEW_TOKENS,
+            "stop_after_json_object": STOP_AFTER_JSON_OBJECT,
+        },
     })
 
 
@@ -302,7 +327,8 @@ def run_reference_interpretation(
         payload, ensure_ascii=False, separators=(",", ":"))
     _write_trace(trace_dir, "interpretation_request.txt", request)
     answer = interpreter_runner.ask(
-        request, max_new_tokens=4096, stop_after_json_object=True)
+        request, max_new_tokens=INTERPRETATION_MAX_NEW_TOKENS,
+        stop_after_json_object=STOP_AFTER_JSON_OBJECT)
     raw = _answer_text(answer)
     _write_trace(trace_dir, "interpretation_response.txt", raw)
     interpretation = _parse_object(raw)
@@ -316,7 +342,8 @@ def run_reference_interpretation(
         audit_payload, ensure_ascii=False, separators=(",", ":"))
     _write_trace(trace_dir, "relation_audit_request.txt", audit_request)
     audit_answer = audit_runner.ask(
-        audit_request, max_new_tokens=3072, stop_after_json_object=True)
+        audit_request, max_new_tokens=AUDIT_MAX_NEW_TOKENS,
+        stop_after_json_object=STOP_AFTER_JSON_OBJECT)
     audit_raw = _answer_text(audit_answer)
     _write_trace(trace_dir, "relation_audit_response.txt", audit_raw)
     audit = _parse_object(audit_raw)

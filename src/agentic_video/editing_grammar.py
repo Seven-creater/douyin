@@ -10,7 +10,7 @@ from typing import Any
 
 from src.agentic_video.manifest import json_hash
 
-MEASURED_EDITING_VERSION = "measured_editing_facts_v2"
+MEASURED_EDITING_VERSION = "measured_editing_facts_v3"
 EDITING_PATTERN_VERSION = "editing_patterns_v1"
 EDITING_FUNCTION_VERSION = "editing_functions_v1"
 EDITING_GRAMMAR_VERSION = "editing_grammar_v2"
@@ -26,10 +26,30 @@ FUNCTION_TYPES = {
     "establish", "withhold", "escalate", "demonstrate", "accumulate",
     "reveal", "reframe", "contrast", "release", "humanize",
 }
-PACE_PATTERN_TYPES = {
-    "long_hold", "rapid_montage", "rhythmic_acceleration",
-    "rhythmic_deceleration",
+PATTERN_REQUIREMENTS = {
+    "long_hold": {"min_shots": 1, "semantic_evidence": False},
+    "rhythmic_acceleration": {"min_shots": 2, "semantic_evidence": False},
+    "rhythmic_deceleration": {"min_shots": 2, "semantic_evidence": False},
+    "transition_chain": {"min_shots": 2, "semantic_evidence": False},
+    "rapid_montage": {"min_shots": 2, "semantic_evidence": True},
+    "reaction_cut": {"min_shots": 2, "semantic_evidence": True},
+    "contrast_cut": {"min_shots": 2, "semantic_evidence": True},
+    "delayed_reveal": {"min_shots": 2, "semantic_evidence": True},
+    "cut_on_action": {"min_shots": 2, "semantic_evidence": True},
+    "match_cut": {"min_shots": 2, "semantic_evidence": True},
+    "shot_reverse_shot": {"min_shots": 2, "semantic_evidence": True},
+    "parallel_editing": {"min_shots": 2, "semantic_evidence": True},
+    "insert_shot": {"min_shots": 2, "semantic_evidence": True},
+    "audio_bridge": {"min_shots": 2, "semantic_evidence": True},
 }
+EDITING_CLAIM_FIELDS = (
+    "claim_id", "subject", "predicate", "object", "interval", "modality",
+    "polarity", "visibility",
+)
+EDITING_EVENT_FIELDS = (
+    "event_id", "participants", "action_claim_ids", "object_ids", "ordering",
+    "outcome_claim_ids", "context_claim_ids", "interval",
+)
 
 EDITING_PATTERN_PROMPT = """You are an editing-pattern recognition analyst.
 The supplied durations, order, transitions, rates, claims, and events are the
@@ -49,15 +69,19 @@ Return exactly one JSON object:
 "evidence_ids":["claim or event ID"],"confidence":0.0}],
 "limitations":["..."]}
 
-Every pattern requires at least two shots and semantic evidence IDs. A local
-pattern must not cover most of the full video. A deterministic pace change is
-context, not a required semantic label. JSON only. Input:
+long_hold may cite one shot. rhythmic_acceleration, rhythmic_deceleration, and
+transition_chain require at least two shots but may use evidence_ids=[]. All
+other pattern types require at least two shots and local semantic evidence IDs.
+fact_ids must correspond exactly to shot_ids. A local pattern must not cover
+most of the full video. A deterministic pace change is context, not a required
+semantic label. JSON only. Input:
 """
 
 EDITING_FUNCTION_PROMPT = """You are an editing-function reasoning analyst.
 The supplied editing patterns have already passed recognition validation. Read
-them with the verified narrative interpretation and assign only the function
-supported in this case. Do not rename, add, or remove patterns.
+each pattern with its local shots, evidence semantics, and the verified
+narrative interpretation, then assign only the function supported in this
+case. Do not rename, add, or remove patterns.
 
 Allowed functions: establish, withhold, escalate, demonstrate, accumulate,
 reveal, reframe, contrast, release, humanize.
@@ -90,7 +114,8 @@ class EditingFact:
     transition_in: dict[str, Any] | None
     transition_out: dict[str, Any] | None
     local_shot_rate: float
-    local_cut_rate: float
+    local_edit_boundary_rate: float
+    local_hard_cut_rate: float
     local_transition_rate: float
     local_raw_segment_rate: float
 
@@ -170,17 +195,20 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
         if not shot_durations:
             raise EditingGrammarError("section_content_shots_missing", section_id)
         shot_count = len(content_segments)
-        cut_count = max(shot_count - 1, 0)
+        edit_boundary_count = max(shot_count - 1, 0)
         transition_count = len(transition_segments)
+        hard_cut_count = max(edit_boundary_count - transition_count, 0)
         row = {
             "section_id": section_id,
             "interval": [start, end],
             "duration_s": round(duration, 6),
             "content_shot_count": shot_count,
-            "cut_count": cut_count,
+            "edit_boundary_count": edit_boundary_count,
+            "hard_cut_count": hard_cut_count,
             "transition_count": transition_count,
             "shot_rate": _rate(shot_count, duration),
-            "cut_rate": _rate(cut_count, duration),
+            "edit_boundary_rate": _rate(edit_boundary_count, duration),
+            "hard_cut_rate": _rate(hard_cut_count, duration),
             "transition_rate": _rate(transition_count, duration),
             "mean_shot_duration_s": round(mean(shot_durations), 6),
             "median_shot_duration_s": round(median(shot_durations), 6),
@@ -212,7 +240,8 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
             transition_in=card.get("transition_in"),
             transition_out=card.get("transition_out"),
             local_shot_rate=float(section["shot_rate"]),
-            local_cut_rate=float(section["cut_rate"]),
+            local_edit_boundary_rate=float(section["edit_boundary_rate"]),
+            local_hard_cut_rate=float(section["hard_cut_rate"]),
             local_transition_rate=float(section["transition_rate"]),
             local_raw_segment_rate=float(section["raw_segment_rate"]),
         ).to_dict())
@@ -234,7 +263,7 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
 
 def build_editing_payload(agent_reference: dict[str, Any],
                           measured: dict[str, Any]) -> dict[str, Any]:
-    """Dereference ShotCard IDs into the semantics used for recognition."""
+    """Publish compact, deduplicated semantics for pattern recognition."""
     claims = {
         str(row.get("claim_id")): row for row in agent_reference.get("claims") or []
     }
@@ -242,39 +271,110 @@ def build_editing_payload(agent_reference: dict[str, Any],
         str(row.get("event_id")): row for row in agent_reference.get("events") or []
     }
 
-    def resolve(ids: list[str], index: dict[str, dict[str, Any]],
-                reason_code: str) -> list[dict[str, Any]]:
+    def require(ids: list[str], index: dict[str, dict[str, Any]],
+                reason_code: str) -> list[str]:
         missing = [str(value) for value in ids if str(value) not in index]
         if missing:
             raise EditingGrammarError(reason_code, ",".join(missing))
-        return [index[str(value)] for value in ids]
+        return [str(value) for value in ids]
+
+    def project(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+        return {key: row.get(key) for key in fields if key in row}
 
     shot_rows = []
+    used_claim_ids: set[str] = set()
+    used_event_ids: set[str] = set()
     for card in (agent_reference.get("shot_storyboard") or {}).get(
             "shot_cards") or []:
+        visual_ids = require(
+            list(card.get("visual_claim_ids") or []), claims,
+            "editing_visual_claim_missing")
+        text_ids = require(
+            list(card.get("text_claim_ids") or []), claims,
+            "editing_text_claim_missing")
+        audio_ids = require(
+            list(card.get("audio_claim_ids") or []), claims,
+            "editing_audio_claim_missing")
+        event_ids = require(
+            list(card.get("event_ids") or []), events,
+            "editing_event_missing")
+        used_claim_ids.update(visual_ids + text_ids + audio_ids)
+        used_event_ids.update(event_ids)
         shot_rows.append({
             "shot_id": card.get("shot_id"),
             "section_id": card.get("section_id"),
             "interval": [card.get("start_s"), card.get("end_s")],
             "transition_in": card.get("transition_in"),
             "transition_out": card.get("transition_out"),
-            "visual_claims": resolve(
-                list(card.get("visual_claim_ids") or []), claims,
-                "editing_visual_claim_missing"),
-            "text_claims": resolve(
-                list(card.get("text_claim_ids") or []), claims,
-                "editing_text_claim_missing"),
-            "audio_claims": resolve(
-                list(card.get("audio_claim_ids") or []), claims,
-                "editing_audio_claim_missing"),
-            "identity_claims": resolve(
-                list(card.get("identity_claim_ids") or []), claims,
-                "editing_identity_claim_missing"),
-            "events": resolve(
-                list(card.get("event_ids") or []), events,
-                "editing_event_missing"),
+            "visual_claim_ids": visual_ids,
+            "text_claim_ids": text_ids,
+            "audio_claim_ids": audio_ids,
+            "event_ids": event_ids,
+            "canonical_subject_ids": list(card.get("entity_ids") or []),
         })
-    return {"measured_editing": measured, "shots": shot_rows}
+    measured_payload = {
+        key: value for key, value in measured.items()
+        if key not in {"source_sha", "agent_reference_sha", "artifact_sha"}
+    }
+    return {
+        "measured_editing": measured_payload,
+        "claim_index": {
+            claim_id: project(claims[claim_id], EDITING_CLAIM_FIELDS)
+            for claim_id in sorted(used_claim_ids)
+        },
+        "event_index": {
+            event_id: project(events[event_id], EDITING_EVENT_FIELDS)
+            for event_id in sorted(used_event_ids)
+        },
+        "shots": shot_rows,
+    }
+
+
+def _shot_evidence_ids(payload: dict[str, Any]) -> dict[str, set[str]]:
+    fields = ("visual_claim_ids", "text_claim_ids", "audio_claim_ids", "event_ids")
+    return {
+        str(row.get("shot_id")): {
+            str(value) for field in fields for value in row.get(field) or []
+        }
+        for row in payload.get("shots") or []
+    }
+
+
+def build_editing_function_payload(
+        patterns: dict[str, Any], interpretation: dict[str, Any],
+        editing_payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach only each recognized pattern's local compact semantics."""
+    shots = {
+        str(row.get("shot_id")): row for row in editing_payload.get("shots") or []
+    }
+    claim_index = editing_payload.get("claim_index") or {}
+    event_index = editing_payload.get("event_index") or {}
+    contexts = []
+    for pattern in patterns.get("patterns") or []:
+        shot_ids = list(map(str, pattern.get("shot_ids") or []))
+        selected = [shots[shot_id] for shot_id in shot_ids]
+        claim_ids = {
+            str(value) for row in selected
+            for field in ("visual_claim_ids", "text_claim_ids", "audio_claim_ids")
+            for value in row.get(field) or []
+        }
+        event_ids = {
+            str(value) for row in selected for value in row.get("event_ids") or []
+        }
+        contexts.append({
+            "pattern": pattern,
+            "shots": selected,
+            "claim_index": {
+                claim_id: claim_index[claim_id] for claim_id in sorted(claim_ids)
+            },
+            "event_index": {
+                event_id: event_index[event_id] for event_id in sorted(event_ids)
+            },
+        })
+    return {
+        "patterns": contexts,
+        "verified_interpretation": interpretation,
+    }
 
 
 def _confidence(value: Any, reason_code: str, detail: str) -> None:
@@ -284,7 +384,7 @@ def _confidence(value: Any, reason_code: str, detail: str) -> None:
 
 def validate_editing_patterns(
         value: dict[str, Any], measured: dict[str, Any], *,
-        evidence_ids: set[str]) -> dict[str, Any]:
+        shot_evidence_ids: dict[str, set[str]]) -> dict[str, Any]:
     if value.get("schema_version") != EDITING_PATTERN_VERSION:
         raise EditingGrammarError("editing_pattern_schema_invalid")
     patterns = value.get("patterns")
@@ -292,6 +392,10 @@ def validate_editing_patterns(
         raise EditingGrammarError("editing_pattern_shape_invalid")
     facts = {str(row.get("fact_id")): row for row in measured.get("facts") or []}
     shots = {str(row.get("shot_id")): row for row in measured.get("facts") or []}
+    facts_by_shot = {
+        str(row.get("shot_id")): str(row.get("fact_id"))
+        for row in measured.get("facts") or []
+    }
     total = float(measured.get("duration_s") or 0.0)
     if total <= 0:
         raise EditingGrammarError("editing_duration_invalid")
@@ -309,19 +413,31 @@ def validate_editing_patterns(
         if pattern_type not in PATTERN_TYPES:
             raise EditingGrammarError("pattern_type_invalid", pattern_id)
         pattern_types[pattern_id] = pattern_type
+        requirements = PATTERN_REQUIREMENTS[pattern_type]
         if pattern.get("scope") not in {"local", "global"}:
             raise EditingGrammarError("pattern_scope_invalid", pattern_id)
         shot_ids = list(map(str, pattern.get("shot_ids") or []))
-        if len(shot_ids) < 2 or len(set(shot_ids)) != len(shot_ids):
-            raise EditingGrammarError("pattern_requires_multiple_shots", pattern_id)
+        if (len(shot_ids) < int(requirements["min_shots"]) or
+                len(set(shot_ids)) != len(shot_ids)):
+            raise EditingGrammarError("pattern_shot_cardinality_invalid", pattern_id)
         if not set(shot_ids).issubset(shots):
             raise EditingGrammarError("pattern_shot_invalid", pattern_id)
         fact_ids = list(map(str, pattern.get("fact_ids") or []))
         if not fact_ids or not set(fact_ids).issubset(facts):
             raise EditingGrammarError("pattern_fact_invalid", pattern_id)
+        expected_fact_ids = {facts_by_shot[shot_id] for shot_id in shot_ids}
+        if (len(set(fact_ids)) != len(fact_ids) or
+                set(fact_ids) != expected_fact_ids):
+            raise EditingGrammarError("pattern_fact_scope_invalid", pattern_id)
+        if not set(shot_ids).issubset(shot_evidence_ids):
+            raise EditingGrammarError("pattern_evidence_scope_invalid", pattern_id)
+        local_evidence = set().union(
+            *(shot_evidence_ids[shot_id] for shot_id in shot_ids))
         cited = list(map(str, pattern.get("evidence_ids") or []))
-        if not cited or not set(cited).issubset(evidence_ids):
-            raise EditingGrammarError("pattern_evidence_invalid", pattern_id)
+        if requirements["semantic_evidence"] and not cited:
+            raise EditingGrammarError("pattern_evidence_required", pattern_id)
+        if not set(cited).issubset(local_evidence):
+            raise EditingGrammarError("pattern_evidence_scope_invalid", pattern_id)
         _confidence(pattern.get("confidence"), "pattern_confidence_invalid", pattern_id)
         start = min(float(shots[shot_id]["interval"][0]) for shot_id in shot_ids)
         end = max(float(shots[shot_id]["interval"][1]) for shot_id in shot_ids)
@@ -425,18 +541,12 @@ def analyze_editing_grammar(
         pattern_request, max_new_tokens=4096, stop_after_json_object=True)
     pattern_raw = str(getattr(pattern_answer, "text", pattern_answer))
     _write_trace(trace_dir, "editing_pattern_response.txt", pattern_raw)
-    evidence_ids = {
-        str(row.get("claim_id")) for row in agent_reference.get("claims") or []
-    } | {
-        str(row.get("event_id")) for row in agent_reference.get("events") or []
-    }
     patterns = validate_editing_patterns(
-        _parse_object(pattern_raw), measured, evidence_ids=evidence_ids)
+        _parse_object(pattern_raw), measured,
+        shot_evidence_ids=_shot_evidence_ids(pattern_payload))
 
-    function_payload = {
-        "validated_patterns": patterns,
-        "verified_interpretation": interpretation,
-    }
+    function_payload = build_editing_function_payload(
+        patterns, interpretation, pattern_payload)
     function_request = EDITING_FUNCTION_PROMPT + json.dumps(
         function_payload, ensure_ascii=False, separators=(",", ":"))
     _write_trace(trace_dir, "editing_function_request.txt", function_request)
