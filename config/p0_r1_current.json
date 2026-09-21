@@ -16,6 +16,8 @@
     "required_relation_types": ["contradicts", "qualifies"],
     "contradiction_target_modalities": ["T"],
     "qualification_source_modalities": ["T"],
+    "text_semantics_required_roles": ["assertion", "qualification"],
+    "text_semantics_required_scopes": ["general"],
     "max_propositions": 8
   }
 }

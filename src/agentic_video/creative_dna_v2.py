@@ -27,7 +27,9 @@ Return exactly one JSON object:
 "scope":"specific|domain_bounded|general"}],"limitations":["..."]}
 
 Every supplied claim ID must be covered at least once. Do not merge unrelated
-claims and do not import information absent from the text. JSON only. Input:
+claims and do not import information absent from the text. An optional
+analysis_contract may require semantic roles or scopes; satisfy it only when
+the supplied wording supports them. JSON only. Input:
 """
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded interpretation analyst.
@@ -187,6 +189,16 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                 "interpretation_not_aggregated": (
                     "Aggregate claims into the smallest cross-segment "
                     "propositions allowed by the declared limit."),
+                "text_semantics_literal_transcription": (
+                    "Paraphrase the meaning as a proposition. Do not say that "
+                    "text, a caption, or an overlay contains, reads, shows, or "
+                    "states a phrase."),
+                "text_semantics_required_role_missing": (
+                    "Classify semantic function rather than treating every item "
+                    "as the same kind of assertion."),
+                "text_semantics_required_scope_missing": (
+                    "Classify proposition scope from its wording rather than "
+                    "defaulting every item to specific."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Return a complete fresh JSON "
@@ -241,7 +253,9 @@ def _source_modalities(validated_reference: dict[str, Any]) -> dict[str, list[st
 
 
 def validate_text_semantics(value: dict[str, Any],
-                            validated_reference: dict[str, Any]) -> None:
+                            validated_reference: dict[str, Any],
+                            analysis_contract: dict[str, Any] | None = None) -> None:
+    contract = analysis_contract or {}
     valid_ids = {str(row.get("claim_id"))
                  for row in validated_reference.get("accepted_claims") or []
                  if row.get("modality") == "T"}
@@ -252,6 +266,8 @@ def validate_text_semantics(value: dict[str, Any],
     if len(semantic_ids) != len(items):
         raise DNAV2Error("text_semantics_id_invalid")
     covered: set[str] = set()
+    roles: set[str] = set()
+    scopes: set[str] = set()
     for row in items:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid_ids):
@@ -260,12 +276,25 @@ def validate_text_semantics(value: dict[str, Any],
         if row.get("semantic_role") not in {
                 "assertion", "instruction", "label", "qualification"}:
             raise DNAV2Error("text_semantics_role_invalid")
+        roles.add(str(row.get("semantic_role")))
         if row.get("scope") not in {"specific", "domain_bounded", "general"}:
             raise DNAV2Error("text_semantics_scope_invalid")
-        if not str(row.get("proposition") or "").strip():
+        scopes.add(str(row.get("scope")))
+        proposition = str(row.get("proposition") or "").strip()
+        if not proposition:
             raise DNAV2Error("text_semantics_proposition_missing")
+        if re.search(
+                r"\b(?:text|caption|overlay).{0,40}\b(?:contains?|reads?|shows?|states?)\b",
+                proposition.casefold()):
+            raise DNAV2Error("text_semantics_literal_transcription")
     if covered != valid_ids:
         raise DNAV2Error("text_semantics_coverage_incomplete")
+    if not set(map(str, contract.get(
+            "text_semantics_required_roles") or [])).issubset(roles):
+        raise DNAV2Error("text_semantics_required_role_missing")
+    if not set(map(str, contract.get(
+            "text_semantics_required_scopes") or [])).issubset(scopes):
+        raise DNAV2Error("text_semantics_required_scope_missing")
 
 
 def validate_interpretation(value: dict[str, Any],
@@ -279,11 +308,18 @@ def validate_interpretation(value: dict[str, Any],
     contract_modalities = (
         list(contract.get("contradiction_target_modalities") or []) +
         list(contract.get("qualification_source_modalities") or []))
+    text_roles = set(map(str, contract.get(
+        "text_semantics_required_roles") or []))
+    text_scopes = set(map(str, contract.get(
+        "text_semantics_required_scopes") or []))
     if not set(map(str, contract.get("required_roles") or [])).issubset(
             allowed_roles) or not set(map(str, contract.get(
                 "required_relation_types") or [])).issubset(
                     allowed_relation_types) or not set(map(str,
-                        contract_modalities)).issubset({"V", "A", "T", "FUSION"}):
+                        contract_modalities)).issubset({"V", "A", "T", "FUSION"}) or \
+            not text_roles.issubset({"assertion", "instruction", "label",
+                                     "qualification"}) or \
+            not text_scopes.issubset({"specific", "domain_bounded", "general"}):
         raise DNAV2Error("interpretation_contract_invalid")
     valid = _source_ids(validated_reference)
     propositions = value.get("propositions")
@@ -508,19 +544,21 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             text_semantics = None
         else:
             try:
-                validate_text_semantics(text_semantics, validated_reference)
+                validate_text_semantics(text_semantics, validated_reference,
+                                        analysis_contract)
             except DNAV2Error:
                 text_semantics = None
     if text_semantics is None:
         proposed_text = _ask_validated_object(
             runner=runner,
             prompt=TEXT_SEMANTICS_PROMPT + json.dumps(
-                {"accepted_text_claims": text_claims}, ensure_ascii=False,
+                {"accepted_text_claims": text_claims,
+                 "analysis_contract": analysis_contract or {}}, ensure_ascii=False,
                 separators=(",", ":")),
             max_new_tokens=2048,
             validator=lambda value: validate_text_semantics(
-                value, validated_reference), trace_dir=trace_dir,
-            trace_name="text_semantics", attempts=2)
+                value, validated_reference, analysis_contract), trace_dir=trace_dir,
+            trace_name="text_semantics", attempts=3)
         text_semantics = {
             "schema_version": TEXT_SEMANTICS_VERSION,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
