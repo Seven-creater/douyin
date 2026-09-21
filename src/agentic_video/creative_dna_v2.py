@@ -1311,6 +1311,36 @@ _EDITING_OPERATIONS = {"establish", "demonstrate", "accumulate", "qualify",
                        "contrast", "bridge"}
 
 
+def normalize_dna_relation_schema(value: dict[str, Any]) -> None:
+    """Map meaning-preserving relation aliases into the published schema."""
+    aliases = {
+        "supports": ("logical", "supports_proposition"),
+        "contradicts": ("logical", "contradicts_proposition"),
+        "reframes": ("logical", "reframes_context"),
+        "qualifies": ("logical", "qualifies_scope"),
+        "qualifies_scope": ("logical", "qualifies_scope"),
+        "orders": ("temporal", "orders_disclosure"),
+        "precedes": ("temporal", "precedes"),
+    }
+    changes = []
+    for relation in value.get("relations") or []:
+        relation_type = str(relation.get("type") or "")
+        if relation_type not in aliases:
+            continue
+        normalized_type, mechanism = aliases[relation_type]
+        changes.append({
+            "relation_id": relation.get("relation_id"),
+            "from_type": relation_type,
+            "from_mechanism": relation.get("mechanism"),
+            "to_type": normalized_type,
+            "to_mechanism": mechanism,
+        })
+        relation["type"] = normalized_type
+        relation["mechanism"] = mechanism
+    value["relation_schema_normalization"] = {
+        "rule": "meaning_preserving_relation_alias_v1", "changes": changes}
+
+
 def validate_dna_audit(value: dict[str, Any]) -> None:
     variables = value.get("variables") or []
     relations = value.get("relations") or []
@@ -1500,6 +1530,9 @@ def _validate_dna_supports(audit: dict[str, Any], *,
     if "qualifies" in interpretation_types and \
             "qualifies_scope" not in mechanisms:
         raise DNAV2Error("dna_qualification_mechanism_missing")
+    if "reframes" in interpretation_types and \
+            "reframes_context" not in mechanisms:
+        raise DNAV2Error("dna_reframe_mechanism_missing")
 
 
 def run_director(validated_reference: dict[str, Any], interpretation: dict[str, Any],
@@ -1538,6 +1571,12 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
                     "Remove entity-resolution, identity-alignment, modality-count, "
                     "and artifact-ID rules from the publishable structure. They "
                     "belong only in audit bindings or anti-invariants."),
+                "dna_relation_type_invalid": (
+                    "relation.type must be logical, causal, or temporal; put "
+                    "reframes_context and qualifies_scope in mechanism."),
+                "dna_reframe_mechanism_missing": (
+                    "Preserve an interpretation reframes relation with the "
+                    "reframes_context mechanism."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Re-run structure abduction and "
@@ -1551,6 +1590,7 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
                 raw, encoding="utf-8")
         try:
             candidate = _parse_object(raw)
+            normalize_dna_relation_schema(candidate)
             validate_dna_audit(candidate)
             _validate_dna_supports(
                 candidate, validated_reference=validated_reference,

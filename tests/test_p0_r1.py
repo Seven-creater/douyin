@@ -10,7 +10,8 @@ from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
     DNAV2Error, _interpretation_plan_catalog, _text_semantics_contract_sha,
     build_writer_payload, compile_interpretation_plan,
-    normalize_interpretation_roles, normalize_interpretation_text, publish_dna,
+    normalize_dna_relation_schema, normalize_interpretation_roles,
+    normalize_interpretation_text, publish_dna,
     validate_interpretation, validate_editing_analysis,
     validate_interpretation_audit, validate_interpretation_plan,
     validate_text_semantics)
@@ -274,6 +275,15 @@ def test_dna_publish_is_whitelisted_and_rejects_reference_binding() -> None:
         publish_dna(_dna_audit("requires textual evidence"),
                     validated_reference={})
     assert excinfo.value.reason_code == "dna_publish_audit_scaffolding_leak"
+
+
+def test_dna_relation_aliases_are_normalized_without_changing_meaning() -> None:
+    audit = _dna_audit()
+    audit["relations"][0].update(
+        {"type": "reframes", "mechanism": "qualifies_scope"})
+    normalize_dna_relation_schema(audit)
+    assert audit["relations"][0]["type"] == "logical"
+    assert audit["relations"][0]["mechanism"] == "reframes_context"
 
 
 def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:
