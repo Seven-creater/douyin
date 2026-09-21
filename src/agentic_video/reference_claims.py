@@ -259,9 +259,13 @@ def build_validated_reference(
                        (event.get("outcome_claim_ids") or [])))
         if refs.issubset(accepted_ids):
             accepted_events.append(event)
+    problem_by_id = {str(row.get("claim_id")): row.get("problems") or []
+                     for row in failures}
     limitations = [{"claim_id": row.get("claim_id"),
                     "status": row.get("epistemic_status"),
-                    "reason": row.get("limitation") or "not accepted"}
+                    "reason": row.get("limitation") or "not accepted",
+                    "record_issues": problem_by_id.get(
+                        str(row.get("claim_id")), [])}
                    for row in ledger.claims if row not in accepted and
                    row.get("record_status") == "ACTIVE"]
     value = {
@@ -272,7 +276,6 @@ def build_validated_reference(
         "deterministic_timeline": deterministic_timeline,
         "coverage": coverage,
         "unresolved_limitations": limitations,
-        "validation_failures": failures,
     }
     forbidden = {"interpretation", "creative_dna", "rhetorical_function", "theme"}
     if forbidden.intersection(value):

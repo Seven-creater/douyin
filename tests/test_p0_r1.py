@@ -207,6 +207,7 @@ def test_validated_reference_contains_evidence_not_interpretation() -> None:
         critical_claim_ids=["C1"])
     assert value["accepted_claims"][0]["claim_id"] == "C1"
     assert "interpretation" not in value and "creative_dna" not in value
+    assert "validation_failures" not in value
 
 
 def _dna_audit(description: str = "abstract observer") -> dict:
