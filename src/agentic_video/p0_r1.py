@@ -33,14 +33,11 @@ claim. Use actual clip-local times, not the example numbers. Return at most 20
 non-duplicate claims and 10 events; omit low-information UNKNOWN claims rather
 than padding the list. Keep the JSON compact and complete. JSON only."""
 
-LOCAL_VISUAL_PROMPT = """You are a local visual evidence recorder. Inspect only
-pixels in this silent, text-masked interval. Use anonymous entity IDs. Record
-visible body regions, action initiators, contact/no-contact only when continuous
-coverage permits it, scene changes, observable action order, and results. Do not
-infer text, audio, identity, motives, social meaning, or narrative function.
-Return exactly the same JSON schema as the full visual evidence recorder. JSON
-only. Use actual clip-local times. Return at most 20 non-duplicate claims and 10
-events; omit low-information UNKNOWN claims. Keep the JSON compact and complete."""
+LOCAL_VISUAL_PROMPT = FULL_VISUAL_PROMPT + """
+This is a local evidence probe. Prioritize visible body regions, action
+initiators, contact/no-contact only when continuous coverage permits it, scene
+changes, observable action order and visible results. The complete schema above,
+including entities, claims, events and coverage, is mandatory."""
 
 
 class P0R1Blocked(RuntimeError):
@@ -115,6 +112,40 @@ def _absolute_response_times(value: dict[str, Any], *, start_s: float,
         convert(row)
     value["coverage"] = coverage
     return value
+
+
+def _validated_visual_response(raw: str, *, start_s: float, duration_s: float,
+                               stage: str) -> dict[str, Any]:
+    value = _parse(raw, stage)
+    for key in ("claims", "events", "coverage"):
+        if key not in value:
+            raise P0R1Blocked(stage, "field_missing", key)
+    return _absolute_response_times(
+        value, start_s=start_s, duration_s=duration_s, stage=stage)
+
+
+def _cached_call(output: Path, call_id: str, *, prompt_sha: str,
+                 start_s: float, duration_s: float
+                 ) -> tuple[dict[str, Any], Path, dict[str, Any]] | None:
+    raw_dir = output / "raw"
+    candidates = sorted(raw_dir.glob(f"{call_id}*.txt"),
+                        key=lambda path: path.stat().st_mtime, reverse=True)
+    for raw_path in candidates:
+        audit_path = output / "request_audits" / f"{raw_path.stem}.json"
+        if not audit_path.is_file():
+            continue
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        if audit.get("prompt_sha") != prompt_sha:
+            continue
+        raw = raw_path.read_text(encoding="utf-8")
+        try:
+            parsed = _validated_visual_response(
+                raw, start_s=start_s, duration_s=duration_s,
+                stage=f"visual_{call_id}")
+        except P0R1Blocked:
+            continue
+        return parsed, raw_path, audit
+    return None
 
 
 def deterministic_timeline(p04e_dir: Path) -> dict[str, Any]:
@@ -209,6 +240,20 @@ def run_visual_perception(source: Path, p04e_dir: Path, output_dir: Path, *,
         audit = audit_request(
             channel="V", prompt=call_prompt, payload=payload,
             media_paths=[visual_path], forbidden_markers=forbidden_markers)
+        cached = _cached_call(
+            output, call_id, prompt_sha=str(audit["prompt_sha"]),
+            start_s=float(interval[0]), duration_s=duration)
+        if cached is not None:
+            parsed, raw_path, prior_audit = cached
+            results[call_id] = {
+                "response": parsed, "raw_path": str(raw_path),
+                "raw_sha": sha256_file(raw_path), "request_audit": prior_audit,
+                "reused_validated_response": True}
+            audits.append(prior_audit)
+            continue
+        prior_attempts = list((output / "raw").glob(f"{call_id}*.txt"))
+        if len(prior_attempts) >= 2:
+            raise P0R1Blocked(f"visual_{call_id}", "probe_budget_exhausted")
         audit_path = _next_attempt_path(
             output / "request_audits", call_id, ".json")
         write_request_audit(audit_path, audit)
@@ -222,16 +267,13 @@ def run_visual_perception(source: Path, p04e_dir: Path, output_dir: Path, *,
         raw = str(getattr(answer, "text", answer))
         raw_path = _next_attempt_path(output / "raw", call_id, ".txt")
         raw_path.write_text(raw, encoding="utf-8")
-        parsed = _parse(raw, f"visual_{call_id}")
-        for key in ("claims", "events", "coverage"):
-            if key not in parsed:
-                raise P0R1Blocked(f"visual_{call_id}", "field_missing", key)
-        parsed = _absolute_response_times(
-            parsed, start_s=float(interval[0]), duration_s=duration,
+        parsed = _validated_visual_response(
+            raw, start_s=float(interval[0]), duration_s=duration,
             stage=f"visual_{call_id}")
         results[call_id] = {
             "response": parsed, "raw_path": str(raw_path),
-            "raw_sha": sha256_file(raw_path), "request_audit": audit}
+            "raw_sha": sha256_file(raw_path), "request_audit": audit,
+            "reused_validated_response": False}
         audits.append(audit)
     evidence = json.loads((Path(p04e_dir) / "reference_evidence.json").read_text(
         encoding="utf-8"))
