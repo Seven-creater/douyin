@@ -9,7 +9,7 @@ import pytest
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
     DNAV2Error, build_writer_payload, publish_dna)
-from src.agentic_video.migration_eval import judge_case
+from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
 from src.agentic_video.recipe_v2 import sha256_file
@@ -198,7 +198,8 @@ def test_validated_reference_contains_evidence_not_interpretation() -> None:
     events = build_event_draft([{
         "event_id": "EV1", "participants": ["E1"],
         "action_claim_ids": ["C1"], "object_ids": [], "ordering": "observed",
-        "outcome_claim_ids": [], "interval": [0.0, 1.0]}], ledger)
+        "outcome_claim_ids": [], "context_claim_ids": ["C1"],
+        "interval": [0.0, 1.0]}], ledger)
     value = build_validated_reference(
         ledger, events,
         deterministic_timeline={"segments": [{"segment_id": "S1",
@@ -206,6 +207,7 @@ def test_validated_reference_contains_evidence_not_interpretation() -> None:
         coverage={"full": {"observed_intervals": [[0, 1]]}},
         critical_claim_ids=["C1"])
     assert value["accepted_claims"][0]["claim_id"] == "C1"
+    assert value["accepted_events"][0]["context_claim_ids"] == ["C1"]
     assert "interpretation" not in value and "creative_dna" not in value
     assert "validation_failures" not in value
 
@@ -215,19 +217,28 @@ def _dna_audit(description: str = "abstract observer") -> dict:
         "variables": [
             {"variable_id": "V1", "kind": "observer", "description": description},
             {"variable_id": "V2", "kind": "proposition",
-             "description": "bounded proposition"}],
+             "description": "bounded proposition"},
+            {"variable_id": "V3", "kind": "evidence",
+             "description": "relevant counterevidence"}],
         "relations": [{"relation_id": "R1", "type": "logical",
-                       "source": "V1", "target": "V2", "condition": "evidence"}],
-        "constraints": [{"constraint_id": "C1", "rule": "scope stays bounded",
+                       "mechanism": "holds_belief", "source": "V1",
+                       "target": "V2", "condition": "evidence"}],
+        "constraints": [{"constraint_id": "C1", "rule_type": "scope_bound",
+                         "rule": "scope stays bounded",
                          "required": True}],
         "free_slots": [{"slot_id": "S1", "kind": "domain",
                         "constraint_ids": ["C1"]}],
         "editing_relations": [{"relation_id": "E1",
-                               "editing_operation": "ordered reveal",
+                               "editing_operation": "establish",
                                "information_effect": "revision",
                                "conditions": ["evidence visible"]}],
         "supported_by": {"R1": ["C1"]},
         "concrete_bindings": [], "anti_invariants": [], "confidence": 0.9,
+        "validation_record": {
+            "structure_only": True,
+            "source_bindings_confined_to_audit": True,
+            "provenance_rules_not_creative": True,
+        },
     }
 
 
@@ -244,6 +255,27 @@ def test_dna_publish_is_whitelisted_and_rejects_reference_binding() -> None:
         publish_dna(_dna_audit("very specific source action"),
                     validated_reference=reference)
     assert excinfo.value.reason_code == "dna_publish_reference_binding_leak"
+    with pytest.raises(DNAV2Error) as excinfo:
+        publish_dna(
+            _dna_audit("reaching observer"),
+            validated_reference={"accepted_claims": [
+                {"claim_id": "C2", "object": "reach toward an entity"}]})
+    assert excinfo.value.reason_code == "dna_publish_surface_binding_leak"
+
+
+def test_blocked_candidate_freeze_is_not_labeled_release_candidate(
+        tmp_path: Path) -> None:
+    files = []
+    for name in ("template.py", "judge.py", "rules.py", "dev.json", "reg.json"):
+        path = tmp_path / name
+        path.write_text(name, encoding="utf-8")
+        files.append(path)
+    freeze = freeze_candidate(
+        dna_publish={"artifact_sha": "abc"}, model_config={},
+        template_paths=[files[0]], judge_path=files[1], rules_path=files[2],
+        dev_suite=files[3], regression_suite=files[4],
+        release_status="blocked")
+    assert freeze["release_status"] == "blocked"
 
 
 def test_migration_judge_never_receives_label_or_reference() -> None:

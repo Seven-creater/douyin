@@ -205,8 +205,9 @@ def validate_event(event: dict[str, Any], claim_ids: set[str]) -> list[str]:
             problems.append(f"event_{key}_missing")
     if _interval(event.get("interval")) is None:
         problems.append("event_interval_invalid")
-    for ref in list(event.get("action_claim_ids") or []) + \
-            list(event.get("outcome_claim_ids") or []):
+    for ref in (list(event.get("action_claim_ids") or []) +
+                list(event.get("outcome_claim_ids") or []) +
+                list(event.get("context_claim_ids") or [])):
         if str(ref) not in claim_ids:
             problems.append("event_claim_ref_missing")
     return problems
@@ -256,7 +257,8 @@ def build_validated_reference(
     accepted_events = []
     for event in event_draft.get("events") or []:
         refs = set(map(str, (event.get("action_claim_ids") or []) +
-                       (event.get("outcome_claim_ids") or [])))
+                       (event.get("outcome_claim_ids") or []) +
+                       (event.get("context_claim_ids") or [])))
         if refs.issubset(accepted_ids):
             accepted_events.append(event)
     problem_by_id = {str(row.get("claim_id")): row.get("problems") or []

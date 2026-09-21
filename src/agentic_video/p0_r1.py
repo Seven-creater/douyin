@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -458,6 +459,17 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
     perception = json.loads(Path(perception_path).read_text(encoding="utf-8"))
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    prior_files = [path for path in output.glob("*.json") if path.is_file()]
+    if prior_files:
+        attempts = output / "attempts"
+        attempts.mkdir(parents=True, exist_ok=True)
+        index = 1
+        while (attempts / f"attempt_{index:03d}").exists():
+            index += 1
+        archive = attempts / f"attempt_{index:03d}"
+        archive.mkdir()
+        for path in prior_files:
+            shutil.copy2(path, archive / path.name)
     # First formal commit: evidence-only validated_reference. No interpretation
     # or director request is allowed before this immutable parent exists.
     workspace = Workspace(output / "workspace")
@@ -504,7 +516,7 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
         judge_path=Path(__file__).with_name("migration_eval.py"),
         rules_path=Path(__file__).with_name("creative_dna_v2.py"),
         dev_suite=dev_path, regression_suite=regression_path,
-        holdout_suite=holdout_path)
+        holdout_suite=holdout_path, release_status=decision["status"])
     (output / "release_freeze.json").write_text(
         json.dumps(freeze, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -524,7 +536,8 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
             for name in ("validated_reference", "reference_interpretation",
                          "editing_analysis")],
     })
-    workspace.mark_tested("creative_dna_v2_candidate")
+    if decision["status"] != "blocked":
+        workspace.mark_tested("creative_dna_v2_candidate")
     lineage = build_lineage_report(workspace)
     (output / "lineage_report.json").write_text(
         json.dumps(lineage, ensure_ascii=False, indent=2), encoding="utf-8")

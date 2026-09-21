@@ -117,14 +117,19 @@ def run_suite(dna_publish: dict[str, Any], suite_path: Path, *, runner: Any,
 def freeze_candidate(*, dna_publish: dict[str, Any], model_config: dict[str, Any],
                      template_paths: list[Path], judge_path: Path,
                      rules_path: Path, dev_suite: Path, regression_suite: Path,
-                     holdout_suite: Path | None = None) -> dict[str, Any]:
+                     holdout_suite: Path | None = None,
+                     release_status: str | None = None) -> dict[str, Any]:
     def file_row(path: Path) -> dict[str, str]:
         path = Path(path)
         return {"path": str(path), "sha": sha256_file(path)}
 
+    inferred_status = "release_candidate" if holdout_suite is None else "frozen"
+    status = release_status or inferred_status
+    if status not in {"blocked", "release_candidate", "frozen", "release"}:
+        raise MigrationEvalError("freeze_release_status_invalid", status)
     freeze = {
         "schema_version": FREEZE_VERSION,
-        "release_status": "release_candidate" if holdout_suite is None else "frozen",
+        "release_status": status,
         "dna_sha": dna_publish.get("artifact_sha"),
         "model_config_sha": json_hash(model_config),
         "templates": [file_row(path) for path in template_paths],
@@ -159,4 +164,3 @@ def release_decision(*, dev_report: dict[str, Any],
             "second_commit_allowed": bool(base_pass and holdout_pass),
             "reason": "all_gates_passed" if base_pass and holdout_pass else
                       "release_gate_failed"}
-
