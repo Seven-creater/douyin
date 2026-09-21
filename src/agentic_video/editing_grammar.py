@@ -5,21 +5,20 @@ import copy
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from statistics import mean, median
+from statistics import mean, median, quantiles
 from typing import Any
 
 from src.agentic_video.manifest import json_hash
 
-MEASURED_EDITING_VERSION = "measured_editing_facts_v3"
-EDITING_PATTERN_VERSION = "editing_patterns_v1"
-EDITING_FUNCTION_VERSION = "editing_functions_v1"
-EDITING_GRAMMAR_VERSION = "editing_grammar_v2"
+MEASURED_EDITING_VERSION = "measured_editing_facts_v4"
+STRUCTURAL_EDITING_VERSION = "measured_structural_editing_grammar_v1"
+EDITING_PATTERN_VERSION = "semantic_editing_patterns_v1"
+EDITING_FUNCTION_VERSION = "editing_functions_v2"
+EDITING_GRAMMAR_VERSION = "editing_grammar_v3"
 
 PATTERN_TYPES = {
-    "long_hold", "rapid_montage", "rhythmic_acceleration",
-    "rhythmic_deceleration", "reaction_cut", "contrast_cut",
-    "delayed_reveal", "cut_on_action", "match_cut",
-    "shot_reverse_shot", "transition_chain", "parallel_editing",
+    "rapid_montage", "reaction_cut", "contrast_cut", "delayed_reveal",
+    "cut_on_action", "match_cut", "shot_reverse_shot", "parallel_editing",
     "insert_shot", "audio_bridge",
 }
 FUNCTION_TYPES = {
@@ -27,20 +26,8 @@ FUNCTION_TYPES = {
     "reveal", "reframe", "contrast", "release", "humanize",
 }
 PATTERN_REQUIREMENTS = {
-    "long_hold": {"min_shots": 1, "semantic_evidence": False},
-    "rhythmic_acceleration": {"min_shots": 2, "semantic_evidence": False},
-    "rhythmic_deceleration": {"min_shots": 2, "semantic_evidence": False},
-    "transition_chain": {"min_shots": 2, "semantic_evidence": False},
-    "rapid_montage": {"min_shots": 2, "semantic_evidence": True},
-    "reaction_cut": {"min_shots": 2, "semantic_evidence": True},
-    "contrast_cut": {"min_shots": 2, "semantic_evidence": True},
-    "delayed_reveal": {"min_shots": 2, "semantic_evidence": True},
-    "cut_on_action": {"min_shots": 2, "semantic_evidence": True},
-    "match_cut": {"min_shots": 2, "semantic_evidence": True},
-    "shot_reverse_shot": {"min_shots": 2, "semantic_evidence": True},
-    "parallel_editing": {"min_shots": 2, "semantic_evidence": True},
-    "insert_shot": {"min_shots": 2, "semantic_evidence": True},
-    "audio_bridge": {"min_shots": 2, "semantic_evidence": True},
+    value: {"min_shots": 2, "semantic_evidence": True}
+    for value in PATTERN_TYPES
 }
 EDITING_CLAIM_FIELDS = (
     "claim_id", "subject", "predicate", "object", "interval", "modality",
@@ -51,43 +38,40 @@ EDITING_EVENT_FIELDS = (
     "outcome_claim_ids", "context_claim_ids", "interval",
 )
 
-EDITING_PATTERN_PROMPT = """You are an editing-pattern recognition analyst.
-The supplied durations, order, transitions, rates, claims, and events are the
-complete observation input. Identify editing techniques only; do not infer
-narrative function, motives, or audience beliefs. The measured values are
-immutable and must not be recalculated.
+EDITING_PATTERN_PROMPT = """You are a semantic editing-pattern recognition
+analyst. Deterministic pace, duration, cut, and transition structure has
+already been measured and is immutable. Identify only content-dependent
+editing relations that require understanding what adjacent shots contain. Do
+not infer narrative function, motives, or audience beliefs. Do not return a
+semantic pattern merely to restate a measured structural fact.
 
-Allowed pattern types: long_hold, rapid_montage, rhythmic_acceleration,
-rhythmic_deceleration, reaction_cut, contrast_cut, delayed_reveal,
-cut_on_action, match_cut, shot_reverse_shot, transition_chain,
+Allowed pattern types: rapid_montage, reaction_cut, contrast_cut,
+delayed_reveal, cut_on_action, match_cut, shot_reverse_shot,
 parallel_editing, insert_shot, audio_bridge.
 
 Return exactly one JSON object:
-{"schema_version":"editing_patterns_v1",
+{"schema_version":"semantic_editing_patterns_v1",
 "patterns":[{"pattern_id":"EP1","type":"rapid_montage",
 "scope":"local|global","shot_ids":["..."],"fact_ids":["..."],
 "evidence_ids":["claim or event ID"],"confidence":0.0}],
 "limitations":["..."]}
 
-long_hold may cite one shot. rhythmic_acceleration, rhythmic_deceleration, and
-transition_chain require at least two shots but may use evidence_ids=[]. All
-other pattern types require at least two shots and local semantic evidence IDs.
+Every pattern requires at least two shots and local semantic evidence IDs.
 fact_ids must correspond exactly to shot_ids. A local pattern must not cover
-most of the full video. A deterministic pace change is context, not a required
-semantic label. JSON only. Input:
+most of the full video. The patterns list may be empty. JSON only. Input:
 """
 
 EDITING_FUNCTION_PROMPT = """You are an editing-function reasoning analyst.
 The supplied editing patterns have already passed recognition validation. Read
 each pattern with its local shots, evidence semantics, and the verified
-narrative interpretation, then assign only the function supported in this
+narrative units and relations, then assign only the function supported in this
 case. Do not rename, add, or remove patterns.
 
 Allowed functions: establish, withhold, escalate, demonstrate, accumulate,
 reveal, reframe, contrast, release, humanize.
 
 Return exactly one JSON object:
-{"schema_version":"editing_functions_v1",
+{"schema_version":"editing_functions_v2",
 "functions":[{"pattern_id":"EP1","function":"accumulate",
 "relation_to_story":["verified relation ID"],"confidence":0.0}],
 "limitations":["..."]}
@@ -159,6 +143,104 @@ def _pace_changes(curve: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return changes
 
 
+def _relative_pace_labels(curve: list[dict[str, Any]]) -> dict[str, str]:
+    rates = sorted({float(row["shot_rate"]) for row in curve})
+    if len(rates) == 1:
+        labels = {rates[0]: "steady"}
+    elif len(rates) == 2:
+        labels = {rates[0]: "low", rates[1]: "high"}
+    else:
+        labels = {
+            rate: ("low" if index == 0 else
+                   "high" if index == len(rates) - 1 else "medium")
+            for index, rate in enumerate(rates)
+        }
+    return {
+        str(row["section_id"]): labels[float(row["shot_rate"])]
+        for row in curve
+    }
+
+
+def _duration_outliers(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return duration outliers using Tukey's inclusive 1.5-IQR fences."""
+    durations = [float(row["duration_s"]) for row in facts]
+    if len(durations) < 4:
+        return []
+    first_quartile, _, third_quartile = quantiles(
+        durations, n=4, method="inclusive")
+    spread = third_quartile - first_quartile
+    if spread == 0:
+        return []
+    lower = first_quartile - 1.5 * spread
+    upper = third_quartile + 1.5 * spread
+    return [{
+        "fact_id": row["fact_id"],
+        "shot_id": row["shot_id"],
+        "section_id": row["section_id"],
+        "duration_s": row["duration_s"],
+        "direction": "long" if float(row["duration_s"]) > upper else "short",
+        "first_quartile_s": round(first_quartile, 6),
+        "third_quartile_s": round(third_quartile, 6),
+        "interquartile_range_s": round(spread, 6),
+    } for row in facts if (
+        float(row["duration_s"]) < lower or float(row["duration_s"]) > upper)]
+
+
+def _build_structural_grammar(
+        pace_curve: list[dict[str, Any]],
+        transition_types: dict[str, list[tuple[str, str | None]]],
+        pace_changes: list[dict[str, Any]],
+        facts: list[dict[str, Any]]) -> dict[str, Any]:
+    relative = _relative_pace_labels(pace_curve)
+    transition_profile = []
+    transition_sequences = []
+    for row in pace_curve:
+        section_id = str(row["section_id"])
+        transitions = transition_types[section_id]
+        counts: dict[str, int] = {}
+        for _, transition_type in transitions:
+            name = transition_type or "unknown"
+            counts[name] = counts.get(name, 0) + 1
+        maximum = max(counts.values(), default=0)
+        transition_profile.append({
+            "section_id": section_id,
+            "transition_count": row["transition_count"],
+            "transition_rate": row["transition_rate"],
+            "hard_cut_count": row["hard_cut_count"],
+            "hard_cut_rate": row["hard_cut_rate"],
+            "type_counts": counts,
+            "dominant_types": sorted(
+                key for key, count in counts.items() if count == maximum),
+        })
+        if transitions:
+            transition_sequences.append({
+                "section_id": section_id,
+                "transition_ids": [value[0] for value in transitions],
+                "transition_types": [value[1] or "unknown" for value in transitions],
+            })
+    result = {
+        "schema_version": STRUCTURAL_EDITING_VERSION,
+        "pace_profile": [{
+            "section_id": row["section_id"],
+            "shot_rate": row["shot_rate"],
+            "relative_pace": relative[str(row["section_id"])],
+        } for row in pace_curve],
+        "pace_changes": copy.deepcopy(pace_changes),
+        "duration_profile": [{
+            "section_id": row["section_id"],
+            "mean_shot_duration_s": row["mean_shot_duration_s"],
+            "median_shot_duration_s": row["median_shot_duration_s"],
+            "min_shot_duration_s": row["min_shot_duration_s"],
+            "max_shot_duration_s": row["max_shot_duration_s"],
+        } for row in pace_curve],
+        "shot_duration_outliers": _duration_outliers(facts),
+        "transition_profile": transition_profile,
+        "transition_sequences": transition_sequences,
+    }
+    result["artifact_sha"] = json_hash(result)
+    return result
+
+
 def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, Any]:
     """Measure shot, cut and transition pace without semantic labels."""
     timeline = agent_reference.get("deterministic_timeline") or {}
@@ -170,6 +252,7 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
         raise EditingGrammarError("editing_measurement_input_missing")
 
     section_rows: dict[str, dict[str, Any]] = {}
+    transition_types: dict[str, list[tuple[str, str | None]]] = {}
     pace_curve: list[dict[str, Any]] = []
     for section in sections:
         section_id = str(section.get("section_id") or "")
@@ -212,6 +295,8 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
             "transition_rate": _rate(transition_count, duration),
             "mean_shot_duration_s": round(mean(shot_durations), 6),
             "median_shot_duration_s": round(median(shot_durations), 6),
+            "min_shot_duration_s": round(min(shot_durations), 6),
+            "max_shot_duration_s": round(max(shot_durations), 6),
             "raw_segment_count": len(member_segments),
             "raw_segment_rate": _rate(len(member_segments), duration),
             "shot_ids": [str(row.get("segment_id")) for row in content_segments],
@@ -219,6 +304,12 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
                 str(row.get("segment_id")) for row in transition_segments],
         }
         section_rows[section_id] = row
+        transition_types[section_id] = [
+            (str(segment.get("segment_id")),
+             str(segment.get("transition_type"))
+             if segment.get("transition_type") else None)
+            for segment in transition_segments
+        ]
         pace_curve.append(row)
     pace_curve.sort(key=lambda row: row["interval"])
 
@@ -248,6 +339,7 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
 
     start_s = min(row["interval"][0] for row in pace_curve)
     end_s = max(row["interval"][1] for row in pace_curve)
+    pace_changes = _pace_changes(pace_curve)
     result = {
         "schema_version": MEASURED_EDITING_VERSION,
         "source_sha": agent_reference.get("source_sha"),
@@ -255,7 +347,9 @@ def build_measured_editing_facts(agent_reference: dict[str, Any]) -> dict[str, A
         "duration_s": round(end_s - start_s, 6),
         "facts": facts,
         "pace_curve": pace_curve,
-        "pace_changes": _pace_changes(pace_curve),
+        "pace_changes": pace_changes,
+        "structural_grammar": _build_structural_grammar(
+            pace_curve, transition_types, pace_changes, facts),
     }
     result["artifact_sha"] = json_hash(result)
     return result
@@ -373,7 +467,7 @@ def build_editing_function_payload(
         })
     return {
         "patterns": contexts,
-        "verified_interpretation": interpretation,
+        "verified_narrative_interpretation": interpretation,
     }
 
 
@@ -402,8 +496,6 @@ def validate_editing_patterns(
 
     result = copy.deepcopy(value)
     pattern_ids: set[str] = set()
-    pattern_sections: dict[str, set[str]] = {}
-    pattern_types: dict[str, str] = {}
     for pattern in result["patterns"]:
         pattern_id = str(pattern.get("pattern_id") or "")
         if not pattern_id or pattern_id in pattern_ids:
@@ -412,7 +504,6 @@ def validate_editing_patterns(
         pattern_type = str(pattern.get("type") or "")
         if pattern_type not in PATTERN_TYPES:
             raise EditingGrammarError("pattern_type_invalid", pattern_id)
-        pattern_types[pattern_id] = pattern_type
         requirements = PATTERN_REQUIREMENTS[pattern_type]
         if pattern.get("scope") not in {"local", "global"}:
             raise EditingGrammarError("pattern_scope_invalid", pattern_id)
@@ -444,28 +535,6 @@ def validate_editing_patterns(
         pattern["span"] = [start, end]
         if pattern["scope"] != "global" and (end - start) / total > 0.60:
             raise EditingGrammarError("local_pattern_too_broad", pattern_id)
-        pattern_sections[pattern_id] = {
-            str(shots[shot_id]["section_id"]) for shot_id in shot_ids
-        }
-
-    warnings = []
-    for change in measured.get("pace_changes") or []:
-        direction = str(change.get("direction"))
-        allowed = (
-            {"rapid_montage", "rhythmic_acceleration"}
-            if direction == "accelerates"
-            else {"long_hold", "rhythmic_deceleration"}
-        )
-        covered = any(
-            pattern_types[pattern_id] in allowed and
-            str(change.get("to_section")) in pattern_sections[pattern_id]
-            for pattern_id in pattern_ids
-        )
-        if not covered:
-            warnings.append(
-                "pace_change_unexplained:"
-                f"{change.get('from_section')}->{change.get('to_section')}")
-    result["coverage_warnings"] = warnings
     result["measured_editing_sha"] = measured.get("artifact_sha")
     result["artifact_sha"] = json_hash(result)
     return result
@@ -563,13 +632,13 @@ def analyze_editing_grammar(
         _parse_object(function_raw), patterns, relation_ids=relation_ids)
     result = {
         "schema_version": EDITING_GRAMMAR_VERSION,
-        "patterns": patterns["patterns"],
+        "structural_grammar": measured["structural_grammar"],
+        "semantic_patterns": patterns["patterns"],
         "functions": functions["functions"],
-        "coverage_warnings": patterns["coverage_warnings"],
         "pattern_limitations": patterns["limitations"],
         "function_limitations": functions["limitations"],
         "measured_editing_sha": measured.get("artifact_sha"),
-        "patterns_sha": patterns.get("artifact_sha"),
+        "semantic_patterns_sha": patterns.get("artifact_sha"),
         "functions_sha": functions.get("artifact_sha"),
     }
     result["artifact_sha"] = json_hash(result)

@@ -13,12 +13,15 @@ from src.agentic_video.editing_grammar import (
     validate_editing_patterns,
 )
 from src.agentic_video.reference_interpretation import (
+    ReferenceInterpretationError,
     analysis_fingerprint,
+    build_interpretation_payload,
     finalize_interpretation,
     runner_identity,
     run_reference_interpretation,
     run_reference_interpretation_checkpointed,
     validate_interpretation,
+    validate_relation_audit,
 )
 from src.agentic_video.reference_storyboard import build_agent_reference
 from src.perception.omni_pool import OmniProcessPool
@@ -79,10 +82,11 @@ def _validated_reference() -> dict:
 
 def _interpretation() -> dict:
     return {
-        "schema_version": "reference_interpretation_v1",
-        "propositions": [{
-            "proposition_id": "P1", "statement": "A bounded observation",
-            "supported_by": ["V1"],
+        "schema_version": "reference_narrative_interpretation_v2",
+        "narrative_units": [{
+            "unit_id": "N1", "section_ids": ["A"],
+            "summary": "A bounded event occurs in the opening section.",
+            "supported_by": ["V1", "EV1"],
         }],
         "relations": [],
         "limitations": [],
@@ -91,10 +95,11 @@ def _interpretation() -> dict:
 
 def _passing_audit() -> dict:
     return {
-        "schema_version": "reference_relation_audit_v2",
-        "proposition_checks": [{
-            "proposition_id": "P1", "entailed": True,
-            "scope_valid": True, "reason_codes": [],
+        "schema_version": "reference_narrative_audit_v1",
+        "unit_checks": [{
+            "unit_id": "N1", "entailed": True,
+            "scope_valid": True, "attribution_preserved": True,
+            "reason_codes": [],
         }],
         "relation_checks": [],
         "pass": True,
@@ -133,7 +138,29 @@ def test_agent_reference_separates_identity_and_structures_transitions() -> None
     assert "required_roles" not in serialized
 
 
-def test_no_relation_still_requires_proposition_audit() -> None:
+def test_interpretation_payload_builds_section_bundles_without_identity_claims() -> None:
+    payload = build_interpretation_payload(
+        build_agent_reference(_validated_reference()))
+    sections = {row["section_id"]: row for row in payload["section_bundles"]}
+
+    assert set(sections) == {"A", "B", "C"}
+    assert "claims" not in payload
+    assert "shot_cards" not in payload
+    assert sections["A"]["visual_observations"][0]["subject"] == "SUBJECT_01"
+    assert sections["A"]["events"][0]["participants"] == ["SUBJECT_01"]
+    assert sections["B"]["text_statements"] == [{
+        "claim_id": "T01", "source_type": "on_screen_text",
+        "observed_text": "statement", "interval": [5.0, 6.0],
+    }]
+    serialized = json.dumps(payload)
+    assert "ID1" not in serialized
+    assert "same_entity_as" not in serialized
+    assert "contains_text" not in serialized
+    assert "E1" not in serialized
+    assert "E2" not in serialized
+
+
+def test_no_relation_still_requires_narrative_unit_audit() -> None:
     interpreter = _Runner(_interpretation(), "interpreter-v1")
     auditor = _Runner(_passing_audit(), "auditor-v1")
     result, audit = run_reference_interpretation(
@@ -142,43 +169,64 @@ def test_no_relation_still_requires_proposition_audit() -> None:
     assert interpreter.calls == 1
     assert auditor.calls == 1
     assert result["relations"] == []
-    assert result["propositions"][0]["verification_status"] == "SUPPORTED"
+    assert result["narrative_units"][0]["verification_status"] == "SUPPORTED"
     assert result["verification_status"] == "SUPPORTED"
     assert audit["pass"] is True
+    assert "Do NOT restate every atomic claim" in interpreter.prompts[0]
+    assert "required_roles" not in interpreter.prompts[0]
 
 
-def test_failed_proposition_audit_marks_no_relation_result_unresolved() -> None:
+def test_failed_unit_audit_marks_no_relation_result_unresolved() -> None:
     audit = _passing_audit()
-    audit["proposition_checks"][0]["entailed"] = False
-    audit["proposition_checks"][0]["reason_codes"] = ["NOT_ENTAILED"]
+    audit["unit_checks"][0]["entailed"] = False
+    audit["unit_checks"][0]["reason_codes"] = ["NOT_ENTAILED"]
     audit["pass"] = False
 
     result = finalize_interpretation(_interpretation(), audit)
 
-    assert result["propositions"][0]["verification_status"] == "UNRESOLVED"
+    assert result["narrative_units"][0]["verification_status"] == "UNRESOLVED"
     assert result["verification_status"] == "UNRESOLVED"
+
+
+def test_empty_narrative_units_and_relations_are_valid() -> None:
+    interpretation = {
+        "schema_version": "reference_narrative_interpretation_v2",
+        "narrative_units": [], "relations": [], "limitations": [],
+    }
+    audit = {
+        "schema_version": "reference_narrative_audit_v1",
+        "unit_checks": [], "relation_checks": [], "pass": True,
+    }
+    agent_reference = build_agent_reference(_validated_reference())
+
+    validate_interpretation(interpretation, agent_reference)
+    validate_relation_audit(audit, interpretation)
+    result = finalize_interpretation(interpretation, audit)
+
+    assert result["verification_status"] == "SUPPORTED"
 
 
 def test_failed_relation_audit_marks_relation_unresolved() -> None:
     interpretation = _interpretation()
-    interpretation["propositions"].append({
-        "proposition_id": "P2", "statement": "Second proposition",
+    interpretation["narrative_units"].append({
+        "unit_id": "N2", "section_ids": ["B"],
+        "summary": "The video presents an attributed text statement.",
         "supported_by": ["T01"],
     })
     interpretation["relations"].append({
-        "relation_id": "R1", "type": "reframes", "source": "P2",
-        "target": "P1", "reason": "Candidate relation",
+        "relation_id": "R1", "type": "reframes", "source": "N2",
+        "target": "N1", "reason": "Candidate relation",
         "supported_by": ["V1", "T01"],
     })
     validate_interpretation(
         interpretation, build_agent_reference(_validated_reference()))
     audit = {
-        "schema_version": "reference_relation_audit_v2",
-        "proposition_checks": [
-            {"proposition_id": "P1", "entailed": True,
-             "scope_valid": True, "reason_codes": []},
-            {"proposition_id": "P2", "entailed": True,
-             "scope_valid": True, "reason_codes": []},
+        "schema_version": "reference_narrative_audit_v1",
+        "unit_checks": [
+            {"unit_id": "N1", "entailed": True, "scope_valid": True,
+             "attribution_preserved": True, "reason_codes": []},
+            {"unit_id": "N2", "entailed": True, "scope_valid": True,
+             "attribution_preserved": True, "reason_codes": []},
         ],
         "relation_checks": [{
             "relation_id": "R1", "source_entailed": True,
@@ -191,6 +239,34 @@ def test_failed_relation_audit_marks_relation_unresolved() -> None:
     result = finalize_interpretation(interpretation, audit)
     assert result["relations"][0]["verification_status"] == "UNRESOLVED"
     assert result["verification_status"] == "UNRESOLVED"
+
+
+def test_narrative_units_must_use_local_non_identity_evidence() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    out_of_scope = _interpretation()
+    out_of_scope["narrative_units"][0]["supported_by"] = ["T01"]
+    with pytest.raises(ReferenceInterpretationError) as scope_error:
+        validate_interpretation(out_of_scope, agent_reference)
+    assert getattr(scope_error.value, "reason_code", None) == (
+        "narrative_unit_support_out_of_scope")
+
+    identity_support = _interpretation()
+    identity_support["narrative_units"][0]["supported_by"] = ["ID1"]
+    with pytest.raises(ReferenceInterpretationError) as identity_error:
+        validate_interpretation(identity_support, agent_reference)
+    assert getattr(identity_error.value, "reason_code", None) == (
+        "narrative_unit_support_invalid")
+
+    too_many = _interpretation()
+    too_many["narrative_units"] = [
+        {"unit_id": f"N{i}", "section_ids": ["A"], "summary": "Summary",
+         "supported_by": ["V1"]}
+        for i in range(1, 5)
+    ]
+    with pytest.raises(ReferenceInterpretationError) as count_error:
+        validate_interpretation(too_many, agent_reference)
+    assert getattr(count_error.value, "reason_code", None) == (
+        "section_narrative_unit_limit_exceeded")
 
 
 def test_checkpoint_requires_evidence_and_analysis_fingerprint(tmp_path) -> None:
@@ -268,6 +344,21 @@ def test_measured_editing_metrics_split_shot_cut_transition_rates() -> None:
     assert rows[1]["median_shot_duration_s"] == 1.0
     assert measured["facts"][3]["transition_out"]["transition_id"] == "T2"
     assert measured["pace_changes"][0]["shot_rate_before"] == 0.2
+    structural = measured["structural_grammar"]
+    assert structural["schema_version"] == "measured_structural_editing_grammar_v1"
+    assert [row["relative_pace"] for row in structural["pace_profile"]] == [
+        "low", "medium", "high",
+    ]
+    assert [row["direction"] for row in structural["pace_changes"]] == [
+        "accelerates", "accelerates",
+    ]
+    assert structural["duration_profile"][2]["min_shot_duration_s"] == 0.4
+    assert structural["shot_duration_outliers"][0]["shot_id"] == "S1"
+    assert structural["transition_profile"][2]["type_counts"] == {"whip_pan": 1}
+    assert structural["transition_sequences"] == [{
+        "section_id": "C", "transition_ids": ["T2"],
+        "transition_types": ["whip_pan"],
+    }]
 
 
 def test_editing_payload_is_compact_indexed_and_excludes_identity_provenance() -> None:
@@ -310,7 +401,7 @@ def _shot_evidence_ids(payload: dict) -> dict[str, set[str]]:
 
 def _pattern_value(pattern_type: str = "contrast_cut") -> dict:
     return {
-        "schema_version": "editing_patterns_v1",
+        "schema_version": "semantic_editing_patterns_v1",
         "patterns": [{
             "pattern_id": "EP1", "type": pattern_type, "scope": "local",
             "shot_ids": ["S4", "S5"], "fact_ids": ["EF4", "EF5"],
@@ -335,26 +426,19 @@ def test_local_editing_pattern_cannot_span_most_of_video() -> None:
     assert excinfo.value.reason_code == "local_pattern_too_broad"
 
 
-def test_pattern_requirements_allow_single_long_hold_and_fact_only_patterns() -> None:
+@pytest.mark.parametrize("pattern_type", [
+    "long_hold", "rhythmic_acceleration", "rhythmic_deceleration",
+    "transition_chain",
+])
+def test_deterministic_editing_types_are_not_semantic_patterns(
+        pattern_type: str) -> None:
     agent_reference = build_agent_reference(_validated_reference())
     measured = build_measured_editing_facts(agent_reference)
     evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
-    value = {
-        "schema_version": "editing_patterns_v1",
-        "patterns": [
-            {"pattern_id": "EP1", "type": "long_hold", "scope": "local",
-             "shot_ids": ["S4"], "fact_ids": ["EF4"],
-             "evidence_ids": [], "confidence": 0.8},
-            {"pattern_id": "EP2", "type": "transition_chain", "scope": "local",
-             "shot_ids": ["S4", "S5"], "fact_ids": ["EF4", "EF5"],
-             "evidence_ids": [], "confidence": 0.8},
-        ],
-        "limitations": [],
-    }
-
-    result = validate_editing_patterns(
-        value, measured, shot_evidence_ids=evidence)
-    assert [row["pattern_id"] for row in result["patterns"]] == ["EP1", "EP2"]
+    value = _pattern_value(pattern_type)
+    with pytest.raises(EditingGrammarError) as excinfo:
+        validate_editing_patterns(value, measured, shot_evidence_ids=evidence)
+    assert excinfo.value.reason_code == "pattern_type_invalid"
 
 
 def test_semantic_pattern_requires_local_evidence_and_exact_fact_scope() -> None:
@@ -384,7 +468,7 @@ def test_semantic_pattern_requires_local_evidence_and_exact_fact_scope() -> None
     assert missing_error.value.reason_code == "pattern_evidence_required"
 
 
-def test_unexplained_pace_change_is_warning_not_failure() -> None:
+def test_deterministic_structure_does_not_require_semantic_coverage() -> None:
     agent_reference = build_agent_reference(_validated_reference())
     measured = build_measured_editing_facts(agent_reference)
     evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
@@ -392,17 +476,16 @@ def test_unexplained_pace_change_is_warning_not_failure() -> None:
         _pattern_value(), measured, shot_evidence_ids=evidence)
 
     assert result["patterns"][0]["type"] == "contrast_cut"
-    assert result["coverage_warnings"] == [
-        "pace_change_unexplained:A->B",
-        "pace_change_unexplained:B->C",
-    ]
+    assert "coverage_warnings" not in result
+    assert measured["structural_grammar"]["pace_changes"][0][
+        "direction"] == "accelerates"
 
 
 def test_editing_recognition_and_function_reasoning_are_two_single_calls() -> None:
     agent_reference = build_agent_reference(_validated_reference())
     pattern_runner = _Runner(_pattern_value("rapid_montage"), "pattern-v1")
     function_runner = _Runner({
-        "schema_version": "editing_functions_v1",
+        "schema_version": "editing_functions_v2",
         "functions": [{
             "pattern_id": "EP1", "function": "accumulate",
             "relation_to_story": [], "confidence": 0.8,
@@ -415,11 +498,17 @@ def test_editing_recognition_and_function_reasoning_are_two_single_calls() -> No
 
     assert pattern_runner.calls == 1
     assert function_runner.calls == 1
-    assert "verified_interpretation" not in pattern_runner.prompts[0]
+    assert "verified_narrative_interpretation" not in pattern_runner.prompts[0]
+    for deterministic_type in (
+        "long_hold", "rhythmic_acceleration", "rhythmic_deceleration",
+        "transition_chain",
+    ):
+        assert deterministic_type not in pattern_runner.prompts[0]
     assert '\"predicate\":\"audio_event\"' in pattern_runner.prompts[0]
-    assert "verified_interpretation" in function_runner.prompts[0]
+    assert "verified_narrative_interpretation" in function_runner.prompts[0]
     assert '\"object\":\"sound\"' in function_runner.prompts[0]
     assert '\"object\":\"scene\"' not in function_runner.prompts[0]
-    assert result["patterns"][0]["evidence_ids"] == ["A1"]
+    assert result["semantic_patterns"][0]["evidence_ids"] == ["A1"]
+    assert result["structural_grammar"] == measured["structural_grammar"]
     assert result["functions"][0]["function"] == "accumulate"
-    assert measured["schema_version"] == "measured_editing_facts_v3"
+    assert measured["schema_version"] == "measured_editing_facts_v4"
