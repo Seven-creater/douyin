@@ -19,7 +19,12 @@ First separate what on-screen text ASSERTS from what visual evidence OBSERVES.
 Then infer only evidence-linked changes in proposition scope. A text assertion is
 not a visual fact. A counterexample can contradict only the proposition or
 implication it actually bears on; one domain never proves universal ability.
-Do not output a literal event inventory as the interpretation.
+Do not create one proposition per claim and do not merely restate that a text
+string or action exists. Produce 3-10 aggregated propositions. Identity claims
+are support for cross-segment alignment, not standalone story propositions.
+Represent the strongest opening assertion, the evidence that bears on it, and
+any closing scope limit when they are supported. If no proposition revision is
+supported, use context and ordering roles rather than inventing one.
 
 Return exactly one JSON object:
 {"propositions":[{"proposition_id":"P1","statement":"abstract proposition",
@@ -49,7 +54,9 @@ Return exactly one JSON object:
 
 Do not recalculate measurements. Do not force one function per section or a
 fixed number of functions. A relation with zero confidence must be omitted.
-Do not assign motives or audience beliefs. JSON only. Input:
+Every section containing an accepted event must appear in at least one
+functional relation; one relation may span multiple sections. Do not assign
+motives or audience beliefs. JSON only. Input:
 """
 
 DIRECTOR_DNA_PROMPT = """You are a structure-abduction director. Infer only
@@ -66,7 +73,7 @@ Return exactly one JSON object:
 "constraints":[{"constraint_id":"C1","rule_type":"exact_proposition_match|evidence_required|scope_bound|revision_required|ordering_required|qualification_preserved","rule":"cross-domain rule","required":true}],
 "free_slots":[{"slot_id":"S1","kind":"domain|relationship|inference_source|counterevidence_form|resolution_tone","constraint_ids":["C1"]}],
 "editing_relations":[{"relation_id":"E1","editing_operation":"establish|demonstrate|accumulate|qualify|contrast|bridge","information_effect":"abstract information-state change","conditions":["..."]}],
-"supported_by":{"R1":["claim/event/interpretation/edit relation ids"]},
+"supported_by":{"R1":["claim id, event id, interpretation proposition/relation id, or editing relation id"]},
 "concrete_bindings":[{"variable_id":"V1","source_ids":["..."]}],
 "anti_invariants":["surface features that must not be transferred"],
 "validation_record":{"structure_only":true,"source_bindings_confined_to_audit":true,"provenance_rules_not_creative":true},
@@ -114,10 +121,14 @@ def _parse_object(raw: str) -> dict[str, Any]:
 
 def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                           validator: Callable[[dict[str, Any]], None],
-                          attempts: int = 2) -> dict[str, Any]:
+                          attempts: int = 2, trace_dir: Path | None = None,
+                          trace_name: str = "analysis") -> dict[str, Any]:
     """Retry only with a reason code; never reflect model/source text."""
     last_error: DNAV2Error | None = None
-    for attempt in range(attempts):
+    trace_path = Path(trace_dir) if trace_dir is not None else None
+    if trace_path is not None:
+        trace_path.mkdir(parents=True, exist_ok=True)
+    for attempt in range(1, attempts + 1):
         suffix = ""
         if last_error is not None:
             suffix = ("\nCORRECTION: the previous object failed gate "
@@ -126,12 +137,24 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                       "previous response.\n")
         answer = runner.ask(prompt + suffix, max_new_tokens=max_new_tokens,
                             stop_after_json_object=True)
+        raw = _answer_text(answer)
+        if trace_path is not None:
+            (trace_path / f"{trace_name}_attempt_{attempt:03d}.txt").write_text(
+                raw, encoding="utf-8")
         try:
-            value = _parse_object(_answer_text(answer))
+            value = _parse_object(raw)
             validator(value)
+            if trace_path is not None:
+                (trace_path / f"{trace_name}_attempt_{attempt:03d}_gate.json").write_text(
+                    json.dumps({"passed": True}, indent=2), encoding="utf-8")
             return value
         except DNAV2Error as exc:
             last_error = exc
+            if trace_path is not None:
+                (trace_path / f"{trace_name}_attempt_{attempt:03d}_gate.json").write_text(
+                    json.dumps({"passed": False,
+                                "reason_code": exc.reason_code}, indent=2),
+                    encoding="utf-8")
     assert last_error is not None
     raise last_error
 
@@ -167,6 +190,8 @@ def validate_interpretation(value: dict[str, Any],
     relations = value.get("relations")
     if not isinstance(propositions, list) or not propositions:
         raise DNAV2Error("interpretation_propositions_missing")
+    if not 3 <= len(propositions) <= 10:
+        raise DNAV2Error("interpretation_not_aggregated")
     if not isinstance(relations, list) or not relations:
         raise DNAV2Error("interpretation_relations_missing")
     proposition_ids = _ids(propositions, "proposition_id")
@@ -181,6 +206,9 @@ def validate_interpretation(value: dict[str, Any],
             raise DNAV2Error("interpretation_role_invalid")
         if row.get("scope") not in {"specific", "domain_bounded", "general"}:
             raise DNAV2Error("interpretation_scope_invalid")
+    roles = {str(row.get("epistemic_role")) for row in propositions}
+    if len(roles) < 2:
+        raise DNAV2Error("interpretation_roles_collapsed")
     for row in relations:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
@@ -284,10 +312,29 @@ def validate_editing_analysis(value: dict[str, Any],
         confidence = row.get("confidence")
         if not isinstance(confidence, (int, float)) or not 0 < float(confidence) <= 1:
             raise DNAV2Error("editing_confidence_invalid")
+    event_intervals = [event.get("interval") or []
+                       for event in validated_reference.get("accepted_events") or []]
+    required_sections = set()
+    for segment in measurements.get("segments") or []:
+        segment_interval = segment.get("interval") or []
+        if any(len(interval) == 2 and
+               float(interval[0]) < float(segment_interval[1]) and
+               float(interval[1]) > float(segment_interval[0])
+               for interval in event_intervals):
+            required_sections.add(str(segment.get("section_id")))
+    covered_ids = {str(ref) for row in relations
+                   for ref in row.get("timeline_ids") or []}
+    covered_sections = {
+        str(row.get("section_id")) for row in measurements.get("segments") or []
+        if str(row.get("timeline_id")) in covered_ids
+    }
+    if not required_sections.issubset(covered_sections):
+        raise DNAV2Error("editing_event_section_uncovered")
 
 
 def run_independent_analyses(validated_reference: dict[str, Any], *,
-                             runner: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+                             runner: Any, trace_dir: Path | None = None
+                             ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Use two clean text calls; neither draft appears in the other request."""
     view = _analysis_view(validated_reference)
     base = json.dumps(view, ensure_ascii=False,
@@ -296,7 +343,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
         runner=runner, prompt=INTERPRETATION_PROMPT + base,
         max_new_tokens=3072,
         validator=lambda value: validate_interpretation(
-            value, validated_reference))
+            value, validated_reference), trace_dir=trace_dir,
+        trace_name="interpretation")
     _attach_interpretation_provenance(interpretation, validated_reference)
     interpretation = {
         "schema_version": INTERPRETATION_VERSION,
@@ -314,7 +362,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             edit_input, ensure_ascii=False, separators=(",", ":")),
         max_new_tokens=3072,
         validator=lambda value: validate_editing_analysis(
-            value, measurements, validated_reference))
+            value, measurements, validated_reference), trace_dir=trace_dir,
+        trace_name="editing")
     editing = {
         "schema_version": EDITING_ANALYSIS_VERSION,
         "validated_reference_sha": validated_reference.get("artifact_sha"),
@@ -537,11 +586,21 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
     trace_path = Path(trace_dir) if trace_dir is not None else None
     if trace_path is not None:
         trace_path.mkdir(parents=True, exist_ok=True)
-    for attempt in range(1, 3):
+    for attempt in range(1, 4):
         suffix = ""
         if last_error is not None:
+            guidance = {
+                "dna_publish_surface_binding_leak": (
+                    "Use only belief, proposition, evidence, revision, scope, "
+                    "and information-state roles. Remove every physical, body, "
+                    "activity, object, place, identity, and caption description."),
+                "dna_support_id_invalid": (
+                    "supported_by may contain only supplied claim IDs, event IDs, "
+                    "interpretation proposition/relation IDs, or editing relation "
+                    "IDs; never timeline segment IDs or variable IDs."),
+            }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
-                      f"{last_error.reason_code}. Re-run structure abduction and "
+                      f"{last_error.reason_code}. {guidance} Re-run structure abduction and "
                       "return a complete fresh JSON object. Do not quote the "
                       "previous response or any source phrase.\n")
         answer = runner.ask(base_prompt + suffix, max_new_tokens=4096,

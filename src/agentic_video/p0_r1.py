@@ -483,19 +483,21 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
     workspace.write_draft("validated_reference", validated,
                           metadata={"created_by": "p0_r1_validator"})
     workspace.commit("validated_reference")
-    interpretation, editing = run_independent_analyses(validated, runner=runner)
-    for name, value in (("interpretation.json", interpretation),
-                        ("editing_analysis.json", editing)):
-        (output / name).write_text(json.dumps(value, ensure_ascii=False, indent=2),
-                                   encoding="utf-8")
     trace_root = output / "traces"
     trace_root.mkdir(parents=True, exist_ok=True)
     trace_index = 1
     while (trace_root / f"attempt_{trace_index:03d}").exists():
         trace_index += 1
+    trace_dir = trace_root / f"attempt_{trace_index:03d}"
+    interpretation, editing = run_independent_analyses(
+        validated, runner=runner, trace_dir=trace_dir)
+    for name, value in (("interpretation.json", interpretation),
+                        ("editing_analysis.json", editing)):
+        (output / name).write_text(json.dumps(value, ensure_ascii=False, indent=2),
+                                   encoding="utf-8")
     audit, publish = run_director(
         validated, interpretation, editing, runner=runner,
-        trace_dir=trace_root / f"attempt_{trace_index:03d}")
+        trace_dir=trace_dir)
     dev_path = Path(repo_root) / "config" / "migration_dev_v1.json"
     regression_path = Path(repo_root) / "config" / "migration_regression_v1.json"
     dev = run_suite(publish, dev_path, runner=runner, tier="dev")

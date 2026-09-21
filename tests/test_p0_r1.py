@@ -8,7 +8,7 @@ import pytest
 
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
-    DNAV2Error, build_writer_payload, publish_dna)
+    DNAV2Error, build_writer_payload, publish_dna, validate_interpretation)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
@@ -261,6 +261,26 @@ def test_dna_publish_is_whitelisted_and_rejects_reference_binding() -> None:
             validated_reference={"accepted_claims": [
                 {"claim_id": "C2", "object": "reach toward an entity"}]})
     assert excinfo.value.reason_code == "dna_publish_surface_binding_leak"
+
+
+def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:
+    reference = {"accepted_claims": [
+        {"claim_id": f"C{index}", "modality": "V"}
+        for index in range(1, 4)], "accepted_events": []}
+    value = {
+        "propositions": [{
+            "proposition_id": f"P{index}", "statement": "literal fact",
+            "source_ids": [f"C{index}"], "epistemic_role": "initial_assertion",
+            "scope": "specific"} for index in range(1, 4)],
+        "relations": [{
+            "relation_id": "IR1", "type": "supports",
+            "source_proposition_ids": ["P1"], "target_proposition_id": "P2",
+            "source_ids": ["C1"], "interpretation": "literal support",
+            "confidence": 1.0}],
+    }
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_interpretation(value, reference)
+    assert excinfo.value.reason_code == "interpretation_roles_collapsed"
 
 
 def test_blocked_candidate_freeze_is_not_labeled_release_candidate(
