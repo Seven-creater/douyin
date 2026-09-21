@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v2"
+INTERPRETATION_VERSION = "reference_interpretation_v3"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v2"
 TEXT_SEMANTICS_VERSION = "text_semantics_v1"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -30,6 +30,25 @@ Every supplied claim ID must be covered at least once. Do not merge unrelated
 claims and do not import information absent from the text. An optional
 analysis_contract may require semantic roles or scopes; satisfy it only when
 the supplied wording supports them. JSON only. Input:
+"""
+
+INTERPRETATION_AUDIT_PROMPT = """You are an independent semantic entailment
+auditor. You receive validated evidence, normalized text propositions, and a
+candidate interpretation. Do not rewrite it. For every candidate relation,
+check whether the cited evidence entails its source and target propositions,
+whether the named logical relation actually holds, and whether proposition
+scope is preserved. A different action, setting, or identity context is not by
+itself a contradiction. Additional evidence contradicts a target only when it
+negates that target or a necessary implication of it.
+
+Return exactly one JSON object:
+{"checks":[{"relation_id":"IR1","source_entailed":true,
+"target_entailed":true,"relation_valid":true,"scope_valid":true,
+"reason_codes":["TARGET_NOT_ENTAILED|SOURCE_NOT_ENTAILED|RELATION_INVALID|SCOPE_INVALID"]}],
+"pass":true}
+
+Include every relation ID exactly once. Set pass=true only when every boolean in
+every check is true. JSON only. Input:
 """
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded interpretation analyst.
@@ -152,6 +171,8 @@ def _parse_object(raw: str) -> dict[str, Any]:
 
 def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                           validator: Callable[[dict[str, Any]], None],
+                          post_validator: Callable[[dict[str, Any], int], None]
+                          | None = None,
                           attempts: int = 2, trace_dir: Path | None = None,
                           trace_name: str = "analysis") -> dict[str, Any]:
     """Retry only with a reason code; never reflect model/source text."""
@@ -186,6 +207,11 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                 "interpretation_qualification_modality_invalid": (
                     "Ground the scope-limit proposition in the modality required "
                     "by analysis_contract."),
+                "interpretation_semantic_audit_failed": (
+                    "At least one proposition is not entailed by its cited "
+                    "evidence, or the named relation does not logically hold. "
+                    "Preserve the exact meaning and scope of the cited target; "
+                    "do not replace it with a nearby proposition."),
                 "interpretation_not_aggregated": (
                     "Aggregate claims into the smallest cross-segment "
                     "propositions allowed by the declared limit."),
@@ -213,6 +239,8 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
         try:
             value = _parse_object(raw)
             validator(value)
+            if post_validator is not None:
+                post_validator(value, attempt)
             if trace_path is not None:
                 (trace_path / f"{trace_name}_attempt_{attempt:03d}_gate.json").write_text(
                     json.dumps({"passed": True}, indent=2), encoding="utf-8")
@@ -334,6 +362,9 @@ def validate_interpretation(value: dict[str, Any],
     proposition_ids = _ids(propositions, "proposition_id")
     if len(proposition_ids) != len(propositions):
         raise DNAV2Error("interpretation_proposition_id_invalid")
+    relation_ids = _ids(relations, "relation_id")
+    if len(relation_ids) != len(relations):
+        raise DNAV2Error("interpretation_relation_id_invalid")
     for row in propositions:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
@@ -396,6 +427,56 @@ def validate_interpretation(value: dict[str, Any],
     if not set(map(str, contract.get(
             "required_relation_types") or [])).issubset(relation_types):
         raise DNAV2Error("interpretation_required_relation_missing")
+
+
+def validate_interpretation_audit(value: dict[str, Any],
+                                  interpretation: dict[str, Any]) -> None:
+    relation_ids = _ids(interpretation.get("relations") or [], "relation_id")
+    checks = value.get("checks")
+    if not isinstance(checks, list) or _ids(checks, "relation_id") != relation_ids \
+            or len(checks) != len(relation_ids):
+        raise DNAV2Error("interpretation_audit_coverage_invalid")
+    required = ("source_entailed", "target_entailed", "relation_valid",
+                "scope_valid")
+    if value.get("pass") is not True or any(
+            row.get(key) is not True for row in checks for key in required):
+        raise DNAV2Error("interpretation_semantic_audit_failed")
+
+
+def audit_interpretation(*, runner: Any, validated_view: dict[str, Any],
+                         text_semantics: dict[str, Any],
+                         interpretation: dict[str, Any],
+                         trace_dir: Path | None = None,
+                         attempt: int = 1) -> dict[str, Any]:
+    payload = {"validated_reference": validated_view,
+               "text_semantics": text_semantics,
+               "candidate_interpretation": interpretation}
+    answer = runner.ask(
+        INTERPRETATION_AUDIT_PROMPT + json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")),
+        max_new_tokens=1536, stop_after_json_object=True)
+    raw = _answer_text(answer)
+    if trace_dir is not None:
+        path = Path(trace_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        (path / f"interpretation_audit_{attempt:03d}.txt").write_text(
+            raw, encoding="utf-8")
+    audit = _parse_object(raw)
+    try:
+        validate_interpretation_audit(audit, interpretation)
+    except DNAV2Error as exc:
+        if trace_dir is not None:
+            (Path(trace_dir) /
+             f"interpretation_audit_{attempt:03d}_gate.json").write_text(
+                json.dumps({"passed": False,
+                            "reason_code": exc.reason_code}, indent=2),
+                encoding="utf-8")
+        raise
+    if trace_dir is not None:
+        (Path(trace_dir) /
+         f"interpretation_audit_{attempt:03d}_gate.json").write_text(
+            json.dumps({"passed": True}, indent=2), encoding="utf-8")
+    return audit
 
 
 def _attach_interpretation_provenance(
@@ -590,14 +671,25 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             try:
                 validate_interpretation(
                     interpretation, validated_reference, analysis_contract)
+                validate_interpretation_audit(
+                    interpretation.get("semantic_audit") or {}, interpretation)
             except DNAV2Error:
                 interpretation = None
     if interpretation is None:
+        audit_result: dict[str, Any] = {}
+
+        def semantic_post_validator(value: dict[str, Any], attempt: int) -> None:
+            audit_result["semantic_audit"] = audit_interpretation(
+                runner=runner, validated_view=view,
+                text_semantics=text_semantics, interpretation=value,
+                trace_dir=trace_dir, attempt=attempt)
+
         proposed_interpretation = _ask_validated_object(
             runner=runner, prompt=INTERPRETATION_PROMPT + base,
             max_new_tokens=3072,
             validator=lambda value: validate_interpretation(
-                value, validated_reference, analysis_contract), trace_dir=trace_dir,
+                value, validated_reference, analysis_contract),
+            post_validator=semantic_post_validator, trace_dir=trace_dir,
             trace_name="interpretation", attempts=3)
         _attach_interpretation_provenance(
             proposed_interpretation, validated_reference)
@@ -606,6 +698,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             "validated_reference_sha": validated_reference.get("artifact_sha"),
             "text_semantics_sha": text_semantics.get("artifact_sha"),
             **proposed_interpretation,
+            **audit_result,
         }
         interpretation["artifact_sha"] = json_hash(interpretation)
         save_cache("interpretation.json", interpretation)
@@ -808,6 +901,8 @@ def _validate_no_audit_scaffolding(publish: dict[str, Any]) -> None:
         r"shared identity",
         r"(?:two|multiple|both) modalities",
         r"modality requirement",
+        r"(?:textual|visual|audio) evidence",
+        r"(?:text|visual|audio) claims?",
         r"claim ids?|event ids?|timeline ids?",
     )
     if any(re.search(pattern, serialized) for pattern in patterns):

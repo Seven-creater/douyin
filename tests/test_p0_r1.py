@@ -9,7 +9,7 @@ import pytest
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
     DNAV2Error, build_writer_payload, publish_dna, validate_interpretation,
-    validate_text_semantics)
+    validate_interpretation_audit, validate_text_semantics)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
     P0R1Blocked, _absolute_response_times, compile_validated_reference)
@@ -266,6 +266,10 @@ def test_dna_publish_is_whitelisted_and_rejects_reference_binding() -> None:
         publish_dna(_dna_audit("cross-domain identity claim"),
                     validated_reference={})
     assert excinfo.value.reason_code == "dna_publish_audit_scaffolding_leak"
+    with pytest.raises(DNAV2Error) as excinfo:
+        publish_dna(_dna_audit("requires textual evidence"),
+                    validated_reference={})
+    assert excinfo.value.reason_code == "dna_publish_audit_scaffolding_leak"
 
 
 def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:
@@ -286,6 +290,38 @@ def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:
     with pytest.raises(DNAV2Error) as excinfo:
         validate_interpretation(value, reference)
     assert excinfo.value.reason_code == "interpretation_roles_collapsed"
+
+
+def test_interpretation_semantic_audit_requires_every_relation_to_pass() -> None:
+    interpretation = {"relations": [
+        {"relation_id": "IR1"}, {"relation_id": "IR2"}]}
+    valid = {"checks": [
+        {"relation_id": "IR1", "source_entailed": True,
+         "target_entailed": True, "relation_valid": True,
+         "scope_valid": True, "reason_codes": []},
+        {"relation_id": "IR2", "source_entailed": True,
+         "target_entailed": True, "relation_valid": True,
+         "scope_valid": True, "reason_codes": []}], "pass": True}
+    validate_interpretation_audit(valid, interpretation)
+    invalid = json.loads(json.dumps(valid))
+    invalid["checks"][0]["target_entailed"] = False
+    invalid["checks"][0]["reason_codes"] = ["TARGET_NOT_ENTAILED"]
+    invalid["pass"] = False
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_interpretation_audit(invalid, interpretation)
+    assert excinfo.value.reason_code == "interpretation_semantic_audit_failed"
+
+
+def test_interpretation_semantic_audit_rejects_missing_relation() -> None:
+    interpretation = {"relations": [
+        {"relation_id": "IR1"}, {"relation_id": "IR2"}]}
+    audit = {"checks": [{
+        "relation_id": "IR1", "source_entailed": True,
+        "target_entailed": True, "relation_valid": True,
+        "scope_valid": True, "reason_codes": []}], "pass": True}
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_interpretation_audit(audit, interpretation)
+    assert excinfo.value.reason_code == "interpretation_audit_coverage_invalid"
 
 
 def test_text_semantics_covers_only_text_claims() -> None:
