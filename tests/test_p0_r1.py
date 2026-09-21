@@ -111,6 +111,12 @@ def test_legacy_dense_probe_is_silent_and_question_blind(
 def test_negative_claim_requires_continuous_visible_coverage() -> None:
     claim = _claim(polarity="NEGATIVE")
     assert "negative_claim_lacks_continuous_visible_coverage" in validate_claim(claim)
+    claim["support_refs"][0]["coverage"] = {
+        "kind": "continuous", "interval": [0.0, 1.0]}
+    assert "negative_claim_lacks_continuous_visible_coverage" not in validate_claim(
+        claim)
+    claim["visibility"] = "OCCLUDED"
+    assert "negative_claim_lacks_continuous_visible_coverage" in validate_claim(claim)
 
 
 def test_clip_local_times_are_validated_then_shifted() -> None:
@@ -126,12 +132,6 @@ def test_clip_local_times_are_validated_then_shifted() -> None:
             {"claims": [{"claim_id": "C1", "interval": [0, 2]}],
              "events": [], "coverage": {}},
             start_s=0, duration_s=1, stage="test")
-    claim["support_refs"][0]["coverage"] = {
-        "kind": "continuous", "interval": [0.0, 1.0]}
-    assert "negative_claim_lacks_continuous_visible_coverage" not in validate_claim(
-        claim)
-    claim["visibility"] = "OCCLUDED"
-    assert "negative_claim_lacks_continuous_visible_coverage" in validate_claim(claim)
 
 
 def test_claim_conflict_requires_exact_alignment_and_comparable_modality() -> None:
