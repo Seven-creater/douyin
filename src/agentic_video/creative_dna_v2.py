@@ -33,8 +33,8 @@ When a final limitation narrows what the evidence establishes, label it as a
 scope limit and use a qualifies relation. These are conditional definitions,
 not permission to infer a pattern absent from the evidence.
 An optional analysis_contract lists per-reference review questions as required
-roles/relation types. Satisfy it only with cited evidence; never invent a
-relation to make the contract pass.
+roles/relation types and, when supplied, target/source modalities. Satisfy it
+only with cited evidence; never invent a relation to make the contract pass.
 
 Return exactly one JSON object:
 {"propositions":[{"proposition_id":"P1","statement":"abstract proposition",
@@ -95,7 +95,8 @@ rather than replacing it with literal action causality. A counterexample must
 negate the actual proposition it challenges. Evidence in one domain cannot
 establish universal ability without additional support. Source-modality and
 provenance rules stay in the audit system; they are not creative invariants for
-a new story. Use abstract roles only. Never copy source wording, media paths,
+a new story. Entity-resolution and identity-alignment claims are also audit
+scaffolding, not transferable story mechanisms. Use abstract roles only. Never copy source wording, media paths,
 named activities, physical action forms, body properties, or identity
 descriptions into variables, relations, constraints, free slots, or editing
 relations. Concrete details are allowed only in concrete_bindings and
@@ -151,6 +152,20 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "Use contradicts only for evidence bearing on the exact "
                     "target proposition, and qualifies only for a real scope "
                     "limit. Do not substitute supports for these mechanisms."),
+                "interpretation_contradiction_target_invalid": (
+                    "A change of activity or setting is not a contradiction. "
+                    "The contradicted target must be an earlier general or "
+                    "domain-bounded assertion, not a specific observed action."),
+                "interpretation_contradiction_modality_invalid": (
+                    "Select the earlier asserted proposition from the modality "
+                    "required by analysis_contract; do not substitute a visual "
+                    "action inventory."),
+                "interpretation_scope_limit_source_missing": (
+                    "A qualifies relation must originate from a proposition "
+                    "whose role is scope_limit."),
+                "interpretation_qualification_modality_invalid": (
+                    "Ground the scope-limit proposition in the modality required "
+                    "by analysis_contract."),
                 "interpretation_not_aggregated": (
                     "Aggregate claims into the smallest cross-segment "
                     "propositions allowed by the declared limit."),
@@ -215,10 +230,14 @@ def validate_interpretation(value: dict[str, Any],
                      "context"}
     allowed_relation_types = {"supports", "contradicts", "qualifies",
                               "reframes", "orders"}
+    contract_modalities = (
+        list(contract.get("contradiction_target_modalities") or []) +
+        list(contract.get("qualification_source_modalities") or []))
     if not set(map(str, contract.get("required_roles") or [])).issubset(
             allowed_roles) or not set(map(str, contract.get(
                 "required_relation_types") or [])).issubset(
-                    allowed_relation_types):
+                    allowed_relation_types) or not set(map(str,
+                        contract_modalities)).issubset({"V", "A", "T", "FUSION"}):
         raise DNAV2Error("interpretation_contract_invalid")
     valid = _source_ids(validated_reference)
     propositions = value.get("propositions")
@@ -246,6 +265,9 @@ def validate_interpretation(value: dict[str, Any],
         raise DNAV2Error("interpretation_roles_collapsed")
     if not set(map(str, contract.get("required_roles") or [])).issubset(roles):
         raise DNAV2Error("interpretation_required_role_missing")
+    proposition_by_id = {str(row.get("proposition_id")): row
+                         for row in propositions}
+    source_modalities = _source_modalities(validated_reference)
     for row in relations:
         refs = set(map(str, row.get("source_ids") or []))
         if not refs or not refs.issubset(valid):
@@ -260,6 +282,34 @@ def validate_interpretation(value: dict[str, Any],
         confidence = row.get("confidence")
         if not isinstance(confidence, (int, float)) or not 0 < float(confidence) <= 1:
             raise DNAV2Error("interpretation_confidence_invalid")
+        source_rows = [proposition_by_id[item] for item in source_props]
+        target_row = proposition_by_id[str(row.get("target_proposition_id"))]
+        relation_type = row.get("type")
+        if relation_type == "contradicts":
+            if target_row.get("epistemic_role") != "initial_assertion" or \
+                    target_row.get("scope") not in {"general", "domain_bounded"}:
+                raise DNAV2Error("interpretation_contradiction_target_invalid")
+            if not any(item.get("epistemic_role") == "counterevidence"
+                       for item in source_rows):
+                raise DNAV2Error("interpretation_counterevidence_source_missing")
+            target_modalities = {modality for ref in target_row.get("source_ids") or []
+                                 for modality in source_modalities.get(str(ref), [])}
+            required = set(map(str, contract.get(
+                "contradiction_target_modalities") or []))
+            if not required.issubset(target_modalities):
+                raise DNAV2Error("interpretation_contradiction_modality_invalid")
+        if relation_type == "qualifies":
+            scope_rows = [item for item in source_rows
+                          if item.get("epistemic_role") == "scope_limit"]
+            if not scope_rows:
+                raise DNAV2Error("interpretation_scope_limit_source_missing")
+            observed = {modality for item in scope_rows
+                        for ref in item.get("source_ids") or []
+                        for modality in source_modalities.get(str(ref), [])}
+            required = set(map(str, contract.get(
+                "qualification_source_modalities") or []))
+            if not required.issubset(observed):
+                raise DNAV2Error("interpretation_qualification_modality_invalid")
     relation_types = {str(row.get("type")) for row in relations}
     if not set(map(str, contract.get(
             "required_relation_types") or [])).issubset(relation_types):
@@ -626,6 +676,21 @@ def _validate_abstract_surface(publish: dict[str, Any],
         raise DNAV2Error("dna_publish_surface_binding_leak")
 
 
+def _validate_no_audit_scaffolding(publish: dict[str, Any]) -> None:
+    serialized = json.dumps(publish, ensure_ascii=False).casefold()
+    patterns = (
+        r"identity[- ]?(?:alignment|claim|link|across)",
+        r"equivalence between entit",
+        r"same entit",
+        r"shared identity",
+        r"(?:two|multiple|both) modalities",
+        r"modality requirement",
+        r"claim ids?|event ids?|timeline ids?",
+    )
+    if any(re.search(pattern, serialized) for pattern in patterns):
+        raise DNAV2Error("dna_publish_audit_scaffolding_leak")
+
+
 _PUBLISH_KEYS = ("variables", "relations", "constraints", "free_slots",
                  "editing_relations")
 
@@ -642,6 +707,7 @@ def publish_dna(audit: dict[str, Any], *,
     if any(value and value in serialized
            for value in _sensitive_strings(validated_reference)):
         raise DNAV2Error("dna_publish_reference_binding_leak")
+    _validate_no_audit_scaffolding(publish)
     _validate_abstract_surface(publish, validated_reference)
     publish["artifact_sha"] = json_hash(publish)
     return publish
@@ -704,6 +770,10 @@ def run_director(validated_reference: dict[str, Any], interpretation: dict[str, 
                     "supported_by may contain only supplied claim IDs, event IDs, "
                     "interpretation proposition/relation IDs, or editing relation "
                     "IDs; never timeline segment IDs or variable IDs."),
+                "dna_publish_audit_scaffolding_leak": (
+                    "Remove entity-resolution, identity-alignment, modality-count, "
+                    "and artifact-ID rules from the publishable structure. They "
+                    "belong only in audit bindings or anti-invariants."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Re-run structure abduction and "

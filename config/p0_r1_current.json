@@ -14,6 +14,8 @@
   "analysis_contract": {
     "required_roles": ["initial_assertion", "counterevidence", "scope_limit"],
     "required_relation_types": ["contradicts", "qualifies"],
+    "contradiction_target_modalities": ["T"],
+    "qualification_source_modalities": ["T"],
     "max_propositions": 8
   }
 }

@@ -261,6 +261,10 @@ def test_dna_publish_is_whitelisted_and_rejects_reference_binding() -> None:
             validated_reference={"accepted_claims": [
                 {"claim_id": "C2", "object": "reach toward an entity"}]})
     assert excinfo.value.reason_code == "dna_publish_surface_binding_leak"
+    with pytest.raises(DNAV2Error) as excinfo:
+        publish_dna(_dna_audit("cross-domain identity claim"),
+                    validated_reference={})
+    assert excinfo.value.reason_code == "dna_publish_audit_scaffolding_leak"
 
 
 def test_interpretation_rejects_one_claim_per_proposition_inventory() -> None:
