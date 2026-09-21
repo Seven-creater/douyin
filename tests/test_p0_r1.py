@@ -10,6 +10,7 @@ from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
     DNAV2Error, build_writer_payload, publish_dna)
 from src.agentic_video.migration_eval import judge_case
+from src.agentic_video.p0_r1 import P0R1Blocked, _absolute_response_times
 from src.agentic_video.provenance import (
     APPROVAL_POLICY_VERSION, propagate_revocation,
     validate_approval_binding)
@@ -110,6 +111,21 @@ def test_legacy_dense_probe_is_silent_and_question_blind(
 def test_negative_claim_requires_continuous_visible_coverage() -> None:
     claim = _claim(polarity="NEGATIVE")
     assert "negative_claim_lacks_continuous_visible_coverage" in validate_claim(claim)
+
+
+def test_clip_local_times_are_validated_then_shifted() -> None:
+    value = {"claims": [{"claim_id": "C1", "interval": [0.1, 0.5]}],
+             "events": [{"event_id": "E1", "interval": [0.0, 0.8]}],
+             "coverage": {"observed_intervals": [[0.0, 1.0]],
+                          "masked_or_unjudgeable": []}}
+    shifted = _absolute_response_times(
+        value, start_s=16.7, duration_s=1.0, stage="test")
+    assert shifted["claims"][0]["interval"] == [16.8, 17.2]
+    with pytest.raises(P0R1Blocked):
+        _absolute_response_times(
+            {"claims": [{"claim_id": "C1", "interval": [0, 2]}],
+             "events": [], "coverage": {}},
+            start_s=0, duration_s=1, stage="test")
     claim["support_refs"][0]["coverage"] = {
         "kind": "continuous", "interval": [0.0, 1.0]}
     assert "negative_claim_lacks_continuous_visible_coverage" not in validate_claim(

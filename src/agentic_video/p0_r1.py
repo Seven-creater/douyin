@@ -29,7 +29,9 @@ JSON object with:
 "coverage":{"observed_intervals":[[0.0,0.1]],"masked_or_unjudgeable":[{"interval":[0.0,0.1],"reason_code":"MASK_OVERLAP|OCCLUSION|OFFSCREEN|MOTION_BLUR"}]}}
 Use a NEGATIVE claim only if the entire stated interval is continuously visible;
 otherwise report the uncertainty in masked_or_unjudgeable and omit the negative
-claim. JSON only."""
+claim. Use actual clip-local times, not the example numbers. Return at most 20
+non-duplicate claims and 10 events; omit low-information UNKNOWN claims rather
+than padding the list. Keep the JSON compact and complete. JSON only."""
 
 LOCAL_VISUAL_PROMPT = """You are a local visual evidence recorder. Inspect only
 pixels in this silent, text-masked interval. Use anonymous entity IDs. Record
@@ -37,7 +39,8 @@ visible body regions, action initiators, contact/no-contact only when continuous
 coverage permits it, scene changes, observable action order, and results. Do not
 infer text, audio, identity, motives, social meaning, or narrative function.
 Return exactly the same JSON schema as the full visual evidence recorder. JSON
-only."""
+only. Use actual clip-local times. Return at most 20 non-duplicate claims and 10
+events; omit low-information UNKNOWN claims. Keep the JSON compact and complete."""
 
 
 class P0R1Blocked(RuntimeError):
@@ -60,6 +63,57 @@ def _parse(raw: str, stage: str) -> dict[str, Any]:
         raise P0R1Blocked(stage, "json_invalid") from exc
     if not isinstance(value, dict):
         raise P0R1Blocked(stage, "not_object")
+    return value
+
+
+def _next_attempt_path(directory: Path, stem: str, suffix: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    first = directory / f"{stem}{suffix}"
+    if not first.exists():
+        return first
+    count = len(list(directory.glob(f"{stem}*{suffix}"))) + 1
+    return directory / f"{stem}_attempt_{count:03d}{suffix}"
+
+
+def _absolute_response_times(value: dict[str, Any], *, start_s: float,
+                             duration_s: float, stage: str) -> dict[str, Any]:
+    """Validate clip-local model times, then apply a deterministic origin."""
+    if len(value.get("claims") or []) > 20 or len(value.get("events") or []) > 10:
+        raise P0R1Blocked(stage, "response_exceeds_atomic_budget")
+    seen_claims: set[str] = set()
+    seen_events: set[str] = set()
+
+    def convert(row: dict[str, Any], key: str = "interval") -> None:
+        interval = row.get(key)
+        if not isinstance(interval, list) or len(interval) != 2:
+            raise P0R1Blocked(stage, "interval_invalid")
+        left, right = float(interval[0]), float(interval[1])
+        if left < -0.001 or right <= left or right > duration_s + 0.05:
+            raise P0R1Blocked(stage, "clip_local_interval_out_of_range")
+        row[key] = [round(start_s + left, 6), round(start_s + right, 6)]
+
+    for row in value.get("claims") or []:
+        claim_id = str(row.get("claim_id") or "")
+        if not claim_id or claim_id in seen_claims:
+            raise P0R1Blocked(stage, "claim_id_missing_or_duplicate")
+        seen_claims.add(claim_id)
+        convert(row)
+    for row in value.get("events") or []:
+        event_id = str(row.get("event_id") or "")
+        if not event_id or event_id in seen_events:
+            raise P0R1Blocked(stage, "event_id_missing_or_duplicate")
+        seen_events.add(event_id)
+        convert(row)
+    coverage = value.get("coverage") or {}
+    converted = []
+    for interval in coverage.get("observed_intervals") or []:
+        holder = {"interval": interval}
+        convert(holder)
+        converted.append(holder["interval"])
+    coverage["observed_intervals"] = converted
+    for row in coverage.get("masked_or_unjudgeable") or []:
+        convert(row)
+    value["coverage"] = coverage
     return value
 
 
@@ -148,24 +202,33 @@ def run_visual_perception(source: Path, p04e_dir: Path, output_dir: Path, *,
         payload = _visual_payload(
             f"p0r1_{call_id}", list(map(float, interval)),
             str(mask["artifact_sha"]), fps=fps, dimensions=dimensions)
+        duration = float(interval[1]) - float(interval[0])
+        call_prompt = (prompt + f"\nThe clip-local duration is {duration:.6f} "
+                       "seconds; all returned intervals must be within "
+                       f"[0.0, {duration:.6f}].")
         audit = audit_request(
-            channel="V", prompt=prompt, payload=payload,
+            channel="V", prompt=call_prompt, payload=payload,
             media_paths=[visual_path], forbidden_markers=forbidden_markers)
-        write_request_audit(output / "request_audits" / f"{call_id}.json", audit)
+        audit_path = _next_attempt_path(
+            output / "request_audits", call_id, ".json")
+        write_request_audit(audit_path, audit)
         answer = runner.watch(
-            visual_path, prompt, start_s=float(interval[0]), end_s=float(interval[1]),
+            visual_path, call_prompt, start_s=float(interval[0]),
+            end_s=float(interval[1]),
             clip_dir=output / "clips" / call_id,
-            duration_s=float(interval[1]) - float(interval[0]), fps=fps,
-            use_audio_in_video=False, max_new_tokens=4096,
+            duration_s=duration, fps=fps,
+            use_audio_in_video=False, max_new_tokens=3072,
             stop_after_json_object=True)
         raw = str(getattr(answer, "text", answer))
-        raw_path = output / "raw" / f"{call_id}.txt"
-        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path = _next_attempt_path(output / "raw", call_id, ".txt")
         raw_path.write_text(raw, encoding="utf-8")
         parsed = _parse(raw, f"visual_{call_id}")
         for key in ("claims", "events", "coverage"):
             if key not in parsed:
                 raise P0R1Blocked(f"visual_{call_id}", "field_missing", key)
+        parsed = _absolute_response_times(
+            parsed, start_s=float(interval[0]), duration_s=duration,
+            stage=f"visual_{call_id}")
         results[call_id] = {
             "response": parsed, "raw_path": str(raw_path),
             "raw_sha": sha256_file(raw_path), "request_audit": audit}
