@@ -10,7 +10,7 @@ from src.agentic_video.manifest import json_hash
 
 INTERPRETATION_VERSION = "reference_interpretation_v4"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
-TEXT_SEMANTICS_VERSION = "text_semantics_v1"
+TEXT_SEMANTICS_VERSION = "text_semantics_v2"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
 DNA_PUBLISH_VERSION = "creative_dna_v2"
 
@@ -29,7 +29,10 @@ Return exactly one JSON object:
 Every supplied claim ID must be covered at least once. Do not merge unrelated
 claims and do not import information absent from the text. An optional
 analysis_contract may require semantic roles or scopes; satisfy it only when
-the supplied wording supports them. JSON only. Input:
+the supplied wording supports them. limitations may describe transcription or
+scope ambiguity in an individual text claim only. They must not decide
+relations between claims, declare whether counterevidence exists, or discuss
+the analysis contract. JSON only. Input:
 """
 
 INTERPRETATION_AUDIT_PROMPT = """You are an independent semantic entailment
@@ -88,7 +91,8 @@ Return exactly one JSON object:
 
 Every proposition and relation must cite supplied claim/event IDs. For every
 T-channel source in a proposition, cite the corresponding text_semantics TP ID
-in semantic_ids; the T source IDs must match that semantic record exactly. If a
+in semantic_ids; TP IDs belong only in semantic_ids and must never appear in
+source_ids. The T source IDs must match that semantic record exactly. If a
 proposition uses one TP ID, copy its canonical proposition exactly. Aggregate
 only when multiple TP IDs are cited. The target of a contradiction must state
 the challenged assertion itself, not a nearby identity/action fact or a hidden
@@ -251,6 +255,10 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                 "text_semantics_required_scope_missing": (
                     "Classify proposition scope from its wording rather than "
                     "defaulting every item to specific."),
+                "text_semantics_interpretive_limitation": (
+                    "Limitations may note only transcription or within-claim "
+                    "scope ambiguity. Do not decide cross-claim relations or "
+                    "discuss the analysis contract."),
                 "editing_audit_scaffolding_leak": (
                     "Describe only information ordering and presentation. "
                     "Remove identity resolution, modality, provenance, and "
@@ -353,6 +361,12 @@ def validate_text_semantics(value: dict[str, Any],
     if not set(map(str, contract.get(
             "text_semantics_required_scopes") or [])).issubset(scopes):
         raise DNAV2Error("text_semantics_required_scope_missing")
+    limitation_text = " ".join(map(str, value.get("limitations") or []))
+    if re.search(
+            r"contradict|counterevidence|analysis contract|required.{0,20}role|"
+            r"relations? between (?:claims|items|propositions)",
+            limitation_text.casefold()):
+        raise DNAV2Error("text_semantics_interpretive_limitation")
 
 
 def validate_interpretation(value: dict[str, Any],

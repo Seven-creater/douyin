@@ -413,6 +413,15 @@ def test_text_semantics_covers_only_text_claims() -> None:
             "proposition": "The text contains the phrase X",
             "semantic_role": "assertion", "scope": "specific"}]}, reference)
     assert excinfo.value.reason_code == "text_semantics_literal_transcription"
+    with pytest.raises(DNAV2Error) as excinfo:
+        validate_text_semantics({"items": [{
+            "semantic_id": "TP1", "source_ids": ["T1"],
+            "proposition": "a bounded assertion",
+            "semantic_role": "assertion", "scope": "domain_bounded"}],
+            "limitations": ["No counterevidence exists in the input."]},
+            reference)
+    assert excinfo.value.reason_code == \
+        "text_semantics_interpretive_limitation"
 
 
 def test_blocked_candidate_freeze_is_not_labeled_release_candidate(
