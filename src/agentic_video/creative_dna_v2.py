@@ -25,6 +25,13 @@ are support for cross-segment alignment, not standalone story propositions.
 Represent the strongest opening assertion, the evidence that bears on it, and
 any closing scope limit when they are supported. If no proposition revision is
 supported, use context and ordering roles rather than inventing one.
+Interpret the semantic content of a complete text proposition; do not reduce it
+to "text appears." When the accepted evidence contains a broad negative
+assertion and later bounded competence evidence about an identity-aligned
+subject, label the latter as counterevidence and use a contradicts relation.
+When a final limitation narrows what the evidence establishes, label it as a
+scope limit and use a qualifies relation. These are conditional definitions,
+not permission to infer a pattern absent from the evidence.
 An optional analysis_contract lists per-reference review questions as required
 roles/relation types. Satisfy it only with cited evidence; never invent a
 relation to make the contract pass.
@@ -134,8 +141,22 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
     for attempt in range(1, attempts + 1):
         suffix = ""
         if last_error is not None:
+            guidance = {
+                "interpretation_required_role_missing": (
+                    "Do not label every later fact as an initial assertion. "
+                    "Semantically test later evidence against the earlier "
+                    "proposition and assign counterevidence or scope_limit when "
+                    "the cited evidence supports those roles."),
+                "interpretation_required_relation_missing": (
+                    "Use contradicts only for evidence bearing on the exact "
+                    "target proposition, and qualifies only for a real scope "
+                    "limit. Do not substitute supports for these mechanisms."),
+                "interpretation_not_aggregated": (
+                    "Aggregate claims into the smallest cross-segment "
+                    "propositions allowed by the declared limit."),
+            }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
-                      f"{last_error.reason_code}. Return a complete fresh JSON "
+                      f"{last_error.reason_code}. {guidance} Return a complete fresh JSON "
                       "object following the original schema. Do not quote the "
                       "previous response.\n")
         answer = runner.ask(prompt + suffix, max_new_tokens=max_new_tokens,
@@ -355,9 +376,31 @@ def validate_editing_analysis(value: dict[str, Any],
 
 def run_independent_analyses(validated_reference: dict[str, Any], *,
                              runner: Any, trace_dir: Path | None = None,
-                             analysis_contract: dict[str, Any] | None = None
+                             analysis_contract: dict[str, Any] | None = None,
+                             cache_dir: Path | None = None
                              ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Use two clean text calls; neither draft appears in the other request."""
+    cache_path = Path(cache_dir) if cache_dir is not None else None
+    if cache_path is not None:
+        cache_path.mkdir(parents=True, exist_ok=True)
+    if trace_dir is not None:
+        Path(trace_dir).mkdir(parents=True, exist_ok=True)
+
+    def load_cache(name: str) -> dict[str, Any] | None:
+        if cache_path is None or not (cache_path / name).is_file():
+            return None
+        value = json.loads((cache_path / name).read_text(encoding="utf-8"))
+        unhashed = dict(value)
+        expected = unhashed.pop("artifact_sha", None)
+        if expected != json_hash(unhashed):
+            return None
+        return value
+
+    def save_cache(name: str, value: dict[str, Any]) -> None:
+        if cache_path is not None:
+            (cache_path / name).write_text(
+                json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
     view = _analysis_view(validated_reference)
     interpretation_input = {
         "validated_reference": view,
@@ -365,38 +408,75 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
     }
     base = json.dumps(interpretation_input, ensure_ascii=False,
                       separators=(",", ":"))
-    interpretation = _ask_validated_object(
-        runner=runner, prompt=INTERPRETATION_PROMPT + base,
-        max_new_tokens=3072,
-        validator=lambda value: validate_interpretation(
-            value, validated_reference, analysis_contract), trace_dir=trace_dir,
-        trace_name="interpretation")
-    _attach_interpretation_provenance(interpretation, validated_reference)
-    interpretation = {
-        "schema_version": INTERPRETATION_VERSION,
-        "validated_reference_sha": validated_reference.get("artifact_sha"),
-        **interpretation,
-    }
-    interpretation["artifact_sha"] = json_hash(interpretation)
+    interpretation = load_cache("interpretation.json")
+    if interpretation is not None:
+        if interpretation.get("schema_version") != INTERPRETATION_VERSION or \
+                interpretation.get("validated_reference_sha") != \
+                validated_reference.get("artifact_sha"):
+            interpretation = None
+        else:
+            try:
+                validate_interpretation(
+                    interpretation, validated_reference, analysis_contract)
+            except DNAV2Error:
+                interpretation = None
+    if interpretation is None:
+        proposed_interpretation = _ask_validated_object(
+            runner=runner, prompt=INTERPRETATION_PROMPT + base,
+            max_new_tokens=3072,
+            validator=lambda value: validate_interpretation(
+                value, validated_reference, analysis_contract), trace_dir=trace_dir,
+            trace_name="interpretation", attempts=3)
+        _attach_interpretation_provenance(
+            proposed_interpretation, validated_reference)
+        interpretation = {
+            "schema_version": INTERPRETATION_VERSION,
+            "validated_reference_sha": validated_reference.get("artifact_sha"),
+            **proposed_interpretation,
+        }
+        interpretation["artifact_sha"] = json_hash(interpretation)
+        save_cache("interpretation.json", interpretation)
+    elif trace_dir is not None:
+        (Path(trace_dir) / "interpretation_reuse_gate.json").write_text(
+            json.dumps({"passed": True, "reused": True}, indent=2),
+            encoding="utf-8")
 
     measurements = compute_timeline_measurements(validated_reference)
     edit_input = {"validated_reference": view,
                   "deterministic_measurements": measurements}
-    proposed = _ask_validated_object(
-        runner=runner,
-        prompt=EDITING_ANALYSIS_PROMPT + json.dumps(
-            edit_input, ensure_ascii=False, separators=(",", ":")),
-        max_new_tokens=3072,
-        validator=lambda value: validate_editing_analysis(
-            value, measurements, validated_reference), trace_dir=trace_dir,
-        trace_name="editing")
-    editing = {
-        "schema_version": EDITING_ANALYSIS_VERSION,
-        "validated_reference_sha": validated_reference.get("artifact_sha"),
-        "deterministic_measurements": measurements,
-        **proposed,
-    }
-    editing["artifact_sha"] = json_hash(editing)
+    editing = load_cache("editing_analysis.json")
+    if editing is not None:
+        if editing.get("schema_version") != EDITING_ANALYSIS_VERSION or \
+                editing.get("validated_reference_sha") != \
+                validated_reference.get("artifact_sha"):
+            editing = None
+        else:
+            try:
+                validate_editing_analysis(editing, measurements,
+                                          validated_reference)
+            except DNAV2Error:
+                editing = None
+    if editing is None:
+        proposed = _ask_validated_object(
+            runner=runner,
+            prompt=EDITING_ANALYSIS_PROMPT + json.dumps(
+                edit_input, ensure_ascii=False, separators=(",", ":")),
+            max_new_tokens=3072,
+            validator=lambda value: validate_editing_analysis(
+                value, measurements, validated_reference), trace_dir=trace_dir,
+            trace_name="editing")
+        editing = {
+            "schema_version": EDITING_ANALYSIS_VERSION,
+            "validated_reference_sha": validated_reference.get("artifact_sha"),
+            "deterministic_measurements": measurements,
+            **proposed,
+        }
+        editing["artifact_sha"] = json_hash(editing)
+        save_cache("editing_analysis.json", editing)
+    elif trace_dir is not None:
+        (Path(trace_dir) / "editing_reuse_gate.json").write_text(
+            json.dumps({"passed": True, "reused": True}, indent=2),
+            encoding="utf-8")
     return interpretation, editing
 
 

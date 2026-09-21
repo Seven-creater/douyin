@@ -493,7 +493,8 @@ def build_release_candidate(validated_path: Path, perception_path: Path,
     trace_dir = trace_root / f"attempt_{trace_index:03d}"
     interpretation, editing = run_independent_analyses(
         validated, runner=runner, trace_dir=trace_dir,
-        analysis_contract=analysis_contract)
+        analysis_contract=analysis_contract,
+        cache_dir=output / "analysis_checkpoint")
     for name, value in (("interpretation.json", interpretation),
                         ("editing_analysis.json", editing)):
         (output / name).write_text(json.dumps(value, ensure_ascii=False, indent=2),
