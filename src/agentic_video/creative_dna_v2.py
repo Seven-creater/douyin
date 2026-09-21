@@ -216,6 +216,10 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "Select the earlier asserted proposition from the modality "
                     "required by analysis_contract; do not substitute a visual "
                     "action inventory."),
+                "interpretation_counterevidence_modality_invalid": (
+                    "Ground the counterevidence proposition in every source "
+                    "modality required by analysis_contract, including only "
+                    "relevant presentation and identity claims."),
                 "interpretation_scope_limit_source_missing": (
                     "A qualifies relation must originate from a proposition "
                     "whose role is scope_limit."),
@@ -230,6 +234,10 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                 "interpretation_text_semantic_binding_invalid": (
                     "Bind every T-channel source to its canonical semantic_id. "
                     "Do not mix unrelated text claims into one proposition."),
+                "interpretation_proposition_evidence_invalid": (
+                    "source_ids may contain only supplied claim or event IDs. "
+                    "Put TP identifiers only in semantic_ids, never in "
+                    "source_ids."),
                 "interpretation_single_semantic_statement_mismatch": (
                     "When one semantic_id is cited, copy that canonical "
                     "proposition exactly without adding an implication."),
@@ -380,6 +388,7 @@ def validate_interpretation(value: dict[str, Any],
                               "reframes", "orders"}
     contract_modalities = (
         list(contract.get("contradiction_target_modalities") or []) +
+        list(contract.get("contradiction_source_modalities") or []) +
         list(contract.get("qualification_source_modalities") or []))
     text_roles = set(map(str, contract.get(
         "text_semantics_required_roles") or []))
@@ -488,6 +497,15 @@ def validate_interpretation(value: dict[str, Any],
                 "contradiction_target_modalities") or []))
             if not required.issubset(target_modalities):
                 raise DNAV2Error("interpretation_contradiction_modality_invalid")
+            source_evidence_modalities = {
+                modality for item in source_rows
+                for ref in item.get("source_ids") or []
+                for modality in source_modalities.get(str(ref), [])}
+            required_source = set(map(str, contract.get(
+                "contradiction_source_modalities") or []))
+            if not required_source.issubset(source_evidence_modalities):
+                raise DNAV2Error(
+                    "interpretation_counterevidence_modality_invalid")
             if text_semantics is not None:
                 target_semantics = [
                     semantic_by_id.get(str(semantic_id), {})

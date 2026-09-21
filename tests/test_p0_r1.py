@@ -329,7 +329,8 @@ def test_interpretation_binds_t_sources_to_canonical_semantics() -> None:
     reference = {"accepted_claims": [
         {"claim_id": "T1", "modality": "T"},
         {"claim_id": "T2", "modality": "T"},
-        {"claim_id": "T3", "modality": "T"}], "accepted_events": []}
+        {"claim_id": "T3", "modality": "T"},
+        {"claim_id": "V1", "modality": "V"}], "accepted_events": []}
     semantics = {"items": [
         {"semantic_id": "TP1", "source_ids": ["T1"],
          "proposition": "A broad negative assertion.",
@@ -345,6 +346,7 @@ def test_interpretation_binds_t_sources_to_canonical_semantics() -> None:
                            "scope_limit"],
         "required_relation_types": ["contradicts", "qualifies"],
         "contradiction_target_modalities": ["T"],
+        "contradiction_source_modalities": ["V", "T"],
         "qualification_source_modalities": ["T"],
         "text_semantics_required_scopes": ["general"],
     }
@@ -353,7 +355,7 @@ def test_interpretation_binds_t_sources_to_canonical_semantics() -> None:
          "source_ids": ["T1"], "semantic_ids": ["TP1"],
          "epistemic_role": "initial_assertion", "scope": "general"},
         {"proposition_id": "P2", "statement": "A bounded counterexample.",
-         "source_ids": ["T2"], "semantic_ids": ["TP2"],
+         "source_ids": ["T2", "V1"], "semantic_ids": ["TP2"],
          "epistemic_role": "counterevidence", "scope": "specific"},
         {"proposition_id": "P3", "statement": "A remaining limitation.",
          "source_ids": ["T3"], "semantic_ids": ["TP3"],
@@ -361,7 +363,7 @@ def test_interpretation_binds_t_sources_to_canonical_semantics() -> None:
         "relations": [
             {"relation_id": "IR1", "type": "contradicts",
              "source_proposition_ids": ["P2"],
-             "target_proposition_id": "P1", "source_ids": ["T2"],
+             "target_proposition_id": "P1", "source_ids": ["T2", "V1"],
              "interpretation": "counterexample", "confidence": 0.9},
             {"relation_id": "IR2", "type": "qualifies",
              "source_proposition_ids": ["P3"],

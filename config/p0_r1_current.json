@@ -15,6 +15,7 @@
     "required_roles": ["initial_assertion", "counterevidence", "scope_limit"],
     "required_relation_types": ["contradicts", "qualifies"],
     "contradiction_target_modalities": ["T"],
+    "contradiction_source_modalities": ["V", "T"],
     "qualification_source_modalities": ["T"],
     "text_semantics_required_roles": ["assertion", "qualification"],
     "text_semantics_required_scopes": ["general"],
