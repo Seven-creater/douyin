@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v12"
+INTERPRETATION_VERSION = "reference_interpretation_v13"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -70,11 +70,14 @@ from later_direct_visual_ids. When a target attributes a belief, test the later
 evidence against the proposition embedded in that belief, not against the fact
 that somebody holds it. This remains a presentation-level relation and must not
 upgrade a visual appearance into an anatomical fact. Select same_entity_as IDs
-only from identity_ids.
+only from identity_ids. Choose primary_relation_type=contradicts only when the
+later evidence logically negates the exact target. Choose reframes when it
+instead changes how an attributed or overgeneralized assertion is interpreted.
 
 Return exactly one JSON object with these keys: relation_supported (boolean),
 target_semantic_id (one supplied semantic ID), counter_semantic_ids (array of
 supplied semantic IDs), scope_semantic_id (one supplied semantic ID),
+primary_relation_type (contradicts or reframes),
 opening_visual_support_ids (array from opening_direct_visual_ids),
 later_visual_support_ids (array from later_direct_visual_ids),
 identity_support_ids (array of supplied same_entity_as IDs), confidence (number
@@ -82,8 +85,8 @@ above zero and at most one), and reason_codes (array of short strings).
 
 Use semantic IDs only for semantic fields and claim IDs only for visual or
 identity fields. Do not copy placeholder identifiers. A different activity is
-not itself a contradiction. Set relation_supported=false when the exact target
-is not refuted or subject alignment is unsupported. JSON only. Input:
+not itself a contradiction or reframe. Set relation_supported=false when
+neither relation holds or subject alignment is unsupported. JSON only. Input:
 """
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded interpretation analyst.
@@ -251,9 +254,10 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "assertion. Mark the real closing exception as scope_limit. "
                     "Do not emit a one-item-per-claim inventory."),
                 "interpretation_required_relation_missing": (
-                    "Use contradicts only for evidence bearing on the exact "
-                    "target proposition, and qualifies only for a real scope "
-                    "limit. Do not substitute supports for these mechanisms."),
+                    "Emit every relation type required by analysis_contract. "
+                    "Use contradicts only for logical negation, reframes only "
+                    "when later evidence changes how the target is read, and "
+                    "qualifies only for a real scope limit."),
                 "interpretation_contradiction_target_invalid": (
                     "A change of activity or setting is not a contradiction. "
                     "The contradicted target must be an earlier general or "
@@ -321,11 +325,13 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "Remove identity resolution, modality, provenance, and "
                     "artifact bookkeeping from editing functions."),
                 "interpretation_plan_relation_unsupported": (
-                    "Select relation_supported=true only if a later bounded "
-                    "counterexample bears on the exact earlier assertion and "
-                    "identity alignment is evidenced. For an attributed "
-                    "belief, judge its embedded asserted content separately "
-                    "from the fact that the belief is held."),
+                    "Select relation_supported=true only if later bounded "
+                    "evidence either negates or reframes the exact earlier "
+                    "assertion and identity alignment is evidenced."),
+                "interpretation_plan_relation_type_invalid": (
+                    "Choose primary_relation_type=contradicts only for logical "
+                    "negation; otherwise choose reframes when the evidence "
+                    "changes how the earlier assertion is interpreted."),
                 "interpretation_plan_semantic_ids_invalid": (
                     "Use distinct supplied TP IDs: one target, one or more "
                     "counter propositions, and one scope limit."),
@@ -682,6 +688,8 @@ def validate_interpretation_plan(
         text_semantics: dict[str, Any]) -> None:
     if value.get("relation_supported") is not True:
         raise DNAV2Error("interpretation_plan_relation_unsupported")
+    if value.get("primary_relation_type") not in {"contradicts", "reframes"}:
+        raise DNAV2Error("interpretation_plan_relation_type_invalid")
     semantic_by_id = {
         str(row.get("semantic_id")): row
         for row in text_semantics.get("items") or []}
@@ -758,6 +766,7 @@ def compile_interpretation_plan(
     counter_ids = list(map(str, plan["counter_semantic_ids"]))
     target = semantic_by_id[target_id]
     scope = semantic_by_id[scope_id]
+    primary_relation_type = str(plan["primary_relation_type"])
     counter_text_refs = [
         str(ref) for semantic_id in counter_ids
         for ref in semantic_by_id[semantic_id].get("source_ids") or []]
@@ -786,12 +795,16 @@ def compile_interpretation_plan(
              "epistemic_role": "scope_limit", "scope": scope["scope"]},
         ],
         "relations": [
-            {"relation_id": "IR1", "type": "contradicts",
+            {"relation_id": "IR1", "type": primary_relation_type,
              "source_proposition_ids": ["P2"],
              "target_proposition_id": "P1", "source_ids": counter_refs,
-             "interpretation": "The later bounded evidence contradicts the "
-                               "absolute content of the earlier general "
-                               "assertion within the reference presentation.",
+             "interpretation": (
+                 "The later bounded evidence logically negates the exact "
+                 "earlier assertion within the reference presentation."
+                 if primary_relation_type == "contradicts" else
+                 "The later bounded evidence changes how the earlier "
+                 "overgeneralized assertion is interpreted within the "
+                 "reference presentation."),
              "confidence": plan["confidence"]},
             {"relation_id": "IR2", "type": "qualifies",
              "source_proposition_ids": ["P3"],
@@ -1165,7 +1178,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
 
         required_relations = set(map(str, (analysis_contract or {}).get(
             "required_relation_types") or []))
-        if {"contradicts", "qualifies"}.issubset(required_relations):
+        if "qualifies" in required_relations and required_relations.intersection(
+                {"contradicts", "reframes"}):
             compiled: dict[str, Any] = {}
 
             def validate_plan_post(value: dict[str, Any], attempt: int) -> None:

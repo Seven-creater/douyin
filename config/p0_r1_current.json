@@ -13,7 +13,7 @@
   ],
   "analysis_contract": {
     "required_roles": ["initial_assertion", "counterevidence", "scope_limit"],
-    "required_relation_types": ["contradicts", "qualifies"],
+    "required_relation_types": ["reframes", "qualifies"],
     "contradiction_target_modalities": ["T"],
     "contradiction_source_modalities": ["V", "T"],
     "qualification_source_modalities": ["T"],

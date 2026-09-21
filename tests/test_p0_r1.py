@@ -370,6 +370,7 @@ def test_interpretation_plan_compiles_canonical_relations() -> None:
     plan = {"relation_supported": True, "target_semantic_id": "TP1",
             "counter_semantic_ids": ["TP2"],
             "scope_semantic_id": "TP3",
+            "primary_relation_type": "contradicts",
             "opening_visual_support_ids": ["V0"],
             "later_visual_support_ids": ["V1"],
             "identity_support_ids": ["ID1"], "confidence": 0.9,
@@ -379,6 +380,9 @@ def test_interpretation_plan_compiles_canonical_relations() -> None:
     assert value["propositions"][0]["statement"] == "broad assertion"
     assert [row["type"] for row in value["relations"]] == [
         "contradicts", "qualifies"]
+    reframed = compile_interpretation_plan(
+        {**plan, "primary_relation_type": "reframes"}, reference, semantics)
+    assert reframed["relations"][0]["type"] == "reframes"
     swapped = {**plan, "opening_visual_support_ids": ["V1"],
                "later_visual_support_ids": ["V0"]}
     with pytest.raises(DNAV2Error) as excinfo:
