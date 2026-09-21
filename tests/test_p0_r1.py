@@ -8,9 +8,10 @@ import pytest
 
 from src.agentic_video import modality_isolation as isolation
 from src.agentic_video.creative_dna_v2 import (
-    DNAV2Error, build_writer_payload, normalize_interpretation_roles,
-    normalize_interpretation_text, publish_dna, validate_interpretation,
-    validate_editing_analysis, validate_interpretation_audit,
+    DNAV2Error, build_writer_payload, compile_interpretation_plan,
+    normalize_interpretation_roles, normalize_interpretation_text, publish_dna,
+    validate_interpretation, validate_editing_analysis,
+    validate_interpretation_audit, validate_interpretation_plan,
     validate_text_semantics)
 from src.agentic_video.migration_eval import freeze_candidate, judge_case
 from src.agentic_video.p0_r1 import (
@@ -342,6 +343,40 @@ def test_pure_text_statement_is_replaced_by_canonical_semantics() -> None:
     assert value["propositions"][0]["statement"] == "canonical proposition"
     assert value["canonical_text_normalization"]["changes"] == [
         {"proposition_id": "P1", "semantic_id": "TP1"}]
+
+
+def test_interpretation_plan_compiles_canonical_relations() -> None:
+    reference = {"accepted_claims": [
+        {"claim_id": "T1", "modality": "T", "interval": [0, 1]},
+        {"claim_id": "T2", "modality": "T", "interval": [2, 3]},
+        {"claim_id": "T3", "modality": "T", "interval": [4, 5]},
+        {"claim_id": "V0", "modality": "V", "interval": [0, 1],
+         "predicate": "visible_body_region"},
+        {"claim_id": "V1", "modality": "V", "interval": [2, 3],
+         "predicate": "performs_action"},
+        {"claim_id": "ID1", "modality": "V", "interval": [0, 3],
+         "predicate": "same_entity_as"}], "accepted_events": []}
+    semantics = {"items": [
+        {"semantic_id": "TP1", "source_ids": ["T1"],
+         "proposition": "broad assertion", "semantic_role": "assertion",
+         "scope": "general"},
+        {"semantic_id": "TP2", "source_ids": ["T2"],
+         "proposition": "bounded capability", "semantic_role": "assertion",
+         "scope": "specific"},
+        {"semantic_id": "TP3", "source_ids": ["T3"],
+         "proposition": "specific limit", "semantic_role": "assertion",
+         "scope": "specific"}]}
+    plan = {"relation_supported": True, "target_semantic_id": "TP1",
+            "counter_semantic_ids": ["TP2"],
+            "scope_semantic_id": "TP3",
+            "visual_support_ids": ["V0", "V1"],
+            "identity_support_ids": ["ID1"], "confidence": 0.9,
+            "reason_codes": []}
+    validate_interpretation_plan(plan, reference, semantics)
+    value = compile_interpretation_plan(plan, reference, semantics)
+    assert value["propositions"][0]["statement"] == "broad assertion"
+    assert [row["type"] for row in value["relations"]] == [
+        "contradicts", "qualifies"]
 
 
 def test_interpretation_semantic_audit_rejects_missing_relation() -> None:

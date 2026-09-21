@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v9"
+INTERPRETATION_VERSION = "reference_interpretation_v10"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -54,6 +54,26 @@ Return exactly one JSON object:
 
 Include every relation ID exactly once. Set pass=true only when every boolean in
 every check is true. JSON only. Input:
+"""
+
+INTERPRETATION_PLAN_PROMPT = """You are an evidence-grounded relation planner.
+Read the canonical text_semantics and compact source catalog. Select evidence;
+do not write narrative prose. Choose an earlier broad assertion as the exact
+target, later bounded capability propositions that bear on that target, a later
+specific limitation, visual observations from both the opening and later
+segments, and explicit same_entity_as claims connecting the subject.
+
+Return exactly one JSON object:
+{"relation_supported":true,"target_semantic_id":"TP1",
+"counter_semantic_ids":["TP2"],"scope_semantic_id":"TP3",
+"visual_support_ids":["V claim id"],
+"identity_support_ids":["same_entity_as claim id"],"confidence":0.0,
+"reason_codes":[]}
+
+Use TP IDs only for semantic fields and V claim IDs only for visual/identity
+fields. A different activity is not itself a contradiction. Set
+relation_supported=false when the exact target is not refuted or subject
+alignment is unsupported. JSON only. Input:
 """
 
 INTERPRETATION_PROMPT = """You are an evidence-grounded interpretation analyst.
@@ -290,6 +310,28 @@ def _ask_validated_object(*, runner: Any, prompt: str, max_new_tokens: int,
                     "Describe only information ordering and presentation. "
                     "Remove identity resolution, modality, provenance, and "
                     "artifact bookkeeping from editing functions."),
+                "interpretation_plan_relation_unsupported": (
+                    "Select relation_supported=true only if a later bounded "
+                    "counterexample bears on the exact earlier assertion and "
+                    "identity alignment is evidenced."),
+                "interpretation_plan_semantic_ids_invalid": (
+                    "Use distinct supplied TP IDs: one target, one or more "
+                    "counter propositions, and one scope limit."),
+                "interpretation_plan_target_invalid": (
+                    "Choose the earlier canonical assertion with broad scope, "
+                    "not a specific action or label."),
+                "interpretation_plan_temporal_order_invalid": (
+                    "The broad target must precede every counter proposition, "
+                    "and the scope limit must follow them."),
+                "interpretation_plan_visual_support_invalid": (
+                    "visual_support_ids must be supplied direct V observations; "
+                    "put same_entity_as V claims only in identity_support_ids."),
+                "interpretation_plan_identity_support_invalid": (
+                    "identity_support_ids must contain only supplied V-channel "
+                    "same_entity_as claims."),
+                "interpretation_plan_visual_coverage_invalid": (
+                    "Select relevant direct V observations from both the "
+                    "opening interval and later capability intervals."),
             }.get(last_error.reason_code, "Follow the declared schema exactly.")
             suffix = ("\nCORRECTION: the previous object failed gate "
                       f"{last_error.reason_code}. {guidance} Return a complete fresh JSON "
@@ -621,6 +663,127 @@ def normalize_interpretation_text(
         "rule": "single_pure_t_semantic_v1", "changes": changes}
 
 
+def validate_interpretation_plan(
+        value: dict[str, Any], validated_reference: dict[str, Any],
+        text_semantics: dict[str, Any]) -> None:
+    if value.get("relation_supported") is not True:
+        raise DNAV2Error("interpretation_plan_relation_unsupported")
+    semantic_by_id = {
+        str(row.get("semantic_id")): row
+        for row in text_semantics.get("items") or []}
+    target_id = str(value.get("target_semantic_id") or "")
+    scope_id = str(value.get("scope_semantic_id") or "")
+    counter_ids = list(map(str, value.get("counter_semantic_ids") or []))
+    if target_id not in semantic_by_id or scope_id not in semantic_by_id or \
+            not counter_ids or not set(counter_ids).issubset(semantic_by_id) or \
+            len(set(counter_ids)) != len(counter_ids) or \
+            target_id == scope_id or target_id in counter_ids or \
+            scope_id in counter_ids:
+        raise DNAV2Error("interpretation_plan_semantic_ids_invalid")
+    target = semantic_by_id[target_id]
+    if target.get("semantic_role") != "assertion" or \
+            target.get("scope") not in {"general", "domain_bounded"}:
+        raise DNAV2Error("interpretation_plan_target_invalid")
+    claims = {str(row.get("claim_id")): row
+              for row in validated_reference.get("accepted_claims") or []}
+
+    def semantic_start(semantic_id: str) -> float:
+        starts = [float((claims.get(str(ref), {}).get("interval") or [1e9])[0])
+                  for ref in semantic_by_id[semantic_id].get("source_ids") or []]
+        return min(starts or [1e9])
+
+    target_start = semantic_start(target_id)
+    scope_start = semantic_start(scope_id)
+    counter_starts = [semantic_start(item) for item in counter_ids]
+    if not all(target_start < start < scope_start for start in counter_starts):
+        raise DNAV2Error("interpretation_plan_temporal_order_invalid")
+    visual_ids = list(map(str, value.get("visual_support_ids") or []))
+    identity_ids = list(map(str, value.get("identity_support_ids") or []))
+    if len(set(visual_ids)) != len(visual_ids) or \
+            len(set(identity_ids)) != len(identity_ids) or \
+            not visual_ids or not identity_ids:
+        raise DNAV2Error("interpretation_plan_visual_support_invalid")
+    if any(claims.get(item, {}).get("modality") != "V" or
+           claims.get(item, {}).get("predicate") == "same_entity_as"
+           for item in visual_ids):
+        raise DNAV2Error("interpretation_plan_visual_support_invalid")
+    if any(claims.get(item, {}).get("modality") != "V" or
+           claims.get(item, {}).get("predicate") != "same_entity_as"
+           for item in identity_ids):
+        raise DNAV2Error("interpretation_plan_identity_support_invalid")
+    target_refs = list(map(str, target.get("source_ids") or []))
+    target_intervals = [claims.get(item, {}).get("interval") or []
+                        for item in target_refs]
+    opening_end = max((float(row[1]) for row in target_intervals
+                       if len(row) == 2), default=target_start)
+    visual_starts = [float((claims[item].get("interval") or [1e9])[0])
+                     for item in visual_ids]
+    if not any(start <= opening_end for start in visual_starts) or \
+            not any(start > opening_end for start in visual_starts):
+        raise DNAV2Error("interpretation_plan_visual_coverage_invalid")
+    confidence = value.get("confidence")
+    if not isinstance(confidence, (int, float)) or not 0 < float(confidence) <= 1:
+        raise DNAV2Error("interpretation_plan_confidence_invalid")
+
+
+def compile_interpretation_plan(
+        plan: dict[str, Any], validated_reference: dict[str, Any],
+        text_semantics: dict[str, Any]) -> dict[str, Any]:
+    semantic_by_id = {
+        str(row.get("semantic_id")): row
+        for row in text_semantics.get("items") or []}
+    target_id = str(plan["target_semantic_id"])
+    scope_id = str(plan["scope_semantic_id"])
+    counter_ids = list(map(str, plan["counter_semantic_ids"]))
+    target = semantic_by_id[target_id]
+    scope = semantic_by_id[scope_id]
+    counter_text_refs = [
+        str(ref) for semantic_id in counter_ids
+        for ref in semantic_by_id[semantic_id].get("source_ids") or []]
+    counter_refs = list(dict.fromkeys(
+        counter_text_refs + list(map(str, plan["visual_support_ids"])) +
+        list(map(str, plan["identity_support_ids"]))))
+    target_refs = list(map(str, target.get("source_ids") or []))
+    scope_refs = list(map(str, scope.get("source_ids") or []))
+    return {
+        "propositions": [
+            {"proposition_id": "P1", "statement": target["proposition"],
+             "source_ids": target_refs, "semantic_ids": [target_id],
+             "epistemic_role": "initial_assertion",
+             "scope": target["scope"]},
+            {"proposition_id": "P2",
+             "statement": "The sequence presents one identity-aligned subject "
+                          "in the opening category context and supplies multiple "
+                          "bounded capability claims and observable actions for "
+                          "that subject.",
+             "source_ids": counter_refs, "semantic_ids": counter_ids,
+             "epistemic_role": "counterevidence",
+             "scope": "domain_bounded"},
+            {"proposition_id": "P3", "statement": scope["proposition"],
+             "source_ids": scope_refs, "semantic_ids": [scope_id],
+             "epistemic_role": "scope_limit", "scope": scope["scope"]},
+        ],
+        "relations": [
+            {"relation_id": "IR1", "type": "contradicts",
+             "source_proposition_ids": ["P2"],
+             "target_proposition_id": "P1", "source_ids": counter_refs,
+             "interpretation": "The later bounded evidence contradicts the "
+                               "exact earlier general assertion as presented.",
+             "confidence": plan["confidence"]},
+            {"relation_id": "IR2", "type": "qualifies",
+             "source_proposition_ids": ["P3"],
+             "target_proposition_id": "P2", "source_ids": scope_refs,
+             "interpretation": "The closing limitation narrows the capability "
+                               "range established by the counterevidence.",
+             "confidence": plan["confidence"]},
+        ],
+        "limitations": [
+            "The contradiction is a relation in the reference presentation; "
+            "the evidence does not establish universal capability."],
+        "interpretation_plan": plan,
+    }
+
+
 def validate_interpretation_audit(value: dict[str, Any],
                                   interpretation: dict[str, Any]) -> None:
     relation_ids = _ids(interpretation.get("relations") or [], "relation_id")
@@ -927,12 +1090,37 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             validate_interpretation(
                 value, validated_reference, analysis_contract, text_semantics)
 
-        proposed_interpretation = _ask_validated_object(
-            runner=runner, prompt=INTERPRETATION_PROMPT + base,
-            max_new_tokens=3072,
-            validator=validate_interpretation_candidate,
-            post_validator=semantic_post_validator, trace_dir=trace_dir,
-            trace_name="interpretation", attempts=5)
+        required_relations = set(map(str, (analysis_contract or {}).get(
+            "required_relation_types") or []))
+        if {"contradicts", "qualifies"}.issubset(required_relations):
+            compiled: dict[str, Any] = {}
+
+            def validate_plan_post(value: dict[str, Any], attempt: int) -> None:
+                candidate = compile_interpretation_plan(
+                    value, validated_reference, text_semantics)
+                validate_interpretation_candidate(candidate)
+                audit_result["semantic_audit"] = audit_interpretation(
+                    runner=runner,
+                    validated_view=_interpretation_view(validated_reference),
+                    text_semantics=text_semantics, interpretation=candidate,
+                    trace_dir=trace_dir, attempt=attempt)
+                compiled["interpretation"] = candidate
+
+            _ask_validated_object(
+                runner=runner, prompt=INTERPRETATION_PLAN_PROMPT + base,
+                max_new_tokens=1536,
+                validator=lambda value: validate_interpretation_plan(
+                    value, validated_reference, text_semantics),
+                post_validator=validate_plan_post, trace_dir=trace_dir,
+                trace_name="interpretation_plan", attempts=5)
+            proposed_interpretation = compiled["interpretation"]
+        else:
+            proposed_interpretation = _ask_validated_object(
+                runner=runner, prompt=INTERPRETATION_PROMPT + base,
+                max_new_tokens=3072,
+                validator=validate_interpretation_candidate,
+                post_validator=semantic_post_validator, trace_dir=trace_dir,
+                trace_name="interpretation", attempts=5)
         _attach_interpretation_provenance(
             proposed_interpretation, validated_reference)
         interpretation = {
