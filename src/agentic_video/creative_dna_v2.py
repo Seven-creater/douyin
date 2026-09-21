@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from src.agentic_video.manifest import json_hash
 
-INTERPRETATION_VERSION = "reference_interpretation_v6"
+INTERPRETATION_VERSION = "reference_interpretation_v7"
 EDITING_ANALYSIS_VERSION = "editing_analysis_v3"
 TEXT_SEMANTICS_VERSION = "text_semantics_v3"
 DNA_AUDIT_VERSION = "creative_dna_audit_v2"
@@ -675,6 +675,36 @@ def _analysis_view(validated_reference: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _interpretation_view(validated_reference: dict[str, Any]) -> dict[str, Any]:
+    """Expose the minimum provenance-bearing catalog needed for reasoning."""
+    claims = []
+    for row in validated_reference.get("accepted_claims") or []:
+        compact = {
+            "source_id": row.get("claim_id"),
+            "modality": row.get("modality"),
+            "subject": row.get("subject"),
+            "predicate": row.get("predicate"),
+            "interval": row.get("interval"),
+        }
+        # T meaning is supplied only by text_semantics, avoiding two competing
+        # representations of the same text-channel claim.
+        if row.get("modality") != "T":
+            compact["object"] = row.get("object")
+            compact["visibility"] = row.get("visibility")
+        claims.append(compact)
+    events = [{
+        key: row.get(key) for key in (
+            "event_id", "participants", "action_claim_ids",
+            "outcome_claim_ids", "context_claim_ids", "ordering", "interval")
+    } for row in validated_reference.get("accepted_events") or []]
+    return {
+        "schema_version": validated_reference.get("schema_version"),
+        "artifact_sha": validated_reference.get("artifact_sha"),
+        "source_catalog": claims,
+        "events": events,
+    }
+
+
 def compute_timeline_measurements(validated_reference: dict[str, Any]) -> dict[str, Any]:
     timeline = validated_reference.get("deterministic_timeline") or {}
     segments = timeline.get("segments") or []
@@ -826,7 +856,7 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
             encoding="utf-8")
 
     interpretation_input = {
-        "validated_reference": view,
+        "validated_reference": _interpretation_view(validated_reference),
         "text_semantics": text_semantics,
         "analysis_contract": analysis_contract or {},
     }
@@ -856,7 +886,8 @@ def run_independent_analyses(validated_reference: dict[str, Any], *,
 
         def semantic_post_validator(value: dict[str, Any], attempt: int) -> None:
             audit_result["semantic_audit"] = audit_interpretation(
-                runner=runner, validated_view=view,
+                runner=runner,
+                validated_view=_interpretation_view(validated_reference),
                 text_semantics=text_semantics, interpretation=value,
                 trace_dir=trace_dir, attempt=attempt)
 
