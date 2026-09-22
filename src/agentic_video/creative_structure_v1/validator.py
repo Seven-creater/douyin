@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from src.agentic_video.creative_structure_v1.minimizer import removable_item_ids
 from src.agentic_video.creative_structure_v1.schema import (
     ANTI_INVARIANT_CATEGORIES,
     AUDIT_SCHEMA_VERSION,
@@ -453,6 +454,9 @@ def validate_structure_audit(value: dict[str, Any]) -> None:
         if supported or any(presence.values()):
             _fail("blocked_has_supported_content")
 
+    removable = sorted(removable_item_ids(audit))
+    if removable:
+        _fail("structure_not_minimal", removable)
     _hash_matches(audit, "audit_sha_invalid")
 
 

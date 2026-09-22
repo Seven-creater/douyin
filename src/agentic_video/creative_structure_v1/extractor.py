@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.agentic_video.creative_structure_v1.minimizer import minimize_structure
 from src.agentic_video.creative_structure_v1.publisher import publish_structure_spec
 from src.agentic_video.creative_structure_v1.schema import (
     ANTI_INVARIANT_CATEGORIES,
@@ -47,6 +48,14 @@ Do not describe what happened in the reference. Describe only the necessary
 relations and information-state changes that another work may realize with
 different people, domains, settings, and events.
 
+Perform a minimality reduction inside this same call before returning JSON.
+Internally test each proposed item by asking whether deleting it still preserves
+the supported relation, whether it survives all three positive cross-domain
+profiles, and whether it is only one replaceable realization. Return only the
+smallest sufficient relation graph, not the richer candidate graph or the
+profile instantiations. The supplied negative profile must not pass merely
+because its surface resembles the reference.
+
 The Structural Schema is a necessary relation representation of the reference
 effect; it is not expected to cover a complete narrative. A downstream
 screenwriting skill, not this task, binds it to concrete characters, domains,
@@ -65,6 +74,8 @@ audit_annex.
 
 abstraction_confidence and every relation/constraint confidence are JSON
 numbers from 0.0 through 1.0, never labels.
+Missing confidence is invalid. In particular, every editing constraint must
+end with a numeric confidence field even when its source_strength is measured.
 
 dimension_status has exactly these keys in this order:
 structural_schema, information_state_arc, generation_constraints,
@@ -130,7 +141,9 @@ binding_slots items have exactly:
 slot_id, slot_type, bound_by, constraints.
 slot_type is domain, entity_role, setting, surface_realization, evidence_form,
 tone, or visual_motif. bound_by is always downstream_skill. constraints must be
-cross-domain and cannot preserve source surface content.
+non-empty, cross-domain, and cannot preserve source surface content. Do not
+emit an unconstrained placeholder. The list may be empty when downstream free
+realization needs no additional invariant.
 
 audit_annex is exactly {source_bindings, anti_invariants}. Every element,
 relation, information state, generation constraint, editing constraint, and
@@ -139,6 +152,10 @@ reference_specific_summary. Concrete reference detail is permitted only in
 reference_specific_summary. Each anti_invariants row has binding_id, category,
 source_refs; category is entity, domain, setting, physical_form, literal_event,
 wording, or visual_motif. Evidence IDs occur only in support_refs/source_refs.
+Every support_refs/source_refs value must come verbatim from
+verified_r2_bundle.evidence_catalog[].evidence_id. Never use a nested
+supported_by ID, an abstract ID minted by this response, or a binding-slot ID
+as source evidence.
 
 On-screen statements remain attributed content, not independently verified
 physical facts. Identity alignment, raw claims, paths, prompts, traces, section
@@ -154,6 +171,12 @@ Do not rewrite, repair, complete, or improve it. Do not reward a familiar story
 template. Check each item for: evidence grounding, relation entailment,
 domain-independent abstraction, replaceability across the three positive
 profiles, rejection of the surface-lure negative, and constraint validity.
+For each item, also ask whether deleting it would preserve the supported core
+relation in all three positive profiles. If yes, mark transfer_valid false; a
+richer coherent graph is not automatically a minimal transferable graph. A
+generation constraint is invalid when it requires a concrete entity, action,
+achievement, or outcome implementation instead of preserving its referenced
+abstract relation, even if that event is supported by the reference.
 
 Return exactly:
 {
@@ -318,8 +341,16 @@ def build_verified_bundle(narrative: dict[str, Any], editing: dict[str, Any]
         "schema_version": "r2_verified_bundle_for_structure_v1",
         "input_artifacts": _input_artifacts(narrative, editing),
         "narrative_interpretation": {
-            "narrative_units": copy.deepcopy(units),
-            "relations": copy.deepcopy(relations),
+            "narrative_units": [
+                {key: copy.deepcopy(row[key]) for key in (
+                    "unit_id", "section_ids", "summary")}
+                for row in units
+            ],
+            "relations": [
+                {key: copy.deepcopy(row[key]) for key in (
+                    "relation_id", "type", "source", "target", "reason")}
+                for row in relations
+            ],
             "limitations": copy.deepcopy(narrative.get("limitations") or []),
         },
         "editing_grammar": {
@@ -378,7 +409,17 @@ def extract_structure_plan(runner: Any, narrative: dict[str, Any],
     stage = Path(trace_dir) / "01_extraction"
     stage.mkdir(parents=True, exist_ok=True)
     bundle = build_verified_bundle(narrative, editing)
-    payload = {"verified_r2_bundle": bundle}
+    profiles = audit_transfer_profiles()
+    payload = {
+        "verified_r2_bundle": bundle,
+        "transfer_profiles": profiles,
+        "minimality_policy": {
+            "target": "smallest_sufficient_transferable_relation_graph",
+            "delete_replaceable_realizations": True,
+            "preserve_supported_core_relations": True,
+            "new_model_calls": 0,
+        },
+    }
     prompt = STRUCTURE_EXTRACTION_PROMPT + json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"))
     _write_json(stage / "request.json", {
@@ -398,7 +439,7 @@ def extract_structure_plan(runner: Any, narrative: dict[str, Any],
         draft = _parse_object(raw)
         if set(draft) != _DRAFT_KEYS:
             raise StructureExtractionError("extraction_response_keys_invalid")
-        candidate = {
+        candidate_before_minimization = {
             "schema_version": AUDIT_SCHEMA_VERSION,
             **copy.deepcopy(draft),
             "input_artifacts": _input_artifacts(narrative, editing),
@@ -406,7 +447,13 @@ def extract_structure_plan(runner: Any, narrative: dict[str, Any],
                 key: False for key in VALIDATION_RECORD_KEYS
             },
         }
-        candidate["artifact_sha"] = json_hash(candidate)
+        candidate_before_minimization["artifact_sha"] = json_hash(
+            candidate_before_minimization)
+        candidate, minimization = minimize_structure(
+            candidate_before_minimization, transfer_profiles=profiles)
+        _write_json(stage / "candidate_before_minimization.json",
+                    candidate_before_minimization)
+        _write_json(stage / "minimization.json", minimization)
         validate_structure_audit(candidate)
         validate_abstraction_boundary(candidate, bundle)
         known = {row["evidence_id"] for row in bundle["evidence_catalog"]}

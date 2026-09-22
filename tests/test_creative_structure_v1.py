@@ -488,9 +488,142 @@ def test_r2_bundle_excludes_raw_claims_identity_and_old_dna_scaffolding() -> Non
     serialized = repr(bundle).lower()
     assert "accepted_claims" not in serialized
     assert "identity" not in serialized
+    assert "s1_t01" not in serialized
+    assert "s2_v01" not in serialized
     assert "narrative_functions" not in serialized
     assert "mechanism_graph" not in serialized
     assert bundle["evidence_catalog"][-1]["source_strength"] == "measured"
+
+
+def test_minimizer_removes_unused_graph_items_and_empty_slots() -> None:
+    from src.agentic_video.creative_structure_v1.minimizer import (
+        minimize_structure,
+    )
+    from src.agentic_video.creative_structure_v1.transfer_test import (
+        audit_transfer_profiles,
+    )
+
+    audit = _complete_audit()
+    audit["structural_schema"]["elements"].append({
+        "element_id": "V3",
+        "kind": "proposition",
+        "abstract_role": "a replaceable realization detail",
+        "support_refs": ["N2"],
+    })
+    audit["structural_schema"]["relations"].append({
+        "relation_id": "REL_UNUSED",
+        "relation_kind": "temporal",
+        "predicate": "a replaceable realization follows another realization",
+        "arguments": [
+            {"role": "detail", "element_id": "V3"},
+            {"role": "context", "element_id": "V2"},
+        ],
+        "preconditions": [],
+        "effects": [],
+        "support_refs": ["R1"],
+        "confidence": 0.7,
+    })
+    audit["binding_slots"].append({
+        "slot_id": "B_EMPTY",
+        "slot_type": "setting",
+        "bound_by": "downstream_skill",
+        "constraints": [],
+    })
+    audit["audit_annex"]["source_bindings"].extend([
+        {
+            "abstract_id": "V3",
+            "source_refs": ["N2"],
+            "reference_specific_summary": "a replaceable source detail",
+        },
+        {
+            "abstract_id": "REL_UNUSED",
+            "source_refs": ["R1"],
+            "reference_specific_summary": "a nonessential source sequence",
+        },
+        {
+            "abstract_id": "B_EMPTY",
+            "source_refs": ["N2"],
+            "reference_specific_summary": "an unconstrained placeholder",
+        },
+    ])
+    audit = _finalize(audit)
+
+    minimized, report = minimize_structure(
+        audit, transfer_profiles=audit_transfer_profiles())
+
+    assert [row["relation_id"] for row in minimized["structural_schema"][
+        "relations"]] == ["REL1"]
+    assert [row["element_id"] for row in minimized["structural_schema"][
+        "elements"]] == ["V1", "V2"]
+    assert [row["slot_id"] for row in minimized["binding_slots"]] == ["B1"]
+    assert report["removed_ids"] == ["B_EMPTY", "REL_UNUSED", "V3"]
+    assert report["positive_transfer_profile_ids"] == [
+        "TRANSFER_A", "TRANSFER_B", "TRANSFER_C"]
+
+
+def test_validator_rejects_a_nonminimal_structure() -> None:
+    from src.agentic_video.creative_structure_v1.validator import (
+        StructureValidationError,
+        validate_structure_audit,
+    )
+
+    audit = _complete_audit()
+    audit["structural_schema"]["elements"].append({
+        "element_id": "V_UNUSED",
+        "kind": "proposition",
+        "abstract_role": "an unused replaceable detail",
+        "support_refs": ["N2"],
+    })
+    audit["audit_annex"]["source_bindings"].append({
+        "abstract_id": "V_UNUSED",
+        "source_refs": ["N2"],
+        "reference_specific_summary": "a detail not used by any relation",
+    })
+    audit = _finalize(audit)
+
+    with pytest.raises(StructureValidationError, match="structure_not_minimal"):
+        validate_structure_audit(audit)
+
+
+def test_editing_constraint_confidence_remains_an_explicit_contract() -> None:
+    from src.agentic_video.creative_structure_v1.extractor import (
+        STRUCTURE_EXTRACTION_PROMPT,
+    )
+    from src.agentic_video.creative_structure_v1.validator import (
+        StructureValidationError,
+        validate_structure_audit,
+    )
+
+    audit = _complete_audit()
+    audit["editing_schema"]["constraints"][0].pop("confidence")
+    audit = _finalize(audit)
+
+    with pytest.raises(StructureValidationError,
+                       match="editing_constraint_keys_invalid"):
+        validate_structure_audit(audit)
+    assert "Missing confidence is invalid" in STRUCTURE_EXTRACTION_PROMPT
+
+
+def test_extraction_receives_transfer_profiles_before_minimization(tmp_path) -> None:
+    from src.agentic_video.creative_structure_v1.extractor import (
+        extract_structure_plan,
+    )
+
+    narrative, editing = _r2_sources()
+    runner = _Runner([_extraction_response()])
+
+    candidate, _, _ = extract_structure_plan(
+        runner, narrative, editing, trace_dir=tmp_path)
+    request = __import__("json").loads(
+        (tmp_path / "01_extraction/request.json").read_text(encoding="utf-8"))
+
+    profiles = request["payload"]["transfer_profiles"]
+    assert len([row for row in profiles if row["expected"] == "preserve"]) == 3
+    assert len([row for row in profiles if row["expected"] == "reject"]) == 1
+    assert request["payload"]["minimality_policy"]["new_model_calls"] == 0
+    assert candidate["structural_schema"]["relations"][0][
+        "relation_id"] == "REL1"
+    assert (tmp_path / "01_extraction/minimization.json").is_file()
 
 
 def test_dynamic_abstraction_boundary_rejects_source_surface_copy() -> None:
