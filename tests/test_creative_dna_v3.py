@@ -242,6 +242,8 @@ def test_blocked_audit_never_publishes() -> None:
          "partial_missing_unsupported_dimensions"),
         (lambda value: value.update(abstraction_confidence=1.1),
          "abstraction_confidence_invalid"),
+        (lambda value: value.update(abstraction_confidence="high"),
+         "abstraction_confidence_invalid"),
     ],
 )
 def test_status_and_confidence_mismatches_are_rejected(mutate, reason: str) -> None:
@@ -452,6 +454,26 @@ def _extraction_response() -> dict:
     for key in ("schema_version", "input_artifacts", "validation_record",
                 "artifact_sha"):
         audit.pop(key)
+    audit["narrative_functions"] = [
+        {
+            "function_id": "NF1",
+            "source_unit_ids": ["N1"],
+            "function_type": "establish_information",
+            "abstract_meaning": (
+                "makes a proposition available for interpretation"
+            ),
+            "mechanism_node_ids": ["M1"],
+        },
+        {
+            "function_id": "NF2",
+            "source_unit_ids": ["N2"],
+            "function_type": "supply_evidence",
+            "abstract_meaning": (
+                "supplies observable evidence bearing on that proposition"
+            ),
+            "mechanism_node_ids": ["M2"],
+        },
+    ]
     return audit
 
 
@@ -508,6 +530,7 @@ def test_r2c2_calls_each_model_once_and_writes_publish_trace(tmp_path) -> None:
     for relative in (
         "01_extraction/request.json",
         "01_extraction/raw_response.txt",
+        "01_extraction/narrative_functions.json",
         "01_extraction/candidate.json",
         "02_independent_audit/request.json",
         "02_independent_audit/raw_response.txt",
@@ -615,3 +638,138 @@ def test_abstraction_boundary_accepts_cross_domain_mechanism_roles() -> None:
     narrative, editing = _r2_sources()
     validate_abstraction_boundary(
         _complete_audit(), build_r2_bundle(narrative, editing))
+
+
+def test_extraction_requires_internal_narrative_function_bridge(tmp_path) -> None:
+    from src.agentic_video.creative_dna_v3.extractor import (
+        DNAExtractionError,
+        extract_creative_dna,
+    )
+
+    narrative, editing = _r2_sources()
+    response = _extraction_response()
+    response.pop("narrative_functions")
+
+    with pytest.raises(DNAExtractionError, match="extraction_response_keys_invalid"):
+        extract_creative_dna(
+            _Runner([response]), narrative, editing, trace_dir=tmp_path)
+
+
+def test_extraction_strips_narrative_functions_from_frozen_candidate(tmp_path) -> None:
+    import json
+
+    from src.agentic_video.creative_dna_v3.extractor import extract_creative_dna
+
+    narrative, editing = _r2_sources()
+    candidate, _, _ = extract_creative_dna(
+        _Runner([_extraction_response()]), narrative, editing,
+        trace_dir=tmp_path,
+    )
+
+    assert "narrative_functions" not in candidate
+    mapping = json.loads(
+        (tmp_path / "01_extraction/narrative_functions.json").read_text(
+            encoding="utf-8")
+    )
+    assert [row["function_id"] for row in mapping] == ["NF1", "NF2"]
+
+
+def test_narrative_function_bridge_rejects_unknown_unit_or_unmapped_node() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_narrative_function_bridge,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    bundle = build_r2_bundle(narrative, editing)
+    response = _extraction_response()
+    functions = response.pop("narrative_functions")
+    candidate = _complete_audit()
+
+    functions[0]["source_unit_ids"] = ["UNKNOWN_UNIT"]
+    with pytest.raises(AbstractionBoundaryError,
+                       match="narrative_function_source_unresolved"):
+        validate_narrative_function_bridge(functions, candidate, bundle)
+
+    functions = _extraction_response().pop("narrative_functions")
+    functions.pop()
+    with pytest.raises(AbstractionBoundaryError,
+                       match="mechanism_node_without_narrative_function"):
+        validate_narrative_function_bridge(functions, candidate, bundle)
+
+
+def test_narrative_function_bridge_rejects_id_collision_or_ungrounded_mapping() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_narrative_function_bridge,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    bundle = build_r2_bundle(narrative, editing)
+    candidate = _complete_audit()
+    functions = _extraction_response().pop("narrative_functions")
+
+    functions[0]["function_id"] = "M1"
+    with pytest.raises(AbstractionBoundaryError,
+                       match="narrative_function_id_collision"):
+        validate_narrative_function_bridge(functions, candidate, bundle)
+
+    functions = _extraction_response().pop("narrative_functions")
+    functions[0]["source_unit_ids"] = ["N2"]
+    with pytest.raises(AbstractionBoundaryError,
+                       match="narrative_function_mapping_ungrounded"):
+        validate_narrative_function_bridge(functions, candidate, bundle)
+
+
+def test_event_constraint_must_realize_a_mechanism_relation() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_abstraction_boundary,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    candidate = _complete_audit()
+    candidate["event_constraints"][0]["satisfies_edge_ids"] = []
+    candidate = _finalize(candidate)
+
+    with pytest.raises(AbstractionBoundaryError,
+                       match="event_constraint_without_mechanism_relation"):
+        validate_abstraction_boundary(candidate, build_r2_bundle(narrative, editing))
+
+
+def test_experience_arc_requires_edge_caused_information_updates() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_abstraction_boundary,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    candidate = _complete_audit()
+    candidate["experience_arc"].append({
+        "state_id": "X2",
+        "order": 2,
+        "state_role": "reframe",
+        "information_state": "an updated interpretation becomes available",
+        "caused_by_edge_ids": [],
+        "support_refs": ["N2", "R1"],
+    })
+    candidate = _finalize(candidate)
+
+    with pytest.raises(AbstractionBoundaryError,
+                       match="experience_update_without_mechanism_edge"):
+        validate_abstraction_boundary(candidate, build_r2_bundle(narrative, editing))
+
+
+def test_editing_only_partial_allows_empty_narrative_function_bridge() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        validate_narrative_function_bridge,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    validate_narrative_function_bridge(
+        [], _editing_only_partial(), build_r2_bundle(narrative, editing))

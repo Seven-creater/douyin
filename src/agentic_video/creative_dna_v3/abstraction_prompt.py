@@ -14,12 +14,19 @@ only cross-domain relations that are supported by supplied evidence IDs.
 Narrative Units and Narrative Relations are intermediate evidence, not DNA
 entities. Do not copy them into mechanism_graph nodes, do not reuse their IDs
 as output IDs, and do not use narrative_unit or narrative_relation as a node
-kind. Internally map each relevant input item to a semantic role, then build a
-new abstract mechanism graph from those roles. Output IDs must be newly minted
-and globally distinct across nodes, edges, experience states, constraints, and
-free slots. A node abstract_role must describe a cross-domain mechanism entity;
-it cannot be a section summary or a one-word function label such as establish,
-develop, or reveal.
+kind. Perform one explicit transformation inside this response:
+
+1. Select only Narrative Units needed by a supported narrative mechanism and
+   map them to audit-only narrative_functions.
+2. Describe the domain-independent function contributed by each selected unit.
+3. Build mechanism_graph nodes from those functions, never from the unit's
+   reference event or section summary.
+
+This is still one Structural Abstraction call, not a request for another agent.
+Output IDs must be newly minted and globally distinct across functions, nodes,
+edges, experience states, constraints, and free slots. A node abstract_role must
+describe a cross-domain mechanism entity; it cannot be a section summary or a
+one-word function label such as establish, develop, or reveal.
 
 Forbidden output shape:
 - an input N/R/EF/EP ID reused as an abstract item ID;
@@ -30,6 +37,9 @@ Forbidden output shape:
 
 Required boundary:
 - evidence IDs appear only in support_refs/source_refs;
+- narrative_functions form an audit-only bridge and are removed before the
+  frozen creative_dna_audit_v3 candidate is built;
+- every mechanism node is linked from at least one narrative_function;
 - mechanism nodes represent information states, propositions, evidence roles,
   scope boundaries, or resolution states;
 - publishable prose states what relation can hold in a new domain, not what
@@ -38,9 +48,12 @@ Required boundary:
   source_refs entry comes from evidence_catalog rather than input_artifact IDs.
 
 Return exactly these top-level fields:
-dna_status, abstraction_confidence, unsupported_dimensions, mechanism_graph,
-experience_arc, event_constraints, editing_constraints, free_slots,
-source_bindings, anti_invariants.
+dna_status, abstraction_confidence, unsupported_dimensions,
+narrative_functions, mechanism_graph, experience_arc, event_constraints,
+editing_constraints, free_slots, source_bindings, anti_invariants.
+
+abstraction_confidence and every edge/constraint confidence must be a JSON
+number from 0.0 through 1.0. Never use labels such as low, medium, or high.
 
 dna_status is complete, partial, or blocked. The dimensions, in this exact
 order, are narrative_mechanism, experience_arc, event_constraints,
@@ -58,14 +71,38 @@ mechanism, source, target, condition, support_refs, confidence. Allowed
 mechanisms: establishes, supports, contradicts, reframes, qualifies, enables,
 reveals, accumulates, precedes, orders_disclosure.
 
+narrative_functions is an audit-only list. Each item has exactly function_id,
+source_unit_ids, function_type, abstract_meaning, mechanism_node_ids.
+function_id is newly minted. source_unit_ids is a non-empty list containing only
+input Narrative Unit IDs. function_type is a concise, domain-neutral label
+chosen from the evidence rather than a required ontology. abstract_meaning says
+what information-level or evidence-level purpose the units jointly contribute
+without naming their people, domain, activity, physical form, wording, setting,
+or motif. mechanism_node_ids is a non-empty list of resulting node IDs. Every
+mechanism node must be linked by at least one item. If no narrative mechanism is
+supported, return [] and do not invent nodes. Narrative relations may support
+edges but are not themselves narrative_functions.
+
 experience_arc items use state_id, order, state_role, information_state,
-caused_by_edge_ids, support_refs. state_role is establish, develop, reveal,
-reframe, qualify, release, or other. This describes presented information,
-not a guaranteed audience psychology.
+caused_by_edge_ids, support_refs. It represents ordered information states, not
+a prescribed sequence of story beats. information_state describes what
+interpretive information is available at that point, without narrating a plot
+event. state_role is only a coarse annotation chosen from establish, develop,
+reveal, reframe, qualify, release, or other; no role or role sequence is
+required. The first state may have no causing edge. Every later state must name
+at least one graph edge that caused the information-state update. The arc may be
+empty or partial when the evidence does not support it. It never asserts a
+guaranteed audience psychology.
 
 event_constraints items use constraint_id, obligation, abstract_role,
 satisfies_node_ids, satisfies_edge_ids, must_precede_constraint_ids,
 support_refs, confidence. obligation is required, preferred, or prohibited.
+Each item constrains a newly bound event to realize a cross-domain mechanism
+relation; it must cite at least one satisfies_edge_ids entry. It must not require
+the source action, achievement, activity list, setting, physical form, or other
+replaceable plot event. If no such relational constraint is supported, return
+[] and mark event_constraints unsupported rather than preserving a source plot
+step.
 
 editing_constraints items use constraint_id, level, obligation, dimension,
 operator, phase_refs, source_strength, transfer_policy, support_refs,

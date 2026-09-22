@@ -12,6 +12,7 @@ from src.agentic_video.creative_dna_v3.abstraction_prompt import (
 )
 from src.agentic_video.creative_dna_v3.abstraction_validator import (
     validate_abstraction_boundary,
+    validate_narrative_function_bridge,
 )
 from src.agentic_video.creative_dna_v3.schema import (
     AUDIT_SCHEMA_VERSION,
@@ -25,6 +26,7 @@ from src.agentic_video.manifest import json_hash
 
 _DRAFT_KEYS = {
     "dna_status", "abstraction_confidence", "unsupported_dimensions",
+    "narrative_functions",
     "mechanism_graph", "experience_arc", "event_constraints",
     "editing_constraints", "free_slots", "source_bindings", "anti_invariants",
 }
@@ -213,6 +215,8 @@ def extract_creative_dna(runner: Any, narrative: dict[str, Any],
         draft = _parse_object(raw)
         if set(draft) != _DRAFT_KEYS:
             raise DNAExtractionError("extraction_response_keys_invalid")
+        narrative_functions = draft.pop("narrative_functions")
+        _write_json(stage / "narrative_functions.json", narrative_functions)
         candidate = {
             "schema_version": AUDIT_SCHEMA_VERSION,
             **copy.deepcopy(draft),
@@ -221,6 +225,8 @@ def extract_creative_dna(runner: Any, narrative: dict[str, Any],
         }
         candidate["artifact_sha"] = json_hash(candidate)
         validate_dna_audit(candidate)
+        validate_narrative_function_bridge(
+            narrative_functions, candidate, bundle)
         validate_abstraction_boundary(candidate, bundle)
         known = {row["evidence_id"] for row in bundle["evidence_catalog"]}
         used = {
