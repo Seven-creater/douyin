@@ -12,9 +12,9 @@ from src.agentic_video.manifest import json_hash
 
 MEASURED_EDITING_VERSION = "measured_editing_facts_v4"
 STRUCTURAL_EDITING_VERSION = "measured_structural_editing_grammar_v1"
-EDITING_PATTERN_VERSION = "semantic_editing_patterns_v1"
+EDITING_PATTERN_VERSION = "semantic_editing_patterns_v2"
 EDITING_FUNCTION_VERSION = "editing_functions_v2"
-EDITING_GRAMMAR_VERSION = "editing_grammar_v3"
+EDITING_GRAMMAR_VERSION = "editing_grammar_v4"
 
 PATTERN_TYPES = {
     "rapid_montage", "reaction_cut", "contrast_cut", "delayed_reveal",
@@ -25,9 +25,17 @@ FUNCTION_TYPES = {
     "establish", "withhold", "escalate", "demonstrate", "accumulate",
     "reveal", "reframe", "contrast", "release", "humanize",
 }
-PATTERN_REQUIREMENTS = {
-    value: {"min_shots": 2, "semantic_evidence": True}
-    for value in PATTERN_TYPES
+PATTERN_GRANULARITY = {
+    "reaction_cut": "pair",
+    "contrast_cut": "pair",
+    "cut_on_action": "pair",
+    "match_cut": "pair",
+    "shot_reverse_shot": "pair",
+    "audio_bridge": "pair",
+    "rapid_montage": "sequence",
+    "delayed_reveal": "sequence",
+    "parallel_editing": "sequence",
+    "insert_shot": "sequence",
 }
 EDITING_CLAIM_FIELDS = (
     "claim_id", "subject", "predicate", "object", "interval", "modality",
@@ -50,15 +58,24 @@ delayed_reveal, cut_on_action, match_cut, shot_reverse_shot,
 parallel_editing, insert_shot, audio_bridge.
 
 Return exactly one JSON object:
-{"schema_version":"semantic_editing_patterns_v1",
+{"schema_version":"semantic_editing_patterns_v2",
 "patterns":[{"pattern_id":"EP1","type":"rapid_montage",
-"scope":"local|global","shot_ids":["..."],"fact_ids":["..."],
-"evidence_ids":["claim or event ID"],"confidence":0.0}],
+"granularity":"pair|sequence|global","scope":"local|global",
+"shot_ids":["..."],"support":{"structural_fact_ids":["EF..."],
+"semantic_evidence_ids":["claim or event ID"]},"confidence":0.0}],
 "limitations":["..."]}
 
-Every pattern requires at least two shots and local semantic evidence IDs.
-fact_ids must correspond exactly to shot_ids. A local pattern must not cover
-most of the full video. The patterns list may be empty. JSON only. Input:
+Use pair for reaction_cut, contrast_cut, cut_on_action, match_cut,
+shot_reverse_shot, and audio_bridge. Use sequence for rapid_montage,
+delayed_reveal, parallel_editing, and insert_shot. No currently allowed type
+uses global granularity, and all currently allowed types use local scope.
+Every pattern requires at least two shots, at least one structural fact, and
+local semantic evidence IDs. For pair patterns,
+structural_fact_ids must correspond exactly to shot_ids. For sequence patterns,
+shot_ids must be temporally contiguous; structural_fact_ids may be any nonempty
+subset of facts within that sequence and need not map one-to-one to every shot.
+A local pattern must not cover most of the full video. The patterns list may be
+empty. JSON only. Input:
 """
 
 EDITING_FUNCTION_PROMPT = """You are an editing-function reasoning analyst.
@@ -490,6 +507,10 @@ def validate_editing_patterns(
         str(row.get("shot_id")): str(row.get("fact_id"))
         for row in measured.get("facts") or []
     }
+    shot_order = {
+        str(row.get("shot_id")): index
+        for index, row in enumerate(measured.get("facts") or [])
+    }
     total = float(measured.get("duration_s") or 0.0)
     if total <= 0:
         raise EditingGrammarError("editing_duration_invalid")
@@ -504,36 +525,62 @@ def validate_editing_patterns(
         pattern_type = str(pattern.get("type") or "")
         if pattern_type not in PATTERN_TYPES:
             raise EditingGrammarError("pattern_type_invalid", pattern_id)
-        requirements = PATTERN_REQUIREMENTS[pattern_type]
-        if pattern.get("scope") not in {"local", "global"}:
+        granularity = str(pattern.get("granularity") or "")
+        if (granularity not in {"pair", "sequence", "global"} or
+                granularity != PATTERN_GRANULARITY[pattern_type]):
+            raise EditingGrammarError("pattern_granularity_invalid", pattern_id)
+        scope = pattern.get("scope")
+        if scope not in {"local", "global"}:
+            raise EditingGrammarError("pattern_scope_invalid", pattern_id)
+        if ((granularity in {"pair", "sequence"} and scope != "local") or
+                (granularity == "global" and scope != "global")):
             raise EditingGrammarError("pattern_scope_invalid", pattern_id)
         shot_ids = list(map(str, pattern.get("shot_ids") or []))
-        if (len(shot_ids) < int(requirements["min_shots"]) or
-                len(set(shot_ids)) != len(shot_ids)):
+        if len(shot_ids) < 2 or len(set(shot_ids)) != len(shot_ids):
             raise EditingGrammarError("pattern_shot_cardinality_invalid", pattern_id)
         if not set(shot_ids).issubset(shots):
             raise EditingGrammarError("pattern_shot_invalid", pattern_id)
-        fact_ids = list(map(str, pattern.get("fact_ids") or []))
+        if granularity == "sequence":
+            positions = [shot_order[shot_id] for shot_id in shot_ids]
+            if positions != list(range(min(positions), max(positions) + 1)):
+                raise EditingGrammarError(
+                    "sequence_shots_noncontiguous", pattern_id)
+
+        support = pattern.get("support")
+        if not isinstance(support, dict):
+            raise EditingGrammarError("pattern_support_invalid", pattern_id)
+        raw_fact_ids = support.get("structural_fact_ids")
+        raw_evidence_ids = support.get("semantic_evidence_ids")
+        if not isinstance(raw_fact_ids, list) or not isinstance(
+                raw_evidence_ids, list):
+            raise EditingGrammarError("pattern_support_invalid", pattern_id)
+        fact_ids = list(map(str, raw_fact_ids))
         if not fact_ids or not set(fact_ids).issubset(facts):
             raise EditingGrammarError("pattern_fact_invalid", pattern_id)
         expected_fact_ids = {facts_by_shot[shot_id] for shot_id in shot_ids}
-        if (len(set(fact_ids)) != len(fact_ids) or
-                set(fact_ids) != expected_fact_ids):
+        cited_fact_ids = set(fact_ids)
+        if len(cited_fact_ids) != len(fact_ids):
+            raise EditingGrammarError("pattern_fact_scope_invalid", pattern_id)
+        if granularity == "pair" and cited_fact_ids != expected_fact_ids:
+            raise EditingGrammarError("pattern_fact_scope_invalid", pattern_id)
+        if granularity == "sequence" and not cited_fact_ids.issubset(
+                expected_fact_ids):
             raise EditingGrammarError("pattern_fact_scope_invalid", pattern_id)
         if not set(shot_ids).issubset(shot_evidence_ids):
             raise EditingGrammarError("pattern_evidence_scope_invalid", pattern_id)
         local_evidence = set().union(
             *(shot_evidence_ids[shot_id] for shot_id in shot_ids))
-        cited = list(map(str, pattern.get("evidence_ids") or []))
-        if requirements["semantic_evidence"] and not cited:
+        cited = list(map(str, raw_evidence_ids))
+        if not cited:
             raise EditingGrammarError("pattern_evidence_required", pattern_id)
-        if not set(cited).issubset(local_evidence):
+        if len(set(cited)) != len(cited) or not set(cited).issubset(
+                local_evidence):
             raise EditingGrammarError("pattern_evidence_scope_invalid", pattern_id)
         _confidence(pattern.get("confidence"), "pattern_confidence_invalid", pattern_id)
         start = min(float(shots[shot_id]["interval"][0]) for shot_id in shot_ids)
         end = max(float(shots[shot_id]["interval"][1]) for shot_id in shot_ids)
         pattern["span"] = [start, end]
-        if pattern["scope"] != "global" and (end - start) / total > 0.60:
+        if scope != "global" and (end - start) / total > 0.60:
             raise EditingGrammarError("local_pattern_too_broad", pattern_id)
     result["measured_editing_sha"] = measured.get("artifact_sha")
     result["artifact_sha"] = json_hash(result)

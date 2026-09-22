@@ -400,12 +400,23 @@ def _shot_evidence_ids(payload: dict) -> dict[str, set[str]]:
 
 
 def _pattern_value(pattern_type: str = "contrast_cut") -> dict:
+    sequence_types = {
+        "rapid_montage", "delayed_reveal", "parallel_editing", "insert_shot",
+    }
     return {
-        "schema_version": "semantic_editing_patterns_v1",
+        "schema_version": "semantic_editing_patterns_v2",
         "patterns": [{
-            "pattern_id": "EP1", "type": pattern_type, "scope": "local",
-            "shot_ids": ["S4", "S5"], "fact_ids": ["EF4", "EF5"],
-            "evidence_ids": ["A1"], "confidence": 0.8,
+            "pattern_id": "EP1", "type": pattern_type,
+            "granularity": (
+                "sequence" if pattern_type in sequence_types else "pair"),
+            "scope": "local", "shot_ids": ["S4", "S5"],
+            "support": {
+                "structural_fact_ids": (
+                    ["EF4"] if pattern_type in sequence_types
+                    else ["EF4", "EF5"]),
+                "semantic_evidence_ids": ["A1"],
+            },
+            "confidence": 0.8,
         }],
         "limitations": [],
     }
@@ -416,8 +427,10 @@ def test_local_editing_pattern_cannot_span_most_of_video() -> None:
     measured = build_measured_editing_facts(agent_reference)
     value = _pattern_value("rapid_montage")
     value["patterns"][0]["shot_ids"] = ["S1", "S2", "S3", "S4", "S5"]
-    value["patterns"][0]["fact_ids"] = ["EF1", "EF2", "EF3", "EF4", "EF5"]
-    value["patterns"][0]["evidence_ids"] = ["V1"]
+    value["patterns"][0]["support"] = {
+        "structural_fact_ids": ["EF1"],
+        "semantic_evidence_ids": ["V1"],
+    }
     payload = build_editing_payload(agent_reference, measured)
 
     with pytest.raises(EditingGrammarError) as excinfo:
@@ -441,31 +454,87 @@ def test_deterministic_editing_types_are_not_semantic_patterns(
     assert excinfo.value.reason_code == "pattern_type_invalid"
 
 
-def test_semantic_pattern_requires_local_evidence_and_exact_fact_scope() -> None:
+def test_pair_pattern_requires_local_evidence_and_exact_fact_scope() -> None:
     agent_reference = build_agent_reference(_validated_reference())
     measured = build_measured_editing_facts(agent_reference)
     evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
 
     wrong_facts = _pattern_value()
-    wrong_facts["patterns"][0]["fact_ids"] = ["EF1", "EF2"]
+    wrong_facts["patterns"][0]["support"]["structural_fact_ids"] = [
+        "EF1", "EF2"]
     with pytest.raises(EditingGrammarError) as fact_error:
         validate_editing_patterns(
             wrong_facts, measured, shot_evidence_ids=evidence)
     assert fact_error.value.reason_code == "pattern_fact_scope_invalid"
 
     wrong_evidence = _pattern_value()
-    wrong_evidence["patterns"][0]["evidence_ids"] = ["V1"]
+    wrong_evidence["patterns"][0]["support"][
+        "semantic_evidence_ids"] = ["V1"]
     with pytest.raises(EditingGrammarError) as evidence_error:
         validate_editing_patterns(
             wrong_evidence, measured, shot_evidence_ids=evidence)
     assert evidence_error.value.reason_code == "pattern_evidence_scope_invalid"
 
     missing_evidence = _pattern_value()
-    missing_evidence["patterns"][0]["evidence_ids"] = []
+    missing_evidence["patterns"][0]["support"][
+        "semantic_evidence_ids"] = []
     with pytest.raises(EditingGrammarError) as missing_error:
         validate_editing_patterns(
             missing_evidence, measured, shot_evidence_ids=evidence)
     assert missing_error.value.reason_code == "pattern_evidence_required"
+
+
+def test_sequence_pattern_accepts_fact_subset_for_contiguous_shots() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    measured = build_measured_editing_facts(agent_reference)
+    evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
+    value = _pattern_value("insert_shot")
+
+    result = validate_editing_patterns(
+        value, measured, shot_evidence_ids=evidence)
+
+    assert result["patterns"][0]["granularity"] == "sequence"
+    assert result["patterns"][0]["support"]["structural_fact_ids"] == ["EF4"]
+
+
+def test_sequence_pattern_rejects_noncontiguous_shots_and_outside_facts() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    measured = build_measured_editing_facts(agent_reference)
+    evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
+
+    noncontiguous = _pattern_value("rapid_montage")
+    noncontiguous["patterns"][0]["shot_ids"] = ["S1", "S3"]
+    noncontiguous["patterns"][0]["support"]["structural_fact_ids"] = ["EF1"]
+    with pytest.raises(EditingGrammarError) as sequence_error:
+        validate_editing_patterns(
+            noncontiguous, measured, shot_evidence_ids=evidence)
+    assert sequence_error.value.reason_code == "sequence_shots_noncontiguous"
+
+    outside_fact = _pattern_value("insert_shot")
+    outside_fact["patterns"][0]["support"]["structural_fact_ids"] = ["EF3"]
+    with pytest.raises(EditingGrammarError) as fact_error:
+        validate_editing_patterns(
+            outside_fact, measured, shot_evidence_ids=evidence)
+    assert fact_error.value.reason_code == "pattern_fact_scope_invalid"
+
+
+def test_pattern_granularity_must_match_semantic_type() -> None:
+    agent_reference = build_agent_reference(_validated_reference())
+    measured = build_measured_editing_facts(agent_reference)
+    evidence = _shot_evidence_ids(build_editing_payload(agent_reference, measured))
+    value = _pattern_value("contrast_cut")
+    value["patterns"][0]["granularity"] = "sequence"
+
+    with pytest.raises(EditingGrammarError) as excinfo:
+        validate_editing_patterns(value, measured, shot_evidence_ids=evidence)
+    assert excinfo.value.reason_code == "pattern_granularity_invalid"
+
+    global_scope = _pattern_value("insert_shot")
+    global_scope["patterns"][0]["scope"] = "global"
+    with pytest.raises(EditingGrammarError) as scope_error:
+        validate_editing_patterns(
+            global_scope, measured, shot_evidence_ids=evidence)
+    assert scope_error.value.reason_code == "pattern_scope_invalid"
 
 
 def test_deterministic_structure_does_not_require_semantic_coverage() -> None:
@@ -508,7 +577,8 @@ def test_editing_recognition_and_function_reasoning_are_two_single_calls() -> No
     assert "verified_narrative_interpretation" in function_runner.prompts[0]
     assert '\"object\":\"sound\"' in function_runner.prompts[0]
     assert '\"object\":\"scene\"' not in function_runner.prompts[0]
-    assert result["semantic_patterns"][0]["evidence_ids"] == ["A1"]
+    assert result["semantic_patterns"][0]["support"][
+        "semantic_evidence_ids"] == ["A1"]
     assert result["structural_grammar"] == measured["structural_grammar"]
     assert result["functions"][0]["function"] == "accumulate"
     assert measured["schema_version"] == "measured_editing_facts_v4"
