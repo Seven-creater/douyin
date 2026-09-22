@@ -24,6 +24,21 @@ from src.agentic_video.creative_pipeline.evaluation.structure import (
 )
 from src.agentic_video.creative_pipeline.planning.story import STORY_SELECT_K
 from src.agentic_video.creative_pipeline.planning.theme import THEME_SELECT_K
+from src.agentic_video.creative_pipeline.production.asset import (
+    FakeAssetGraphAdapter,
+)
+from src.agentic_video.creative_pipeline.production.asset_validator import (
+    validate_production_asset_graph,
+)
+from src.agentic_video.creative_pipeline.production.shot import (
+    FakeShotPlanAdapter,
+)
+from src.agentic_video.creative_pipeline.production.shot_validator import (
+    validate_production_shot_plan,
+)
+from src.agentic_video.creative_pipeline.production.storyboard import (
+    FakeStoryboardAdapter, validate_storyboard,
+)
 from src.agentic_video.creative_pipeline.writing.adapter import (
     build_blind_evaluation_request, build_screenplay_request,
 )
@@ -44,6 +59,7 @@ FROZEN_STRUCTURE_SHA = (
     "5a22fb5af29588b6220fbe9ccda751c922abe617fca1716b2f97f2942218a967")
 SELECTION_POLICY_VERSION = "wave1_first_valid_v1"
 WAVE2_SELECTION_POLICY_VERSION = "wave2_fixture_shortlist_v1"
+WAVE4_PRODUCTION_POLICY_VERSION = "wave4_fake_production_v1"
 
 FROZEN_STAGE_DAG = (
     {
@@ -70,6 +86,11 @@ FROZEN_STAGE_DAG = (
         "stage": "shot",
         "requires": ["screenplay_selection", "asset_graph"],
         "produces": "shot_plan",
+    },
+    {
+        "stage": "storyboard",
+        "requires": ["shot_plan", "asset_graph"],
+        "produces": "storyboard",
     },
 )
 
@@ -558,6 +579,141 @@ class CreativePipelineOrchestrator:
             "committed_screenplay_ref": artifact_ref(
                 stage["selected_record"].artifact_id, stage["selected_record"].artifact_sha),
             "call_counts": dict(self.call_counts),
+            "lineage_report": build_lineage_report(self.workspace),
+        }
+
+    def run_wave4(self, creative_structure_spec: dict[str, Any]) -> dict[str, Any]:
+        """Compile the selected screenplay into text-only production artifacts."""
+        validate_frozen_spec(creative_structure_spec)
+
+        def read_current(name: str, artifact_type: str | None = None) -> dict:
+            if self.workspace.effective_status(name) != "committed":
+                raise PipelineBlocked("production_parent_not_committed", name)
+            value = self.workspace.read_artifact(name)
+            if (not isinstance(value, dict)
+                    or json_hash(value) != self.workspace.get_sha(name)):
+                raise PipelineBlocked("production_parent_sha_mismatch", name)
+            if artifact_type:
+                validate_artifact_envelope(value)
+                if (value["artifact_type"] != artifact_type
+                        or value["artifact_id"] != name):
+                    raise PipelineBlocked("production_parent_type_mismatch", name)
+            return value
+
+        current_spec = read_current("creative:structure_spec")
+        if (current_spec != creative_structure_spec
+                or creative_structure_spec["artifact_sha"]
+                != FROZEN_STRUCTURE_SHA):
+            raise PipelineBlocked("structure_workspace_conflict")
+        pool_name = "creative:screenplay_pool"
+        pool = read_current(pool_name, "candidate_pool")["payload"]
+        validate_candidate_pool(pool)
+        selection_name = "creative:screenplay_selection"
+        selection = read_current(selection_name, "selection")["payload"]
+        validate_selection_artifact(selection, pool)
+        if selection["pool_ref"] != artifact_ref(
+                pool_name, str(self.workspace.get_sha(pool_name))):
+            raise PipelineBlocked("production_selection_pool_sha_mismatch")
+        record = next(
+            row for row in pool["candidates"]
+            if row["candidate_id"] == selection["selected_candidate_id"])
+        screenplay_name = record["artifact_id"]
+        if (record["status"] not in {"eligible", "scored", "selected"}
+                or screenplay_name
+                != f"creative:screenplay:{record['candidate_id']}"):
+            raise PipelineBlocked("production_selected_screenplay_invalid")
+        screenplay_envelope = read_current(screenplay_name, "screenplay")
+        if record["artifact_sha"] != self.workspace.get_sha(screenplay_name):
+            raise PipelineBlocked("production_screenplay_sha_mismatch")
+        screenplay = screenplay_envelope["payload"]
+
+        blueprint_id = screenplay.get("blueprint_id")
+        if (not isinstance(blueprint_id, str) or not blueprint_id
+                or not all(char.isalnum() or char == "_"
+                           for char in blueprint_id)):
+            raise PipelineBlocked("production_blueprint_id_invalid")
+        blueprint_name = f"creative:story_blueprint:{blueprint_id}"
+        blueprint_envelope = read_current(blueprint_name, "story_blueprint")
+        constraints_envelope = read_current(
+            "creative:screenplay_format_constraints", "format_constraints")
+        validate_screenplay(
+            screenplay, blueprint=blueprint_envelope["payload"],
+            blueprint_sha=str(self.workspace.get_sha(blueprint_name)),
+            structure_sha=current_spec["artifact_sha"],
+            format_constraints=constraints_envelope["payload"])
+
+        screenplay_ref = artifact_ref(screenplay_name, record["artifact_sha"])
+        screenplay_selection_ref = artifact_ref(
+            selection_name, str(self.workspace.get_sha(selection_name)))
+        asset_graph = FakeAssetGraphAdapter().run(
+            screenplay, screenplay_sha=record["artifact_sha"])
+        validate_production_asset_graph(
+            asset_graph, screenplay=screenplay,
+            screenplay_sha=record["artifact_sha"])
+        asset_name = "creative:asset_graph"
+        asset_ref = self._write_envelope(
+            asset_name, artifact_type="asset_graph",
+            payload_schema_version="asset_graph_v1", payload=asset_graph,
+            dependencies=[screenplay_name, selection_name],
+            parent_refs=[screenplay_ref, screenplay_selection_ref],
+            producer=self._runtime_producer("fake_asset_graph_adapter"),
+            selection_policy_version=WAVE4_PRODUCTION_POLICY_VERSION)
+
+        shot_plan = FakeShotPlanAdapter().run(
+            screenplay, asset_graph, screenplay_sha=record["artifact_sha"],
+            asset_graph_sha=asset_ref["sha"])
+        validate_production_shot_plan(
+            shot_plan, screenplay=screenplay,
+            screenplay_sha=record["artifact_sha"], asset_graph=asset_graph,
+            asset_graph_sha=asset_ref["sha"])
+        shot_name = "creative:shot_plan"
+        shot_ref = self._write_envelope(
+            shot_name, artifact_type="shot_plan",
+            payload_schema_version="shot_plan_v1", payload=shot_plan,
+            dependencies=[screenplay_name, asset_name],
+            parent_refs=[screenplay_ref,
+                         artifact_ref(asset_name, asset_ref["sha"])],
+            producer=self._runtime_producer("fake_shot_plan_adapter"),
+            selection_policy_version=WAVE4_PRODUCTION_POLICY_VERSION)
+
+        storyboard = FakeStoryboardAdapter().run(
+            shot_plan, shot_plan_sha=shot_ref["sha"],
+            asset_graph_sha=asset_ref["sha"])
+        validate_storyboard(
+            storyboard, screenplay=screenplay,
+            screenplay_sha=record["artifact_sha"], asset_graph=asset_graph,
+            asset_graph_sha=asset_ref["sha"], shot_plan=shot_plan,
+            shot_plan_sha=shot_ref["sha"])
+        storyboard_name = "creative:storyboard"
+        storyboard_ref = self._write_envelope(
+            storyboard_name, artifact_type="storyboard",
+            payload_schema_version="storyboard_v1", payload=storyboard,
+            dependencies=[shot_name, asset_name],
+            parent_refs=[artifact_ref(shot_name, shot_ref["sha"]),
+                         artifact_ref(asset_name, asset_ref["sha"])],
+            producer=self._runtime_producer("fake_storyboard_adapter"),
+            selection_policy_version=WAVE4_PRODUCTION_POLICY_VERSION)
+
+        for step, (adapter, name, ref, validator) in enumerate((
+                ("fake_asset_graph_adapter", asset_name, asset_ref,
+                 "validate_production_asset_graph"),
+                ("fake_shot_plan_adapter", shot_name, shot_ref,
+                 "validate_production_shot_plan"),
+                ("fake_storyboard_adapter", storyboard_name, storyboard_ref,
+                 "validate_storyboard")), start=6):
+            self.workspace.record_trace(
+                step, {"adapter": adapter},
+                {"artifact": name, "sha": ref["sha"]},
+                {"passed": True, "validators_run": [validator],
+                 "model_calls": 0, "media_generated": False})
+        return {
+            "schema_version": "r2_d_wave4_result_v1", "status": "PASS",
+            "fixture_only": True, "model_calls": 0,
+            "media_generated": False,
+            "asset_graph_ref": artifact_ref(asset_name, asset_ref["sha"]),
+            "shot_plan_ref": artifact_ref(shot_name, shot_ref["sha"]),
+            "storyboard_ref": artifact_ref(
+                storyboard_name, storyboard_ref["sha"]),
             "lineage_report": build_lineage_report(self.workspace),
         }
 
