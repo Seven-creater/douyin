@@ -341,3 +341,211 @@ def test_lineage_rejects_duplicate_or_inexact_parents(bad_parents: list[dict]) -
 
     with pytest.raises(DNAV3Error):
         validate_parent_rows(bad_parents)
+
+
+class _Answer:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.input_tokens = 100
+        self.output_tokens = 50
+        self.elapsed_s = 1.25
+
+
+class _Runner:
+    def __init__(self, responses: list[dict]) -> None:
+        import json
+
+        self.responses = [json.dumps(row) for row in responses]
+        self.calls: list[tuple[str, dict]] = []
+        self.cfg = {"model_path": "fake", "repetition_penalty": 1.05}
+
+    def ask(self, prompt: str, **kwargs):
+        self.calls.append((prompt, kwargs))
+        return _Answer(self.responses.pop(0))
+
+
+def _source_artifact(value: dict) -> dict:
+    return _finalize(value)
+
+
+def _r2_sources() -> tuple[dict, dict]:
+    narrative = _source_artifact({
+        "schema_version": "reference_narrative_interpretation_v2",
+        "narrative_units": [
+            {
+                "unit_id": "N1",
+                "section_ids": ["section_01"],
+                "summary": "An initial attributed statement presents a broad judgment.",
+                "supported_by": ["S1_T01"],
+                "verification_status": "SUPPORTED",
+            },
+            {
+                "unit_id": "N2",
+                "section_ids": ["section_02"],
+                "summary": "Later observable information bears on that judgment.",
+                "supported_by": ["S2_V01"],
+                "verification_status": "SUPPORTED",
+            },
+        ],
+        "relations": [
+            {
+                "relation_id": "R1",
+                "type": "reframes",
+                "source": "N2",
+                "target": "N1",
+                "reason": "The later information changes how the earlier judgment is read.",
+                "supported_by": ["S1_T01", "S2_V01"],
+                "verification_status": "SUPPORTED",
+            }
+        ],
+        "limitations": [],
+        "verification_status": "SUPPORTED",
+        "relation_audit_sha": "f" * 64,
+        "agent_reference_sha": "e" * 64,
+        "analysis_fingerprint": "d" * 64,
+    })
+    editing = _source_artifact({
+        "schema_version": "editing_grammar_v4",
+        "structural_grammar": {
+            "schema_version": "measured_structural_editing_grammar_v1",
+            "pace_profile": [
+                {"section_id": "section_01", "shot_rate": 0.2,
+                 "relative_pace": "low"},
+                {"section_id": "section_02", "shot_rate": 0.8,
+                 "relative_pace": "high"},
+            ],
+            "pace_changes": [
+                {"from_section": "section_01", "to_section": "section_02",
+                 "direction": "accelerates", "shot_rate_before": 0.2,
+                 "shot_rate_after": 0.8},
+            ],
+            "duration_profile": [],
+            "shot_duration_outliers": [
+                {"fact_id": "EF1", "shot_id": "shot_01",
+                 "section_id": "section_01", "duration_s": 5.0,
+                 "direction": "long", "first_quartile_s": 0.5,
+                 "third_quartile_s": 1.0, "interquartile_range_s": 0.5},
+            ],
+            "transition_profile": [],
+            "transition_sequences": [],
+            "artifact_sha": "c" * 64,
+        },
+        "semantic_patterns": [
+            {"pattern_id": "EP1", "type": "match_cut", "scope": "local",
+             "shot_ids": ["shot_01", "shot_02"], "confidence": 0.8},
+        ],
+        "functions": [
+            {"pattern_id": "EP1", "function": "accumulate",
+             "relation_to_story": ["R1"], "confidence": 0.8},
+        ],
+        "pattern_limitations": [],
+        "function_limitations": [],
+        "measured_editing_sha": "b" * 64,
+        "semantic_patterns_sha": "a" * 64,
+        "functions_sha": "9" * 64,
+    })
+    return narrative, editing
+
+
+def _extraction_response() -> dict:
+    audit = _complete_audit()
+    for key in ("schema_version", "input_artifacts", "validation_record",
+                "artifact_sha"):
+        audit.pop(key)
+    return audit
+
+
+def _independent_audit_response(*, passed: bool = True) -> dict:
+    checks = []
+    for item_id, item_type in (
+        ("M1", "node"), ("M2", "node"), ("ME1", "edge"),
+        ("X1", "experience_state"), ("EC1", "event_constraint"),
+        ("ED1", "editing_constraint"), ("ED2", "editing_constraint"),
+        ("FS1", "free_slot"),
+    ):
+        checks.append({
+            "item_id": item_id,
+            "item_type": item_type,
+            "grounding_status": "not_applicable" if item_type == "free_slot" else "supported",
+            "abstraction_valid": passed,
+            "constraint_valid": passed,
+            "reason": "independently checked against the supplied R2 bundle",
+        })
+    return {
+        "schema_version": "creative_dna_independent_audit_v1",
+        "item_checks": checks,
+        "leakage_findings": [],
+        "unsupported_dimensions_confirmed": [],
+        "overall": {
+            "grounding_passed": passed,
+            "relation_entailment_passed": passed,
+            "surface_binding_confined_to_audit": passed,
+            "abstraction_useful": passed,
+            "pass": passed,
+        },
+        "limitations": [],
+    }
+
+
+def test_r2c2_calls_each_model_once_and_writes_publish_trace(tmp_path) -> None:
+    from src.agentic_video.creative_dna_v3.audit import run_r2c2
+
+    narrative, editing = _r2_sources()
+    extraction_runner = _Runner([_extraction_response()])
+    audit_runner = _Runner([_independent_audit_response()])
+
+    result = run_r2c2(
+        extraction_runner, audit_runner, narrative, editing,
+        trace_dir=tmp_path, spec_id="CS-R2C2-TEST",
+    )
+
+    assert result["status"] == "PUBLISHED"
+    assert len(extraction_runner.calls) == 1
+    assert len(audit_runner.calls) == 1
+    assert result["creative_spec"]["schema_version"] == "creative_spec_v1"
+    assert result["creative_spec"]["downstream_contract"][
+        "reference_context_allowed"] is False
+    for relative in (
+        "01_extraction/request.json",
+        "01_extraction/raw_response.txt",
+        "01_extraction/candidate.json",
+        "02_independent_audit/request.json",
+        "02_independent_audit/raw_response.txt",
+        "02_independent_audit/audit_result.json",
+        "03_publish/creative_dna_audit_v3.json",
+        "03_publish/creative_spec_v1.json",
+        "04_transferability/manual_review_cases.json",
+        "run_summary.json",
+    ):
+        assert (tmp_path / relative).is_file(), relative
+
+
+def test_r2c2_failed_independent_audit_blocks_without_retry_or_publish(tmp_path) -> None:
+    from src.agentic_video.creative_dna_v3.audit import run_r2c2
+
+    narrative, editing = _r2_sources()
+    extraction_runner = _Runner([_extraction_response()])
+    audit_runner = _Runner([_independent_audit_response(passed=False)])
+
+    result = run_r2c2(
+        extraction_runner, audit_runner, narrative, editing,
+        trace_dir=tmp_path, spec_id="CS-R2C2-BLOCKED",
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["creative_spec"] is None
+    assert len(extraction_runner.calls) == len(audit_runner.calls) == 1
+    assert not (tmp_path / "03_publish/creative_spec_v1.json").exists()
+
+
+def test_r2_bundle_contains_no_raw_claim_or_identity_scaffolding() -> None:
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    bundle = build_r2_bundle(narrative, editing)
+    serialized = repr(bundle)
+    assert "accepted_claims" not in serialized
+    assert "identity" not in serialized.lower()
+    assert "source_bindings" not in serialized
+    assert bundle["editing_grammar"]["semantic_patterns"][0][
+        "source_strength"] == "unaudited_semantic"
