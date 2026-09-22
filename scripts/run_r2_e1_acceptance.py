@@ -21,9 +21,11 @@ FROZEN_SPEC = (
     "creative_structure_spec_v1.json")
 FORMAT_CONSTRAINTS = {
     "schema_version": "screenplay_format_constraints_v1",
-    "target_duration_s": 30.0,
-    "min_duration_s": 25.0,
-    "max_duration_s": 35.0,
+    # The acceptance exercises three independent 5 s shots.  It does not
+    # render a full film, and stays within the measured two-GPU H3 envelope.
+    "target_duration_s": 15.0,
+    "min_duration_s": 15.0,
+    "max_duration_s": 15.0,
     "max_scenes": 3,
     "max_characters": 4,
     "max_props": 3,
