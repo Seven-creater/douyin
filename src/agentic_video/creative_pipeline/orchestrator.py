@@ -22,6 +22,26 @@ from src.agentic_video.creative_pipeline.evaluation.structure import (
     validate_story_structure,
     validate_theme_structure,
 )
+from src.agentic_video.creative_pipeline.evaluation.media import (
+    build_structure_coverage_report,
+    evaluate_media_candidate,
+    validate_media_evaluation,
+    validate_structure_coverage_report,
+)
+from src.agentic_video.creative_pipeline.generation.adapter import (
+    build_image_generation_request,
+    build_shot_contract,
+    build_video_generation_request,
+    request_parent_refs,
+)
+from src.agentic_video.creative_pipeline.generation.image import (
+    FakeImageGenerator,
+    validate_image_candidate,
+)
+from src.agentic_video.creative_pipeline.generation.video import (
+    FakeVideoGenerator,
+    validate_video_candidate,
+)
 from src.agentic_video.creative_pipeline.planning.story import STORY_SELECT_K
 from src.agentic_video.creative_pipeline.planning.theme import THEME_SELECT_K
 from src.agentic_video.creative_pipeline.production.asset import (
@@ -60,6 +80,7 @@ FROZEN_STRUCTURE_SHA = (
 SELECTION_POLICY_VERSION = "wave1_first_valid_v1"
 WAVE2_SELECTION_POLICY_VERSION = "wave2_fixture_shortlist_v1"
 WAVE4_PRODUCTION_POLICY_VERSION = "wave4_fake_production_v1"
+WAVE5_GENERATION_POLICY_VERSION = "wave5_first_passing_fake_v1"
 
 FROZEN_STAGE_DAG = (
     {
@@ -91,6 +112,16 @@ FROZEN_STAGE_DAG = (
         "stage": "storyboard",
         "requires": ["shot_plan", "asset_graph"],
         "produces": "storyboard",
+    },
+    {
+        "stage": "image_generation",
+        "requires": ["storyboard", "shot_contract", "asset_graph"],
+        "produces": "image_candidate_pool",
+    },
+    {
+        "stage": "video_generation",
+        "requires": ["shot_contract", "image_selection", "asset_graph"],
+        "produces": "video_candidate_pool",
     },
 )
 
@@ -361,6 +392,121 @@ class CreativePipelineOrchestrator:
             "selection": first["selection"],
             "selection_ref": first["selection_ref"],
             "selected_record": first["selected_record"],
+        }
+
+    def _materialize_media_stage(
+            self, *, media_kind: str, shot_id: str,
+            request: dict[str, Any],
+            raw_candidates: list[dict[str, Any]],
+            validator: Callable[[dict[str, Any], dict[str, Any]], None]
+            ) -> dict[str, Any]:
+        """Commit candidates, scorecards, a pool, and the first passing pick."""
+        candidate_type = f"{media_kind}_candidate"
+        parent_refs = request_parent_refs(request)
+        dependency_names = [row["artifact_id"] for row in parent_refs]
+        producer = self._runtime_producer(f"fake_{media_kind}_generator")
+        records: list[CandidateRecord] = []
+        evaluations: dict[str, tuple[dict[str, Any], dict[str, str]]] = {}
+        candidate_refs: list[dict[str, str]] = []
+        evaluation_refs: list[dict[str, str]] = []
+
+        for payload in raw_candidates:
+            validator(payload, request)
+            candidate_id = str(payload["candidate_id"])
+            name = f"creative:{candidate_type}:{candidate_id}"
+            committed = self._write_envelope(
+                name, artifact_type=candidate_type,
+                payload_schema_version=f"{candidate_type}_v1",
+                payload=payload, dependencies=dependency_names,
+                parent_refs=parent_refs, producer=producer,
+                selection_policy_version=WAVE5_GENERATION_POLICY_VERSION)
+            candidate_ref = artifact_ref(name, committed["sha"])
+            evaluation = evaluate_media_candidate(
+                candidate=payload, candidate_ref=candidate_ref,
+                request=request)
+            validate_media_evaluation(evaluation)
+            evaluation_name = (
+                f"creative:{media_kind}_evaluation:{candidate_id}")
+            evaluation_ref = self._write_envelope(
+                evaluation_name, artifact_type="media_candidate_evaluation",
+                payload_schema_version="media_candidate_evaluation_v1",
+                payload=evaluation,
+                dependencies=[name, *dependency_names],
+                parent_refs=[candidate_ref, *parent_refs],
+                producer=self._runtime_producer(
+                    f"evaluate_{media_kind}_candidate"),
+                selection_policy_version=WAVE5_GENERATION_POLICY_VERSION)
+            status = "eligible" if evaluation["status"] == "PASS" \
+                else "rejected"
+            records.append(CandidateRecord(
+                candidate_id=candidate_id, artifact_id=name,
+                artifact_type=candidate_type, artifact_sha=committed["sha"],
+                parent_shas=tuple(row["sha"] for row in parent_refs),
+                status=status))
+            candidate_refs.append(candidate_ref)
+            evaluation_ref_value = artifact_ref(
+                evaluation_name, evaluation_ref["sha"])
+            evaluation_refs.append(evaluation_ref_value)
+            evaluations[candidate_id] = (
+                evaluation, evaluation_ref_value)
+
+        eligible = sorted(
+            (row for row in records if row.status == "eligible"),
+            key=lambda row: row.candidate_id)
+        if not eligible:
+            raise PipelineBlocked("media_candidates_all_failed",
+                                  f"{media_kind}:{shot_id}")
+        pool_payload = CandidatePool(
+            pool_id=f"{media_kind.upper()}_POOL_{shot_id}",
+            stage=f"{media_kind}_generation",
+            candidate_artifact_type=candidate_type,
+            parent_refs=tuple(parent_refs), candidates=tuple(records),
+            selection_policy_version=WAVE5_GENERATION_POLICY_VERSION,
+        ).to_dict()
+        pool_name = f"creative:{media_kind}_pool:{shot_id}"
+        pool_ref = self._write_envelope(
+            pool_name, artifact_type="candidate_pool",
+            payload_schema_version="creative_candidate_pool_v1",
+            payload=pool_payload,
+            dependencies=[*dependency_names,
+                          *[row.artifact_id for row in records],
+                          *[row["artifact_id"] for row in evaluation_refs]],
+            parent_refs=[*parent_refs, *evaluation_refs],
+            producer=self._runtime_producer(f"pool_{media_kind}"),
+            selection_policy_version=WAVE5_GENERATION_POLICY_VERSION)
+
+        selected = eligible[0]
+        selected_evaluation_ref = evaluations[selected.candidate_id][1]
+        selection_payload = SelectionArtifact(
+            selection_id=f"{media_kind.upper()}_SELECTION_{shot_id}",
+            pool_ref=artifact_ref(pool_name, pool_ref["sha"]),
+            selected_candidate_id=selected.candidate_id,
+            selected_candidate_sha=selected.artifact_sha,
+            scorecard_shas=(selected_evaluation_ref["sha"],),
+            selection_policy_version=WAVE5_GENERATION_POLICY_VERSION,
+            decision_origin="deterministic_wave5_first_passing",
+        ).to_dict(pool_payload)
+        selection_name = f"creative:{media_kind}_selection:{shot_id}"
+        selection_ref = self._write_envelope(
+            selection_name, artifact_type="selection",
+            payload_schema_version="creative_selection_v1",
+            payload=selection_payload,
+            dependencies=[pool_name, selected.artifact_id,
+                          selected_evaluation_ref["artifact_id"]],
+            parent_refs=[artifact_ref(pool_name, pool_ref["sha"]),
+                         artifact_ref(selected.artifact_id,
+                                      selected.artifact_sha),
+                         selected_evaluation_ref],
+            producer=self._runtime_producer(f"select_{media_kind}"),
+            selection_policy_version=WAVE5_GENERATION_POLICY_VERSION)
+        return {
+            "pool": pool_payload,
+            "pool_ref": pool_ref,
+            "selection": selection_payload,
+            "selection_name": selection_name,
+            "selection_ref": selection_ref,
+            "selected_record": selected,
+            "selected_evaluation_ref": selected_evaluation_ref,
         }
 
     def run_wave1(self, creative_structure_spec: dict[str, Any], *,
@@ -714,6 +860,158 @@ class CreativePipelineOrchestrator:
             "shot_plan_ref": artifact_ref(shot_name, shot_ref["sha"]),
             "storyboard_ref": artifact_ref(
                 storyboard_name, storyboard_ref["sha"]),
+            "lineage_report": build_lineage_report(self.workspace),
+        }
+
+    def run_wave5(self) -> dict[str, Any]:
+        """Exercise generation/evaluation DAGs using metadata-only adapters."""
+
+        def read_current(name: str, artifact_type: str) -> dict[str, Any]:
+            if self.workspace.effective_status(name) != "committed":
+                raise PipelineBlocked("generation_parent_not_committed", name)
+            value = self.workspace.read_artifact(name)
+            if (not isinstance(value, dict)
+                    or json_hash(value) != self.workspace.get_sha(name)):
+                raise PipelineBlocked("generation_parent_sha_mismatch", name)
+            validate_artifact_envelope(value)
+            if (value["artifact_type"] != artifact_type
+                    or value["artifact_id"] != name):
+                raise PipelineBlocked("generation_parent_type_mismatch", name)
+            return value
+
+        asset_name = "creative:asset_graph"
+        shot_plan_name = "creative:shot_plan"
+        storyboard_name = "creative:storyboard"
+        asset_envelope = read_current(asset_name, "asset_graph")
+        shot_plan_envelope = read_current(shot_plan_name, "shot_plan")
+        storyboard_envelope = read_current(storyboard_name, "storyboard")
+        asset_graph = asset_envelope["payload"]
+        shot_plan = shot_plan_envelope["payload"]
+        storyboard = storyboard_envelope["payload"]
+        asset_sha = str(self.workspace.get_sha(asset_name))
+        shot_plan_sha = str(self.workspace.get_sha(shot_plan_name))
+        storyboard_sha = str(self.workspace.get_sha(storyboard_name))
+        if (shot_plan["asset_graph_sha"] != asset_sha
+                or storyboard["asset_graph_sha"] != asset_sha
+                or storyboard["shot_plan_sha"] != shot_plan_sha):
+            raise PipelineBlocked("generation_parent_binding_mismatch")
+
+        boards = {row["shot_id"]: row for row in storyboard["boards"]}
+        shots = shot_plan["shots"]
+        if set(boards) != {row["shot_id"] for row in shots}:
+            raise PipelineBlocked("generation_storyboard_coverage_mismatch")
+        asset_ref_value = artifact_ref(asset_name, asset_sha)
+        shot_plan_ref = artifact_ref(shot_plan_name, shot_plan_sha)
+        storyboard_ref = artifact_ref(storyboard_name, storyboard_sha)
+        shot_contracts: list[dict[str, Any]] = []
+        selected_videos: list[dict[str, Any]] = []
+        shot_results: list[dict[str, Any]] = []
+
+        for index, shot in enumerate(shots, 1):
+            shot_id = shot["shot_id"]
+            board = boards[shot_id]
+            contract = build_shot_contract(
+                shot=shot, board=board, asset_graph=asset_graph,
+                shot_plan_sha=shot_plan_sha, storyboard_sha=storyboard_sha,
+                asset_graph_sha=asset_sha)
+            contract_name = f"creative:shot_contract:{shot_id}"
+            contract_ref = self._write_envelope(
+                contract_name, artifact_type="generation_shot_contract",
+                payload_schema_version="generation_shot_contract_v1",
+                payload=contract,
+                dependencies=[shot_plan_name, storyboard_name, asset_name],
+                parent_refs=[shot_plan_ref, storyboard_ref, asset_ref_value],
+                producer=self._runtime_producer("compile_shot_contract"),
+                selection_policy_version=WAVE5_GENERATION_POLICY_VERSION)
+            contract_ref_value = artifact_ref(
+                contract_name, contract_ref["sha"])
+            shot_contracts.append(contract)
+
+            image_request = build_image_generation_request(
+                shot_contract=contract,
+                shot_contract_ref=contract_ref_value,
+                asset_graph_ref=asset_ref_value)
+            image_rows = FakeImageGenerator().generate(image_request)
+            image_stage = self._materialize_media_stage(
+                media_kind="image", shot_id=shot_id,
+                request=image_request, raw_candidates=image_rows,
+                validator=validate_image_candidate)
+            image_record = image_stage["selected_record"]
+            image_envelope = read_current(
+                image_record.artifact_id, "image_candidate")
+            image_ref = artifact_ref(
+                image_record.artifact_id, image_record.artifact_sha)
+            image_selection_ref = artifact_ref(
+                image_stage["selection_name"],
+                image_stage["selection_ref"]["sha"])
+
+            video_request = build_video_generation_request(
+                shot_contract=contract,
+                shot_contract_ref=contract_ref_value,
+                asset_graph_ref=asset_ref_value,
+                source_image=image_envelope["payload"],
+                source_image_ref=image_ref,
+                source_image_selection_ref=image_selection_ref)
+            video_rows = FakeVideoGenerator().generate(video_request)
+            video_stage = self._materialize_media_stage(
+                media_kind="video", shot_id=shot_id,
+                request=video_request, raw_candidates=video_rows,
+                validator=validate_video_candidate)
+            video_record = video_stage["selected_record"]
+            video_envelope = read_current(
+                video_record.artifact_id, "video_candidate")
+            selected_videos.append(video_envelope["payload"])
+            shot_results.append({
+                "shot_id": shot_id,
+                "shot_contract_ref": contract_ref_value,
+                "image_pool_ref": artifact_ref(
+                    f"creative:image_pool:{shot_id}",
+                    image_stage["pool_ref"]["sha"]),
+                "image_selection_ref": image_selection_ref,
+                "video_pool_ref": artifact_ref(
+                    f"creative:video_pool:{shot_id}",
+                    video_stage["pool_ref"]["sha"]),
+                "video_selection_ref": artifact_ref(
+                    video_stage["selection_name"],
+                    video_stage["selection_ref"]["sha"]),
+            })
+            self.workspace.record_trace(
+                9 + index,
+                {"stage": "wave5_fake_generation", "shot_id": shot_id},
+                {"image_candidates": len(image_rows),
+                 "video_candidates": len(video_rows)},
+                {"passed": True,
+                 "validators_run": [
+                     "evaluate_media_candidate",
+                     "validate_image_candidate",
+                     "validate_video_candidate"],
+                 "model_calls": 0, "media_generated": False})
+
+        coverage = build_structure_coverage_report(
+            selected_candidates=selected_videos,
+            shot_contracts=shot_contracts)
+        validate_structure_coverage_report(coverage)
+        if coverage["status"] != "PASS":
+            raise PipelineBlocked("selected_structure_coverage_incomplete")
+        coverage_parents = [
+            result["video_selection_ref"] for result in shot_results]
+        coverage_name = "creative:wave5_structure_coverage"
+        coverage_ref = self._write_envelope(
+            coverage_name, artifact_type="selected_structure_coverage",
+            payload_schema_version="selected_structure_coverage_v1",
+            payload=coverage,
+            dependencies=[row["artifact_id"] for row in coverage_parents],
+            parent_refs=coverage_parents,
+            producer=self._runtime_producer("validate_structure_coverage"),
+            selection_policy_version=WAVE5_GENERATION_POLICY_VERSION)
+        return {
+            "schema_version": "r2_d_wave5_result_v1",
+            "status": "PASS", "fixture_only": True,
+            "model_calls": 0, "media_generated": False,
+            "visual_quality": "not_run", "creative_quality": "not_run",
+            "shot_results": shot_results,
+            "structure_coverage_ref": artifact_ref(
+                coverage_name, coverage_ref["sha"]),
             "lineage_report": build_lineage_report(self.workspace),
         }
 
