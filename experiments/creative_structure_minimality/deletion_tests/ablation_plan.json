@@ -1,0 +1,237 @@
+{
+  "schema_version": "creative_structure_ablation_plan_v1",
+  "full_candidate_id": "FULL_V1",
+  "variants": [
+    {
+      "variant_id": "DELETE_I0_PRIOR_INTERPRETATION",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "I0_PRIOR_INTERPRETATION",
+      "removed_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "retained_component_ids": [
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "T1_TRANSFORMATION_STATE"
+      ],
+      "compression_ratio": 0.454545
+    },
+    {
+      "variant_id": "DELETE_E1_NEW_INFORMATION",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "E1_NEW_INFORMATION",
+      "removed_component_ids": [
+        "E1_NEW_INFORMATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "C1_CONTRADICTION",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "I1_UPDATED_INTERPRETATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "T1_TRANSFORMATION_STATE"
+      ],
+      "compression_ratio": 0.454545
+    },
+    {
+      "variant_id": "DELETE_I1_UPDATED_INTERPRETATION",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "I1_UPDATED_INTERPRETATION",
+      "removed_component_ids": [
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "R2_SCOPE_LIMIT"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "compression_ratio": 0.272727
+    },
+    {
+      "variant_id": "DELETE_R1_INFORMATION_UPDATE",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "R1_INFORMATION_UPDATE",
+      "removed_component_ids": [
+        "R1_INFORMATION_UPDATE"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "compression_ratio": 0.090909
+    },
+    {
+      "variant_id": "DELETE_K1_CAPABILITY_SPECIALIZATION",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "K1_CAPABILITY_SPECIALIZATION",
+      "removed_component_ids": [
+        "K1_CAPABILITY_SPECIALIZATION"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "compression_ratio": 0.090909
+    },
+    {
+      "variant_id": "DELETE_Q1_SCOPE_QUALIFIER",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "Q1_SCOPE_QUALIFIER",
+      "removed_component_ids": [
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "compression_ratio": 0.181818
+    },
+    {
+      "variant_id": "DELETE_R2_SCOPE_LIMIT",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "R2_SCOPE_LIMIT",
+      "removed_component_ids": [
+        "R2_SCOPE_LIMIT"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "compression_ratio": 0.090909
+    },
+    {
+      "variant_id": "DELETE_S1_SOCIAL_CONTEXT",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "S1_SOCIAL_CONTEXT",
+      "removed_component_ids": [
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "T1_TRANSFORMATION_STATE"
+      ],
+      "compression_ratio": 0.272727
+    },
+    {
+      "variant_id": "DELETE_C1_CONTRADICTION",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "C1_CONTRADICTION",
+      "removed_component_ids": [
+        "C1_CONTRADICTION",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "T1_TRANSFORMATION_STATE"
+      ],
+      "compression_ratio": 0.181818
+    },
+    {
+      "variant_id": "DELETE_T1_TRANSFORMATION_STATE",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "T1_TRANSFORMATION_STATE",
+      "removed_component_ids": [
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION"
+      ],
+      "compression_ratio": 0.181818
+    },
+    {
+      "variant_id": "DELETE_R3_SOCIAL_TRANSFORMATION",
+      "parent_candidate_id": "FULL_V1",
+      "removed_root_id": "R3_SOCIAL_TRANSFORMATION",
+      "removed_component_ids": [
+        "R3_SOCIAL_TRANSFORMATION"
+      ],
+      "retained_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE",
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE"
+      ],
+      "compression_ratio": 0.090909
+    }
+  ]
+}

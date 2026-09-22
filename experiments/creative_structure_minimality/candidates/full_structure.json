@@ -1,0 +1,90 @@
+{
+  "schema_version": "creative_structure_full_candidate_v1",
+  "candidate_id": "FULL_V1",
+  "components": [
+    {
+      "component_id": "I0_PRIOR_INTERPRETATION",
+      "kind": "state",
+      "statement": "a prior interpretation is available",
+      "depends_on": []
+    },
+    {
+      "component_id": "E1_NEW_INFORMATION",
+      "kind": "evidence",
+      "statement": "new information becomes available",
+      "depends_on": []
+    },
+    {
+      "component_id": "I1_UPDATED_INTERPRETATION",
+      "kind": "state",
+      "statement": "an updated interpretation becomes available",
+      "depends_on": []
+    },
+    {
+      "component_id": "R1_INFORMATION_UPDATE",
+      "kind": "relation",
+      "statement": "the new information updates the prior interpretation",
+      "depends_on": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION"
+      ]
+    },
+    {
+      "component_id": "K1_CAPABILITY_SPECIALIZATION",
+      "kind": "specialization",
+      "statement": "the new information is specifically capability-bearing evidence",
+      "depends_on": [
+        "E1_NEW_INFORMATION"
+      ]
+    },
+    {
+      "component_id": "Q1_SCOPE_QUALIFIER",
+      "kind": "qualifier",
+      "statement": "a qualifier prevents an absolute interpretation",
+      "depends_on": []
+    },
+    {
+      "component_id": "R2_SCOPE_LIMIT",
+      "kind": "relation",
+      "statement": "the qualifier limits the scope of the updated interpretation",
+      "depends_on": [
+        "I1_UPDATED_INTERPRETATION",
+        "Q1_SCOPE_QUALIFIER"
+      ]
+    },
+    {
+      "component_id": "S1_SOCIAL_CONTEXT",
+      "kind": "context",
+      "statement": "the prior interpretation is socially shared",
+      "depends_on": [
+        "I0_PRIOR_INTERPRETATION"
+      ]
+    },
+    {
+      "component_id": "C1_CONTRADICTION",
+      "kind": "relation",
+      "statement": "the new information contradicts the socially shared interpretation",
+      "depends_on": [
+        "S1_SOCIAL_CONTEXT",
+        "E1_NEW_INFORMATION"
+      ]
+    },
+    {
+      "component_id": "T1_TRANSFORMATION_STATE",
+      "kind": "state",
+      "statement": "a transformed interpretation becomes available",
+      "depends_on": []
+    },
+    {
+      "component_id": "R3_SOCIAL_TRANSFORMATION",
+      "kind": "relation",
+      "statement": "the contradiction produces the transformed interpretation",
+      "depends_on": [
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE"
+      ]
+    }
+  ]
+}

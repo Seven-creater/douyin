@@ -1,0 +1,66 @@
+{
+  "schema_version": "creative_structure_transfer_cases_v1",
+  "cases": [
+    {
+      "case_id": "P1_ENGINEERING",
+      "case_type": "positive",
+      "domain": "software incident diagnosis",
+      "description": "A prior diagnosis can be reconsidered when new operational information becomes available.",
+      "control": "cross_domain",
+      "available_binding_material": [
+        "on-call engineer",
+        "system telemetry",
+        "reproduction result"
+      ]
+    },
+    {
+      "case_id": "P2_TEACHING",
+      "case_type": "positive",
+      "domain": "learning assessment",
+      "description": "A prior assessment can be reconsidered when later work or performance becomes available.",
+      "control": "cross_domain",
+      "available_binding_material": [
+        "teacher",
+        "learner work",
+        "later performance"
+      ]
+    },
+    {
+      "case_id": "P3_COOKING",
+      "case_type": "positive",
+      "domain": "cooking process diagnosis",
+      "description": "A prior process judgment can be reconsidered using taste, temperature, or process records.",
+      "control": "cross_domain",
+      "available_binding_material": [
+        "cook",
+        "taste evidence",
+        "temperature record"
+      ]
+    },
+    {
+      "case_id": "N1_SURFACE_LURE",
+      "case_type": "negative",
+      "domain": "athletic competition",
+      "description": "An athlete wins a public race, with no prior interpretation and no information-driven update.",
+      "control": "surface_lure_multiple_relations_missing",
+      "available_binding_material": [
+        "athlete",
+        "race",
+        "victory"
+      ]
+    },
+    {
+      "case_id": "N2_CONTROLLED_MECHANISM",
+      "case_type": "negative",
+      "domain": "athletic competition",
+      "description": "An audience already knows the athlete's capability; the victory only displays an expected result and changes no interpretation.",
+      "control": "same_surface_missing_information_update",
+      "available_binding_material": [
+        "athlete",
+        "race",
+        "victory",
+        "stable prior interpretation"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": "creative_structure_screening_v1",
+  "purpose": "pilot candidate screening only; not the primary minimality experiment",
+  "candidates": [
+    {
+      "candidate_id": "A",
+      "label": "minimal information update",
+      "components": [
+        "a prior interpretation is available",
+        "new information bears on that interpretation",
+        "an updated interpretation becomes available"
+      ],
+      "relations": [
+        "new information updates the prior interpretation"
+      ]
+    },
+    {
+      "candidate_id": "B",
+      "label": "capability evidence plus qualification",
+      "components": [
+        "a prior interpretation is available",
+        "capability-bearing evidence becomes available",
+        "an updated interpretation becomes available",
+        "a qualifier limits the updated interpretation"
+      ],
+      "relations": [
+        "capability-bearing evidence updates the prior interpretation",
+        "the qualifier limits the scope of the update"
+      ]
+    },
+    {
+      "candidate_id": "C",
+      "label": "social contradiction and transformation",
+      "components": [
+        "a socially shared belief is available",
+        "later information contradicts that belief",
+        "a transformed interpretation becomes available"
+      ],
+      "relations": [
+        "later information contradicts the social belief",
+        "the contradiction transforms the interpretation"
+      ]
+    }
+  ]
+}
