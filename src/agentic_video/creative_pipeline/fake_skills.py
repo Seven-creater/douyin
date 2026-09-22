@@ -12,6 +12,7 @@ from src.agentic_video.creative_pipeline.planning.story import (
 from src.agentic_video.creative_pipeline.planning.theme import (
     build_fake_theme_candidates,
 )
+from src.agentic_video.creative_pipeline.writing.adapter import fake_screenplay_spec
 from src.agentic_video.skills.registry import SkillRegistry, SkillSpec
 
 
@@ -76,4 +77,5 @@ def build_fake_registry() -> SkillRegistry:
         package_sha=package_sha,
         prompt_or_instruction_sha=json_hash({"fixture": "fake_story_v1"}),
     ))
+    registry.register(fake_screenplay_spec())
     return registry

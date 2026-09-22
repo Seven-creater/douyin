@@ -1,7 +1,8 @@
-"""Frozen R2-D stage graph and deterministic Wave 1 orchestration."""
+"""Frozen R2-D stage graph and deterministic contract orchestration."""
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
@@ -13,6 +14,7 @@ from src.agentic_video.creative_pipeline.contracts import (
     SelectionArtifact,
     artifact_ref,
     build_validation_report,
+    validate_artifact_envelope,
     validate_candidate_pool,
     validate_selection_artifact,
 )
@@ -22,6 +24,15 @@ from src.agentic_video.creative_pipeline.evaluation.structure import (
 )
 from src.agentic_video.creative_pipeline.planning.story import STORY_SELECT_K
 from src.agentic_video.creative_pipeline.planning.theme import THEME_SELECT_K
+from src.agentic_video.creative_pipeline.writing.adapter import (
+    build_blind_evaluation_request, build_screenplay_request,
+)
+from src.agentic_video.creative_pipeline.writing.screenplay import (
+    SCREENPLAY_MAX_CANDIDATES, SCREENPLAY_SELECT_K, SCREENPLAY_SELECTION_POLICY,
+)
+from src.agentic_video.creative_pipeline.writing.validator import (
+    validate_format_constraints, validate_screenplay,
+)
 from src.agentic_video.creative_structure_v1.freeze import validate_frozen_spec
 from src.agentic_video.manifest import json_hash
 from src.agentic_video.provenance import build_lineage_report
@@ -71,7 +82,7 @@ class PipelineBlocked(RuntimeError):
 
 
 class CreativePipelineOrchestrator:
-    """Execute the authorized model-free Theme/Story planning fixtures."""
+    """Execute the authorized model-free creative contract fixtures."""
 
     def __init__(self, workspace: Workspace, registry: SkillRegistry) -> None:
         self.workspace = workspace
@@ -219,8 +230,10 @@ class CreativePipelineOrchestrator:
             candidate_dependencies = (
                 candidate_dependency_resolver(payload)
                 if candidate_dependency_resolver else dependency_names)
-            candidate_id = str(payload.get(
-                "theme_id" if stage == "theme" else "blueprint_id"))
+            candidate_id = str(payload[{
+                "theme": "theme_id", "story_blueprint": "blueprint_id",
+                "screenplay": "screenplay_id",
+            }[stage]])
             name = f"creative:{candidate_type}:{candidate_id}"
             committed = self._write_envelope(
                 name,
@@ -409,6 +422,141 @@ class CreativePipelineOrchestrator:
             "structure_workspace_ref": structure_workspace_ref,
             "theme_selection": theme["selection"],
             "story_blueprint_selection": story["selection"],
+            "call_counts": dict(self.call_counts),
+            "lineage_report": build_lineage_report(self.workspace),
+        }
+
+    def run_wave3(self, creative_structure_spec: dict[str, Any], *,
+                  format_constraints: dict[str, Any]) -> dict[str, Any]:
+        """Continue committed Wave 2 selections with three fake writer calls."""
+        validate_frozen_spec(creative_structure_spec)
+        validate_format_constraints(format_constraints)
+
+        def read_current(name: str, artifact_type: str | None = None) -> dict:
+            if self.workspace.effective_status(name) != "committed":
+                raise PipelineBlocked("screenplay_parent_not_committed", name)
+            value = self.workspace.read_artifact(name)
+            if not isinstance(value, dict) or json_hash(value) != self.workspace.get_sha(name):
+                raise PipelineBlocked("screenplay_parent_sha_mismatch", name)
+            if artifact_type:
+                validate_artifact_envelope(value)
+                if value["artifact_type"] != artifact_type or value["artifact_id"] != name:
+                    raise PipelineBlocked("screenplay_parent_type_mismatch", name)
+            return value
+
+        current_spec = read_current("creative:structure_spec")
+        if (current_spec != creative_structure_spec
+                or creative_structure_spec["artifact_sha"] != FROZEN_STRUCTURE_SHA):
+            raise PipelineBlocked("structure_workspace_conflict")
+        public_ref = artifact_ref(current_spec["spec_id"], current_spec["artifact_sha"])
+        pool_name = "creative:story_blueprint_pool"
+        pool = read_current(pool_name, "candidate_pool")["payload"]
+        validate_candidate_pool(pool)
+        records = {row["candidate_id"]: row for row in pool["candidates"]}
+        requests: dict[str, dict] = {}
+        origins: dict[str, list[dict[str, str]]] = {}
+        # Resolve and validate every selection before the first writer call.
+        for index in range(1, SCREENPLAY_MAX_CANDIDATES + 1):
+            selection_name = "creative:story_blueprint_selection" + (
+                "" if index == 1 else f":{index:02d}")
+            selection = read_current(selection_name, "selection")["payload"]
+            validate_selection_artifact(selection, pool)
+            if selection["pool_ref"] != artifact_ref(pool_name, self.workspace.get_sha(pool_name)):
+                raise PipelineBlocked("screenplay_selection_pool_sha_mismatch")
+            record = records[selection["selected_candidate_id"]]
+            blueprint_name = record["artifact_id"]
+            if (blueprint_name != f"creative:story_blueprint:{record['candidate_id']}"
+                    or not all(char.isalnum() or char == "_"
+                               for char in record["candidate_id"])):
+                raise PipelineBlocked("screenplay_blueprint_artifact_id_invalid")
+            envelope = read_current(blueprint_name, "story_blueprint")
+            if (record["artifact_sha"] != self.workspace.get_sha(blueprint_name)
+                    or record["status"] not in {"eligible", "scored", "selected"}):
+                raise PipelineBlocked("screenplay_selected_blueprint_invalid")
+            request = build_screenplay_request(
+                creative_structure_spec=current_spec, blueprint_envelope=envelope,
+                blueprint_sha=record["artifact_sha"], format_constraints=format_constraints)
+            blueprint_id = request["story_blueprint"]["blueprint_id"]
+            if blueprint_id in requests or blueprint_id != record["candidate_id"]:
+                raise PipelineBlocked("screenplay_blueprint_selection_duplicate_or_mismatch")
+            requests[blueprint_id] = request
+            origins[blueprint_id] = [public_ref,
+                artifact_ref(blueprint_name, record["artifact_sha"]),
+                artifact_ref(selection_name, self.workspace.get_sha(selection_name))]
+
+        constraints_name = "creative:screenplay_format_constraints"
+        constraints_ref = self._write_envelope(
+            constraints_name, artifact_type="format_constraints",
+            payload_schema_version="screenplay_format_constraints_v1",
+            payload=deepcopy(format_constraints), dependencies=[], parent_refs=[],
+            producer=self._runtime_producer("screenplay_format_constraints"),
+            selection_policy_version=SCREENPLAY_SELECTION_POLICY)
+        for parents in origins.values():
+            parents.append(artifact_ref(constraints_name, constraints_ref["sha"]))
+
+        candidates = []
+        for index, (blueprint_id, request) in enumerate(requests.items(), 1):
+            skill, batch = self._execute_skill("fake_screenplay", request=deepcopy(request))
+            try:
+                if len(batch["candidates"]) != 1:
+                    raise ContractError("screenplay_batch_count_invalid")
+                candidate = batch["candidates"][0]
+                validate_screenplay(
+                    candidate, blueprint=request["story_blueprint"],
+                    blueprint_sha=request["story_blueprint_sha"],
+                    structure_sha=current_spec["artifact_sha"],
+                    format_constraints=format_constraints)
+                blind_request = build_blind_evaluation_request(
+                    candidate, evaluation_id=f"EVAL_{index:02d}", writer_request=request)
+            except ContractError as exc:
+                self.workspace.record_trace(index + 2,
+                    {"skill": skill.name, "request_sha": json_hash(request)},
+                    {"raw_response": batch},
+                    {"passed": False, "reason_code": exc.reason_code, "retry_count": 0})
+                raise
+            candidates.append(candidate)
+            self.workspace.record_trace(index + 2,
+                {"skill": skill.name, "producer": self._producer(skill),
+                 "request": request, "request_sha": json_hash(request),
+                 "parent_refs": origins[blueprint_id]},
+                {"raw_response": batch, "blind_evaluation_request": blind_request},
+                {"passed": True, "validators_run": ["validate_screenplay"],
+                 "quality_evaluation": "not_run", "model_calls": 0, "retry_count": 0})
+
+        def validate_candidate(candidate: dict) -> None:
+            request = requests.get(candidate.get("blueprint_id"))
+            if request is None:
+                raise ContractError("screenplay_blueprint_not_selected")
+            validate_screenplay(candidate, blueprint=request["story_blueprint"],
+                blueprint_sha=request["story_blueprint_sha"],
+                structure_sha=current_spec["artifact_sha"],
+                format_constraints=format_constraints)
+
+        all_parents = []
+        for parents in origins.values():
+            for parent in parents:
+                if parent not in all_parents:
+                    all_parents.append(parent)
+        stage = self._materialize_stage(
+            stage="screenplay", skill=skill, raw_candidates=candidates,
+            candidate_type="screenplay", candidate_schema="screenplay_v1",
+            validator_id="validate_screenplay", validator=validate_candidate,
+            parent_refs=all_parents, dependency_names=[],
+            selection_count=SCREENPLAY_SELECT_K,
+            selection_policy_version=SCREENPLAY_SELECTION_POLICY,
+            decision_origin="deterministic_wave3_fixture",
+            candidate_parent_resolver=lambda value: origins[value["blueprint_id"]],
+            candidate_dependency_resolver=lambda value: [
+                "creative:structure_spec",
+                *[row["artifact_id"] for row in origins[value["blueprint_id"]][1:]]])
+        return {
+            "schema_version": "r2_d_wave3_result_v1", "status": "PASS",
+            "fixture_only": True, "model_calls": 0,
+            "quality_evaluation": "not_run", "semantic_entailment": "not_run",
+            "screenplay_pool_ref": stage["pool_ref"],
+            "screenplay_selection": stage["selection"],
+            "committed_screenplay_ref": artifact_ref(
+                stage["selected_record"].artifact_id, stage["selected_record"].artifact_sha),
             "call_counts": dict(self.call_counts),
             "lineage_report": build_lineage_report(self.workspace),
         }
