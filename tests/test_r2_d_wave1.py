@@ -80,23 +80,26 @@ def test_wave1_runs_spec_to_story_selection_with_zero_model_calls(
     assert result["structure_public_sha"] == _spec()["artifact_sha"]
     assert result["call_counts"] == {"fake_theme": 1, "fake_story": 1}
     assert result["theme_selection"]["selected_candidate_id"] \
-        == "FAKE_THEME_A"
+        == "FAKE_THEME_01"
     assert result["story_blueprint_selection"]["selected_candidate_id"] \
-        == "FAKE_BLUEPRINT_A"
+        == "FAKE_BLUEPRINT_FAKE_THEME_01_01"
 
     expected = {
         "creative:structure_spec",
-        "creative:theme_candidate:FAKE_THEME_A",
-        "creative:theme_candidate:FAKE_THEME_B",
         "creative:theme_validation",
         "creative:theme_pool",
         "creative:theme_selection",
-        "creative:story_blueprint:FAKE_BLUEPRINT_A",
-        "creative:story_blueprint:FAKE_BLUEPRINT_B",
         "creative:story_blueprint_validation",
         "creative:story_blueprint_pool",
         "creative:story_blueprint_selection",
     }
+    expected.update(
+        f"creative:theme_candidate:FAKE_THEME_{index:02d}"
+        for index in range(1, 21))
+    expected.update(
+        "creative:story_blueprint:"
+        f"FAKE_BLUEPRINT_FAKE_THEME_01_{index:02d}"
+        for index in range(1, 6))
     assert set(workspace.state["artifacts"]) == expected
     assert all(workspace.effective_status(name) == "committed"
                for name in expected)
@@ -119,8 +122,8 @@ def test_wave1_candidates_have_distinct_files_and_exact_lineage(
     workspace, orchestrator = _runtime(tmp_path)
     result = orchestrator.run_wave1(_spec())
 
-    first = "creative:theme_candidate:FAKE_THEME_A"
-    second = "creative:theme_candidate:FAKE_THEME_B"
+    first = "creative:theme_candidate:FAKE_THEME_01"
+    second = "creative:theme_candidate:FAKE_THEME_02"
     first_path = workspace._stage_dir(first) / "v1.json"
     second_path = workspace._stage_dir(second) / "v1.json"
     assert first_path != second_path
