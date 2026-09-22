@@ -1,0 +1,39 @@
+{
+  "schema_version": "creative_structure_freeze_record_v1",
+  "freeze_id": "R2-C.5",
+  "status": "FROZEN",
+  "decision_origin": "internal_simulation",
+  "human_evaluation_claim": false,
+  "selected_component_ids": [
+    "I0_PRIOR_INTERPRETATION",
+    "E1_NEW_INFORMATION",
+    "I1_UPDATED_INTERPRETATION",
+    "R1_INFORMATION_UPDATE"
+  ],
+  "source_files": [
+    {
+      "path": "candidates\\full_structure.json",
+      "sha256": "f5fee9b23f0a4655ecd8e1e9cbb6a613a4d9686487ff1877f68017f10a40b025"
+    },
+    {
+      "path": "candidates\\screening_candidates.json",
+      "sha256": "3ea678ec207328255be4f1b23336f64d730d7d4682d678d23ced5299197f5a89"
+    },
+    {
+      "path": "bindings\\cases.json",
+      "sha256": "0de4185dceef78c9fa3c03fdbc605cedc31f173d0709fb24f21ff4b90732ef8d"
+    },
+    {
+      "path": "r2_c5\\internal_review.json",
+      "sha256": "ab515e07e71e1824acd8a24a4399432a0e6235901509084519324433ee4d263b"
+    },
+    {
+      "path": "r2_c5\\transfer_bindings.json",
+      "sha256": "e1c4daf78967b3c15067d6e861b4a3cdc46cacf3d56876c99d65d851c7d0a9c1"
+    }
+  ],
+  "spec_sha": "5a22fb5af29588b6220fbe9ccda751c922abe617fca1716b2f97f2942218a967",
+  "transfer_report_sha": "6ac9eb903fee1e43ad15af6da1d760e8871c7c773f1f6d038f8a0ef812698ea8",
+  "next_authorized_stage": "R2-D_SKILL_INTEGRATION",
+  "artifact_sha": "b7cad61967a98f5c3f02de14109469a1621945e72af8e27c376425cfd0cd515c"
+}

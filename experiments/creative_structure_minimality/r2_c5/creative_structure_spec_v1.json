@@ -1,0 +1,155 @@
+{
+  "schema_version": "creative_structure_spec_v1",
+  "spec_id": "CREATIVE-STRUCTURE-V1",
+  "plan_status": "complete",
+  "available_dimensions": [
+    "structural_schema",
+    "information_state_arc",
+    "generation_constraints",
+    "binding_slots"
+  ],
+  "dimension_status": {
+    "structural_schema": "supported",
+    "information_state_arc": "supported",
+    "generation_constraints": "supported",
+    "editing_structure": "not_applicable",
+    "editing_function": "not_applicable",
+    "binding_slots": "supported"
+  },
+  "structural_schema": {
+    "elements": [
+      {
+        "element_id": "I0_PRIOR_INTERPRETATION",
+        "kind": "information_state",
+        "abstract_role": "a prior interpretation is available"
+      },
+      {
+        "element_id": "E1_NEW_INFORMATION",
+        "kind": "evidence_role",
+        "abstract_role": "new information becomes available"
+      },
+      {
+        "element_id": "I1_UPDATED_INTERPRETATION",
+        "kind": "information_state",
+        "abstract_role": "an updated interpretation becomes available"
+      }
+    ],
+    "relations": [
+      {
+        "relation_id": "R1_INFORMATION_UPDATE",
+        "relation_kind": "evidential",
+        "predicate": "new information updates a prior interpretation into an updated interpretation",
+        "arguments": [
+          {
+            "role": "prior",
+            "element_id": "I0_PRIOR_INTERPRETATION"
+          },
+          {
+            "role": "evidence",
+            "element_id": "E1_NEW_INFORMATION"
+          },
+          {
+            "role": "updated",
+            "element_id": "I1_UPDATED_INTERPRETATION"
+          }
+        ],
+        "preconditions": [
+          "a prior interpretation is available"
+        ],
+        "effects": [
+          "an updated interpretation becomes available"
+        ]
+      }
+    ]
+  },
+  "information_state_arc": [
+    {
+      "state_id": "STATE_PRIOR",
+      "order": 1,
+      "available_element_ids": [
+        "I0_PRIOR_INTERPRETATION"
+      ],
+      "transition_from_state_id": null,
+      "trigger_relation_ids": []
+    },
+    {
+      "state_id": "STATE_UPDATED",
+      "order": 2,
+      "available_element_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION"
+      ],
+      "transition_from_state_id": "STATE_PRIOR",
+      "trigger_relation_ids": [
+        "R1_INFORMATION_UPDATE"
+      ]
+    }
+  ],
+  "generation_constraints": [
+    {
+      "constraint_id": "GC_INFORMATION_UPDATE",
+      "obligation": "required",
+      "constraint_type": "relational",
+      "requires_relation_ids": [
+        "R1_INFORMATION_UPDATE"
+      ],
+      "rule": "The generated story must contain an initial interpretation that is updated by newly introduced information."
+    }
+  ],
+  "editing_schema": {
+    "constraints": []
+  },
+  "binding_slots": [
+    {
+      "slot_id": "B_DOMAIN",
+      "slot_type": "domain",
+      "bound_by": "downstream_skill",
+      "constraints": [
+        "must not alter the required relation"
+      ]
+    },
+    {
+      "slot_id": "B_ENTITY_ROLE",
+      "slot_type": "entity_role",
+      "bound_by": "downstream_skill",
+      "constraints": [
+        "must remain independent of the reference entity"
+      ]
+    },
+    {
+      "slot_id": "B_EVIDENCE_FORM",
+      "slot_type": "evidence_form",
+      "bound_by": "downstream_skill",
+      "constraints": [
+        "must supply the new-information role"
+      ]
+    },
+    {
+      "slot_id": "B_SETTING",
+      "slot_type": "setting",
+      "bound_by": "downstream_skill",
+      "constraints": [
+        "must not alter the required relation"
+      ]
+    }
+  ],
+  "downstream_contract": {
+    "required_constraint_ids": [
+      "GC_INFORMATION_UPDATE"
+    ],
+    "variable_slot_ids": [
+      "B_DOMAIN",
+      "B_ENTITY_ROLE",
+      "B_EVIDENCE_FORM",
+      "B_SETTING"
+    ],
+    "authorized_stages": [
+      "theme",
+      "story",
+      "screenplay"
+    ],
+    "reference_context_allowed": false
+  },
+  "artifact_sha": "5a22fb5af29588b6220fbe9ccda751c922abe617fca1716b2f97f2942218a967"
+}

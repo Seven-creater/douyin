@@ -1,0 +1,63 @@
+{
+  "schema_version": "creative_structure_transfer_bindings_v1",
+  "spec_id": "CREATIVE-STRUCTURE-V1",
+  "cases": [
+    {
+      "case_id": "P1_ENGINEERING",
+      "expected": "preserve",
+      "component_bindings": {
+        "I0_PRIOR_INTERPRETATION": "the incident is initially interpreted as a random software fault",
+        "E1_NEW_INFORMATION": "system telemetry and a reproduction result become available",
+        "I1_UPDATED_INTERPRETATION": "the incident is reinterpreted as a specific causal failure",
+        "R1_INFORMATION_UPDATE": "the operational evidence updates the prior diagnosis"
+      },
+      "missing_component_ids": [],
+      "structural_edits": []
+    },
+    {
+      "case_id": "P2_TEACHING",
+      "expected": "preserve",
+      "component_bindings": {
+        "I0_PRIOR_INTERPRETATION": "a learner is initially assessed as lacking understanding",
+        "E1_NEW_INFORMATION": "later work and performance become available",
+        "I1_UPDATED_INTERPRETATION": "the learner receives an updated assessment",
+        "R1_INFORMATION_UPDATE": "the later evidence updates the prior assessment"
+      },
+      "missing_component_ids": [],
+      "structural_edits": []
+    },
+    {
+      "case_id": "P3_COOKING",
+      "expected": "preserve",
+      "component_bindings": {
+        "I0_PRIOR_INTERPRETATION": "a failed result is initially attributed to the recipe",
+        "E1_NEW_INFORMATION": "taste, temperature, and process records become available",
+        "I1_UPDATED_INTERPRETATION": "the failure receives an updated process diagnosis",
+        "R1_INFORMATION_UPDATE": "the process evidence updates the prior judgment"
+      },
+      "missing_component_ids": [],
+      "structural_edits": []
+    },
+    {
+      "case_id": "N1_SURFACE_LURE",
+      "expected": "reject",
+      "component_bindings": {},
+      "missing_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE"
+      ],
+      "structural_edits": []
+    },
+    {
+      "case_id": "N2_CONTROLLED_MECHANISM",
+      "expected": "reject",
+      "component_bindings": {},
+      "missing_component_ids": [
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE"
+      ],
+      "structural_edits": []
+    }
+  ]
+}

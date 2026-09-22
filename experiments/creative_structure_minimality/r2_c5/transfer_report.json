@@ -1,0 +1,50 @@
+{
+  "schema_version": "creative_structure_transfer_report_v1",
+  "spec_id": "CREATIVE-STRUCTURE-V1",
+  "spec_sha": "5a22fb5af29588b6220fbe9ccda751c922abe617fca1716b2f97f2942218a967",
+  "status": "PASS",
+  "checks": {
+    "structural_schema_valid": true,
+    "reference_context_excluded": true,
+    "positive_transfer_passed": true,
+    "surface_lure_rejected": true
+  },
+  "case_results": [
+    {
+      "case_id": "P1_ENGINEERING",
+      "case_type": "positive",
+      "domain": "software incident diagnosis",
+      "passed": true,
+      "reason": "all frozen components bind without structural edits"
+    },
+    {
+      "case_id": "P2_TEACHING",
+      "case_type": "positive",
+      "domain": "learning assessment",
+      "passed": true,
+      "reason": "all frozen components bind without structural edits"
+    },
+    {
+      "case_id": "P3_COOKING",
+      "case_type": "positive",
+      "domain": "cooking process diagnosis",
+      "passed": true,
+      "reason": "all frozen components bind without structural edits"
+    },
+    {
+      "case_id": "N1_SURFACE_LURE",
+      "case_type": "negative",
+      "domain": "athletic competition",
+      "passed": true,
+      "reason": "negative control lacks the required information-update relation"
+    },
+    {
+      "case_id": "N2_CONTROLLED_MECHANISM",
+      "case_type": "negative",
+      "domain": "athletic competition",
+      "passed": true,
+      "reason": "negative control lacks the required information-update relation"
+    }
+  ],
+  "artifact_sha": "6ac9eb903fee1e43ad15af6da1d760e8871c7c773f1f6d038f8a0ef812698ea8"
+}

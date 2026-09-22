@@ -1,0 +1,86 @@
+{
+  "schema_version": "r2_c4_internal_review_v1",
+  "review_mode": "internal_simulation",
+  "human_evaluation_claim": false,
+  "decision_status": "SELECTED_FOR_ENGINEERING_FREEZE",
+  "reviewers": [
+    {
+      "reviewer_id": "SIMULATED_A",
+      "candidate_decisions": {
+        "A": "PASS",
+        "B": "PASS_WITH_OVERSPECIFICATION",
+        "C": "FAIL_GENERALIZATION"
+      },
+      "necessary_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE"
+      ],
+      "removable_component_ids": [
+        "K1_CAPABILITY_SPECIALIZATION",
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ]
+    },
+    {
+      "reviewer_id": "SIMULATED_B",
+      "candidate_decisions": {
+        "A": "PASS",
+        "B": "PASS_BUT_OPTIONAL",
+        "C": "FAIL_GENERALIZATION"
+      },
+      "necessary_component_ids": [
+        "I0_PRIOR_INTERPRETATION",
+        "E1_NEW_INFORMATION",
+        "I1_UPDATED_INTERPRETATION",
+        "R1_INFORMATION_UPDATE"
+      ],
+      "optional_component_ids": [
+        "K1_CAPABILITY_SPECIALIZATION"
+      ],
+      "removable_component_ids": [
+        "Q1_SCOPE_QUALIFIER",
+        "R2_SCOPE_LIMIT",
+        "S1_SOCIAL_CONTEXT",
+        "C1_CONTRADICTION",
+        "T1_TRANSFORMATION_STATE",
+        "R3_SOCIAL_TRANSFORMATION"
+      ]
+    }
+  ],
+  "disagreements": [
+    {
+      "component_id": "K1_CAPABILITY_SPECIALIZATION",
+      "reviewer_a": "remove",
+      "reviewer_b": "optional",
+      "resolution": "remove",
+      "reason": "the engineering objective is the minimal sufficient transferable structure"
+    }
+  ],
+  "selected_candidate_id": "A",
+  "selected_component_ids": [
+    "I0_PRIOR_INTERPRETATION",
+    "E1_NEW_INFORMATION",
+    "I1_UPDATED_INTERPRETATION",
+    "R1_INFORMATION_UPDATE"
+  ],
+  "removed_component_ids": [
+    "K1_CAPABILITY_SPECIALIZATION",
+    "Q1_SCOPE_QUALIFIER",
+    "R2_SCOPE_LIMIT",
+    "S1_SOCIAL_CONTEXT",
+    "C1_CONTRADICTION",
+    "T1_TRANSFORMATION_STATE",
+    "R3_SOCIAL_TRANSFORMATION"
+  ],
+  "limitations": [
+    "This is an internal simulated review, not an independent human evaluation.",
+    "The original first-level deletion experiment remains unexecuted and NOT_READY.",
+    "The four-component selection combines pilot candidate screening with simulated component-necessity judgments."
+  ]
+}

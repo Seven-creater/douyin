@@ -330,6 +330,13 @@ class Workspace:
         # 03_asset_studio/<name>/（每 artifact 独立子目录防版本文件撞名）
         if name.startswith("asset:"):
             return self.root / "03_asset_studio" / name[len("asset:"):]
+        if name.startswith("creative:"):
+            # R2-D creative artifacts require an isolated directory per
+            # artifact. Mapping every unknown name to 99_misc would make
+            # distinct candidate artifacts overwrite the same v1.json.
+            parts = [part for part in name[len("creative:"):].split(":")
+                     if part]
+            return self.root / "01_creative_pipeline" / Path(*parts)
         if name in ("shot_plan", "storyboard_frames"):
             return self.root / "04_storyboard" / name
         mapping = {
