@@ -549,3 +549,69 @@ def test_r2_bundle_contains_no_raw_claim_or_identity_scaffolding() -> None:
     assert "source_bindings" not in serialized
     assert bundle["editing_grammar"]["semantic_patterns"][0][
         "source_strength"] == "unaudited_semantic"
+
+
+def test_abstraction_boundary_rejects_reused_source_ids() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_abstraction_boundary,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    candidate = _complete_audit()
+    candidate["mechanism_graph"]["nodes"][0]["node_id"] = "N1"
+    candidate["mechanism_graph"]["edges"][0]["target"] = "N1"
+    candidate = _finalize(candidate)
+
+    with pytest.raises(AbstractionBoundaryError, match="abstract_id_reuses_source_id"):
+        validate_abstraction_boundary(candidate, build_r2_bundle(narrative, editing))
+
+
+def test_abstraction_boundary_rejects_section_role_labels() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_abstraction_boundary,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    candidate = _complete_audit()
+    candidate["mechanism_graph"]["nodes"][0]["abstract_role"] = "establish"
+    candidate = _finalize(candidate)
+
+    with pytest.raises(AbstractionBoundaryError, match="abstract_role_not_mechanism"):
+        validate_abstraction_boundary(candidate, build_r2_bundle(narrative, editing))
+
+
+def test_abstraction_boundary_rejects_dynamic_reference_surface_copy() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        AbstractionBoundaryError,
+        validate_abstraction_boundary,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    narrative["narrative_units"][1]["summary"] = (
+        "A fencing contest supplies later observable information."
+    )
+    narrative = _finalize(narrative)
+    candidate = _complete_audit()
+    candidate["mechanism_graph"]["nodes"][1]["abstract_role"] = (
+        "a fencing contest supplies later observable information"
+    )
+    candidate = _finalize(candidate)
+
+    with pytest.raises(AbstractionBoundaryError, match="reference_surface_in_public_field"):
+        validate_abstraction_boundary(candidate, build_r2_bundle(narrative, editing))
+
+
+def test_abstraction_boundary_accepts_cross_domain_mechanism_roles() -> None:
+    from src.agentic_video.creative_dna_v3.abstraction_validator import (
+        validate_abstraction_boundary,
+    )
+    from src.agentic_video.creative_dna_v3.extractor import build_r2_bundle
+
+    narrative, editing = _r2_sources()
+    validate_abstraction_boundary(
+        _complete_audit(), build_r2_bundle(narrative, editing))

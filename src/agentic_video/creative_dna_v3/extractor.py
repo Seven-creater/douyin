@@ -10,6 +10,9 @@ from src.agentic_video.creative_dna_v3.abstraction_prompt import (
     EXTRACTION_MAX_NEW_TOKENS,
     STRUCTURAL_ABSTRACTION_PROMPT,
 )
+from src.agentic_video.creative_dna_v3.abstraction_validator import (
+    validate_abstraction_boundary,
+)
 from src.agentic_video.creative_dna_v3.schema import (
     AUDIT_SCHEMA_VERSION,
     VALIDATION_RECORD_KEYS,
@@ -218,6 +221,7 @@ def extract_creative_dna(runner: Any, narrative: dict[str, Any],
         }
         candidate["artifact_sha"] = json_hash(candidate)
         validate_dna_audit(candidate)
+        validate_abstraction_boundary(candidate, bundle)
         known = {row["evidence_id"] for row in bundle["evidence_catalog"]}
         used = {
             ref for binding in candidate["source_bindings"]

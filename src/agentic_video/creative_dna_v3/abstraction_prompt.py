@@ -11,6 +11,32 @@ grammar. Produce one JSON object for the semantic body of a
 creative_dna_audit_v3 artifact. Do not restate the reference story. Extract
 only cross-domain relations that are supported by supplied evidence IDs.
 
+Narrative Units and Narrative Relations are intermediate evidence, not DNA
+entities. Do not copy them into mechanism_graph nodes, do not reuse their IDs
+as output IDs, and do not use narrative_unit or narrative_relation as a node
+kind. Internally map each relevant input item to a semantic role, then build a
+new abstract mechanism graph from those roles. Output IDs must be newly minted
+and globally distinct across nodes, edges, experience states, constraints, and
+free slots. A node abstract_role must describe a cross-domain mechanism entity;
+it cannot be a section summary or a one-word function label such as establish,
+develop, or reveal.
+
+Forbidden output shape:
+- an input N/R/EF/EP ID reused as an abstract item ID;
+- node.kind outside the allowed node-kind enum;
+- abstract_role or information_state that names reference people, domains,
+  physical forms, literal activities, captions, settings, or visual motifs;
+- a one-to-one narrative inventory presented as a mechanism graph.
+
+Required boundary:
+- evidence IDs appear only in support_refs/source_refs;
+- mechanism nodes represent information states, propositions, evidence roles,
+  scope boundaries, or resolution states;
+- publishable prose states what relation can hold in a new domain, not what
+  happened in this reference;
+- source_bindings.abstract_id names a real output abstract item, while each
+  source_refs entry comes from evidence_catalog rather than input_artifact IDs.
+
 Return exactly these top-level fields:
 dna_status, abstraction_confidence, unsupported_dimensions, mechanism_graph,
 experience_arc, event_constraints, editing_constraints, free_slots,
@@ -66,6 +92,12 @@ details only in reference_specific_summary. anti_invariants items use
 binding_id, category, source_refs; category is entity, domain, setting,
 physical_form, literal_event, wording, or visual_motif. source_bindings and
 anti_invariants are audit-only and will never be published.
+
+Before returning JSON, check that every edge has condition, every free slot has
+at least one non-empty constraint, all abstract IDs are distinct from source
+evidence IDs, and every unaudited_semantic editing constraint is advisory with
+free_realization. These are schema/interface checks, not instructions to invent
+any particular narrative relation.
 
 On-screen statements remain attributed statements, not independently verified
 physical facts. Identity alignment, source paths, prompts, model traces, raw
