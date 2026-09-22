@@ -14,13 +14,26 @@ from src.agentic_video.workspace import Workspace
 
 
 REPAIR_STAGE_ORDER = {
-    "asset_graph": 0,
-    "shot_contract": 1,
-    "image_candidate": 2,
-    "image_selection": 3,
-    "video_candidate": 4,
-    "video_selection": 5,
-    "final_assembly": 6,
+    "screenplay": 0,
+    "asset_graph": 1,
+    "storyboard": 2,
+    "shot_contract": 3,
+    "image_candidate": 4,
+    "image_selection": 5,
+    "video_candidate": 6,
+    "video_selection": 7,
+    "final_assembly": 8,
+}
+REPAIR_FAILURE_CLASSES = frozenset({
+    "structure_failure", "asset_failure", "shot_failure",
+    "generation_failure",
+})
+FAILURE_CLASS_TARGETS = {
+    "structure_failure": frozenset({"screenplay", "storyboard"}),
+    "asset_failure": frozenset({"asset_graph"}),
+    "shot_failure": frozenset({"shot_contract"}),
+    "generation_failure": frozenset({
+        "image_candidate", "video_candidate"}),
 }
 FAILURE_FIELDS = {
     "schema_version", "failed_artifact_ref", "stage", "reason_codes",
@@ -29,6 +42,95 @@ PLAN_FIELDS = {
     "schema_version", "repair_plan_id", "target_ref", "target_stage",
     "reason_codes", "action", "downstream_policy",
 }
+CLASSIFICATION_FIELDS = {
+    "schema_version", "classification_id", "failure_class",
+    "source_evaluation_ref", "failed_artifact_ref", "repair_target_ref",
+    "repair_target_stage", "reason_codes", "classifier_origin",
+}
+
+
+def _stage_for_artifact(artifact_id: str) -> str:
+    if artifact_id.startswith("creative:screenplay:"):
+        return "screenplay"
+    if artifact_id == "creative:asset_graph":
+        return "asset_graph"
+    if artifact_id == "creative:storyboard":
+        return "storyboard"
+    if artifact_id.startswith("creative:shot_contract:"):
+        return "shot_contract"
+    if artifact_id.startswith("creative:image_candidate:"):
+        return "image_candidate"
+    if artifact_id.startswith("creative:video_candidate:"):
+        return "video_candidate"
+    raise ContractError("repair_classification_target_unknown")
+
+
+def build_repair_classification(
+        *, failure_class: str, source_evaluation_ref: dict[str, str],
+        failed_artifact_ref: dict[str, str],
+        repair_target_ref: dict[str, str],
+        reason_codes: list[str]) -> dict[str, Any]:
+    """Record an explicit diagnosis; do not infer semantics from score alone."""
+    target_stage = _stage_for_artifact(repair_target_ref["artifact_id"])
+    value = {
+        "schema_version": "r2e_repair_classification_v1",
+        "classification_id": f"CLASSIFY_{json_hash({
+            'failure_class': failure_class,
+            'source_evaluation_ref': source_evaluation_ref,
+            'failed_artifact_ref': failed_artifact_ref,
+            'repair_target_ref': repair_target_ref,
+            'reason_codes': reason_codes,
+        })[:16]}",
+        "failure_class": failure_class,
+        "source_evaluation_ref": dict(source_evaluation_ref),
+        "failed_artifact_ref": dict(failed_artifact_ref),
+        "repair_target_ref": dict(repair_target_ref),
+        "repair_target_stage": target_stage,
+        "reason_codes": list(reason_codes),
+        "classifier_origin": "deterministic_explicit_v1",
+    }
+    validate_repair_classification(value)
+    return value
+
+
+def validate_repair_classification(value: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or set(value) != CLASSIFICATION_FIELDS:
+        raise ContractError("repair_classification_keys_invalid")
+    if value["schema_version"] != "r2e_repair_classification_v1":
+        raise ContractError("repair_classification_schema_invalid")
+    failure_class = value["failure_class"]
+    if failure_class not in REPAIR_FAILURE_CLASSES:
+        raise ContractError("repair_classification_class_invalid")
+    for key in ("source_evaluation_ref", "failed_artifact_ref",
+                "repair_target_ref"):
+        ref = value[key]
+        if (not isinstance(ref, dict) or set(ref) != {"artifact_id", "sha"}
+                or not isinstance(ref["artifact_id"], str)
+                or not isinstance(ref["sha"], str) or len(ref["sha"]) != 64):
+            raise ContractError("repair_classification_ref_invalid")
+    stage = _stage_for_artifact(value["repair_target_ref"]["artifact_id"])
+    if (value["repair_target_stage"] != stage
+            or stage not in FAILURE_CLASS_TARGETS[failure_class]):
+        raise ContractError("repair_classification_target_invalid")
+    if (not isinstance(value["reason_codes"], list)
+            or not value["reason_codes"]
+            or not all(isinstance(item, str) and item
+                       for item in value["reason_codes"])
+            or value["classifier_origin"] != "deterministic_explicit_v1"):
+        raise ContractError("repair_classification_content_invalid")
+
+
+def failure_from_repair_classification(
+        value: dict[str, Any]) -> dict[str, Any]:
+    validate_repair_classification(value)
+    failure = {
+        "schema_version": "repair_failure_v1",
+        "failed_artifact_ref": dict(value["repair_target_ref"]),
+        "stage": value["repair_target_stage"],
+        "reason_codes": list(value["reason_codes"]),
+    }
+    validate_repair_failure(failure)
+    return failure
 
 
 def failure_from_media_evaluation(value: dict[str, Any]) -> dict[str, Any]:

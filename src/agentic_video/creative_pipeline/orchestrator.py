@@ -28,6 +28,12 @@ from src.agentic_video.creative_pipeline.evaluation.media import (
     validate_media_evaluation,
     validate_structure_coverage_report,
 )
+from src.agentic_video.creative_pipeline.evaluation.r2e import (
+    FakeGenerationEvaluator,
+    validate_generation_quality_scorecard,
+    validate_structure_evaluation,
+    validate_visual_consistency_evaluation,
+)
 from src.agentic_video.creative_pipeline.generation.adapter import (
     build_image_generation_request,
     build_shot_contract,
@@ -37,6 +43,10 @@ from src.agentic_video.creative_pipeline.generation.adapter import (
 from src.agentic_video.creative_pipeline.generation.image import (
     FakeImageGenerator,
     validate_image_candidate,
+)
+from src.agentic_video.creative_pipeline.generation.experiment import (
+    build_generation_experiment_record,
+    validate_generation_experiment_record,
 )
 from src.agentic_video.creative_pipeline.generation.video import (
     FakeVideoGenerator,
@@ -81,6 +91,7 @@ SELECTION_POLICY_VERSION = "wave1_first_valid_v1"
 WAVE2_SELECTION_POLICY_VERSION = "wave2_fixture_shortlist_v1"
 WAVE4_PRODUCTION_POLICY_VERSION = "wave4_fake_production_v1"
 WAVE5_GENERATION_POLICY_VERSION = "wave5_first_passing_fake_v1"
+R2E_EVALUATION_POLICY_VERSION = "r2e_fake_evaluation_v1"
 
 FROZEN_STAGE_DAG = (
     {
@@ -122,6 +133,20 @@ FROZEN_STAGE_DAG = (
         "stage": "video_generation",
         "requires": ["shot_contract", "image_selection", "asset_graph"],
         "produces": "video_candidate_pool",
+    },
+)
+
+R2E_STAGE_DAG = (
+    {
+        "stage": "generation_experiment",
+        "requires": ["media_candidate"],
+        "produces": "generation_experiment_record",
+    },
+    {
+        "stage": "generation_evaluation",
+        "requires": ["media_candidate", "shot_contract", "asset_graph",
+                     "generation_experiment_record"],
+        "produces": "generation_quality_scorecard",
     },
 )
 
@@ -1012,6 +1037,206 @@ class CreativePipelineOrchestrator:
             "shot_results": shot_results,
             "structure_coverage_ref": artifact_ref(
                 coverage_name, coverage_ref["sha"]),
+            "lineage_report": build_lineage_report(self.workspace),
+        }
+
+    def run_r2e(self) -> dict[str, Any]:
+        """Materialize fake evaluation records over committed Wave 5 outputs."""
+
+        def read_current(name: str, artifact_type: str) -> dict[str, Any]:
+            if self.workspace.effective_status(name) != "committed":
+                raise PipelineBlocked("r2e_parent_not_committed", name)
+            value = self.workspace.read_artifact(name)
+            if (not isinstance(value, dict)
+                    or json_hash(value) != self.workspace.get_sha(name)):
+                raise PipelineBlocked("r2e_parent_sha_mismatch", name)
+            validate_artifact_envelope(value)
+            if (value["artifact_type"] != artifact_type
+                    or value["artifact_id"] != name):
+                raise PipelineBlocked("r2e_parent_type_mismatch", name)
+            return value
+
+        asset_name = "creative:asset_graph"
+        read_current(asset_name, "asset_graph")
+        asset_ref_value = artifact_ref(
+            asset_name, str(self.workspace.get_sha(asset_name)))
+        evaluator = FakeGenerationEvaluator()
+        results: list[dict[str, Any]] = []
+
+        contract_names = sorted(
+            name for name in self.workspace.state["artifacts"]
+            if name.startswith("creative:shot_contract:")
+            and self.workspace.effective_status(name) == "committed")
+        if not contract_names:
+            raise PipelineBlocked("r2e_shot_contracts_empty")
+
+        for contract_name in contract_names:
+            contract_envelope = read_current(
+                contract_name, "generation_shot_contract")
+            contract = contract_envelope["payload"]
+            contract_ref = artifact_ref(
+                contract_name, str(self.workspace.get_sha(contract_name)))
+            if contract["asset_graph_sha"] != asset_ref_value["sha"]:
+                raise PipelineBlocked(
+                    "r2e_contract_asset_sha_mismatch", contract_name)
+            shot_id = contract["shot_id"]
+
+            for media_kind in ("image", "video"):
+                pool_name = f"creative:{media_kind}_pool:{shot_id}"
+                pool_envelope = read_current(pool_name, "candidate_pool")
+                pool = pool_envelope["payload"]
+                validate_candidate_pool(pool)
+                if (pool["stage"] != f"{media_kind}_generation"
+                        or pool["candidate_artifact_type"]
+                        != f"{media_kind}_candidate"):
+                    raise PipelineBlocked("r2e_candidate_pool_mismatch",
+                                          pool_name)
+
+                for record in pool["candidates"]:
+                    candidate_name = record["artifact_id"]
+                    candidate_envelope = read_current(
+                        candidate_name, f"{media_kind}_candidate")
+                    if record["artifact_sha"] != self.workspace.get_sha(
+                            candidate_name):
+                        raise PipelineBlocked(
+                            "r2e_candidate_record_sha_mismatch",
+                            candidate_name)
+                    candidate = candidate_envelope["payload"]
+                    candidate_ref = artifact_ref(
+                        candidate_name, record["artifact_sha"])
+                    if candidate["shot_id"] != shot_id:
+                        raise PipelineBlocked(
+                            "r2e_candidate_shot_mismatch", candidate_name)
+
+                    experiment = build_generation_experiment_record(
+                        candidate=candidate, candidate_ref=candidate_ref)
+                    validate_generation_experiment_record(
+                        experiment, candidate=candidate)
+                    experiment_name = (
+                        "creative:generation_experiment:"
+                        f"{candidate['candidate_id']}")
+                    input_refs = [dict(row)
+                                  for row in experiment["input_artifact_refs"]]
+                    experiment_written = self._write_envelope(
+                        experiment_name, artifact_type="generation_experiment",
+                        payload_schema_version=(
+                            "generation_experiment_record_v1"),
+                        payload=experiment,
+                        dependencies=[candidate_name,
+                                      *[row["artifact_id"]
+                                        for row in input_refs]],
+                        parent_refs=[candidate_ref, *input_refs],
+                        producer=self._runtime_producer(
+                            "record_generation_experiment"),
+                        selection_policy_version=(
+                            R2E_EVALUATION_POLICY_VERSION))
+                    experiment_ref = artifact_ref(
+                        experiment_name, experiment_written["sha"])
+
+                    structure = evaluator.evaluate_structure(
+                        candidate=candidate, candidate_ref=candidate_ref,
+                        shot_contract=contract,
+                        shot_contract_ref=contract_ref)
+                    validate_structure_evaluation(structure)
+                    structure_name = (
+                        "creative:structure_evaluation:"
+                        f"{candidate['candidate_id']}")
+                    structure_written = self._write_envelope(
+                        structure_name, artifact_type="structure_evaluation",
+                        payload_schema_version="structure_evaluation_v1",
+                        payload=structure,
+                        dependencies=[candidate_name, contract_name,
+                                      experiment_name],
+                        parent_refs=[candidate_ref, contract_ref,
+                                     experiment_ref],
+                        producer=self._runtime_producer(
+                            "fake_structure_evaluator"),
+                        selection_policy_version=(
+                            R2E_EVALUATION_POLICY_VERSION))
+                    structure_ref = artifact_ref(
+                        structure_name, structure_written["sha"])
+
+                    visual = evaluator.evaluate_visual_consistency(
+                        candidate=candidate, candidate_ref=candidate_ref,
+                        shot_contract=contract,
+                        shot_contract_ref=contract_ref,
+                        asset_graph_ref=asset_ref_value)
+                    validate_visual_consistency_evaluation(visual)
+                    visual_name = (
+                        "creative:visual_consistency:"
+                        f"{candidate['candidate_id']}")
+                    visual_written = self._write_envelope(
+                        visual_name,
+                        artifact_type="visual_consistency_evaluation",
+                        payload_schema_version=(
+                            "visual_consistency_evaluation_v1"),
+                        payload=visual,
+                        dependencies=[candidate_name, contract_name, asset_name,
+                                      experiment_name],
+                        parent_refs=[candidate_ref, contract_ref,
+                                     asset_ref_value, experiment_ref],
+                        producer=self._runtime_producer(
+                            "fake_visual_consistency_evaluator"),
+                        selection_policy_version=(
+                            R2E_EVALUATION_POLICY_VERSION))
+                    visual_ref = artifact_ref(
+                        visual_name, visual_written["sha"])
+
+                    scorecard = evaluator.build_quality_scorecard(
+                        candidate=candidate, candidate_ref=candidate_ref,
+                        shot_contract=contract,
+                        shot_contract_ref=contract_ref,
+                        asset_graph_ref=asset_ref_value,
+                        experiment_ref=experiment_ref,
+                        structure_evaluation=structure,
+                        structure_evaluation_ref=structure_ref,
+                        visual_consistency=visual,
+                        visual_consistency_ref=visual_ref)
+                    validate_generation_quality_scorecard(scorecard)
+                    scorecard_name = (
+                        "creative:generation_scorecard:"
+                        f"{candidate['candidate_id']}")
+                    scorecard_written = self._write_envelope(
+                        scorecard_name,
+                        artifact_type="generation_quality_scorecard",
+                        payload_schema_version=(
+                            "generation_quality_scorecard_v1"),
+                        payload=scorecard,
+                        dependencies=[candidate_name, experiment_name,
+                                      structure_name, visual_name],
+                        parent_refs=[candidate_ref, experiment_ref,
+                                     structure_ref, visual_ref],
+                        producer=self._runtime_producer(
+                            "fake_generation_quality_evaluator"),
+                        selection_policy_version=(
+                            R2E_EVALUATION_POLICY_VERSION))
+                    results.append({
+                        "candidate_ref": candidate_ref,
+                        "experiment_ref": experiment_ref,
+                        "structure_evaluation_ref": structure_ref,
+                        "visual_consistency_ref": visual_ref,
+                        "scorecard_ref": artifact_ref(
+                            scorecard_name, scorecard_written["sha"]),
+                    })
+
+        self.workspace.record_trace(
+            20, {"stage": "r2e_fake_evaluation"},
+            {"candidate_count": len(results)},
+            {"passed": True,
+             "validators_run": [
+                 "validate_generation_experiment_record",
+                 "validate_structure_evaluation",
+                 "validate_visual_consistency_evaluation",
+                 "validate_generation_quality_scorecard"],
+             "model_calls": 0, "media_generated": False,
+             "visual_evaluation": "not_run"})
+        return {
+            "schema_version": "r2_e_evaluation_result_v1",
+            "status": "PASS", "fixture_only": True,
+            "model_calls": 0, "media_generated": False,
+            "visual_evaluation": "not_run",
+            "creative_evaluation": "not_run",
+            "candidate_results": results,
             "lineage_report": build_lineage_report(self.workspace),
         }
 
