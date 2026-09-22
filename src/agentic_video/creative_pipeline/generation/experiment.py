@@ -16,6 +16,10 @@ EXPERIMENT_FIELDS = {
     "generation_time_ms", "execution_mode",
 }
 EXECUTION_MODES = frozenset({"fake_metadata_only", "real_model"})
+REAL_EXECUTION_FIELDS = {
+    "model_id", "model_version", "model_sha", "config_sha", "prompt_sha",
+    "seed", "generation_time_ms",
+}
 
 
 def _require(condition: bool, reason: str) -> None:
@@ -80,9 +84,32 @@ def build_generation_experiment_record(
     return value
 
 
+def build_real_generation_experiment_record(
+        *, candidate: dict[str, Any], candidate_ref: dict[str, str],
+        execution: dict[str, Any]) -> dict[str, Any]:
+    """Bind a real output to its exact model, prompt, config, and inputs."""
+    _require(isinstance(execution, dict)
+             and set(execution) == REAL_EXECUTION_FIELDS,
+             "real_generation_execution_keys_invalid")
+    value = {
+        "schema_version": "generation_experiment_record_v1",
+        "experiment_id": f"EXPERIMENT_{candidate['candidate_id']}",
+        "media_kind": candidate["media_kind"],
+        "output_candidate_ref": dict(candidate_ref),
+        "input_artifact_refs": [dict(row)
+                                for row in candidate["parent_refs"]],
+        **execution,
+        "execution_mode": "real_model",
+    }
+    validate_generation_experiment_record(
+        value, candidate=candidate, real_execution=execution)
+    return value
+
+
 def validate_generation_experiment_record(
         value: dict[str, Any], *,
-        candidate: dict[str, Any] | None = None) -> None:
+        candidate: dict[str, Any] | None = None,
+        real_execution: dict[str, Any] | None = None) -> None:
     _require(isinstance(value, dict) and set(value) == EXPERIMENT_FIELDS,
              "generation_experiment_keys_invalid")
     _require(value["schema_version"] == "generation_experiment_record_v1",
@@ -120,19 +147,29 @@ def validate_generation_experiment_record(
                  and value["output_candidate_ref"]["artifact_id"]
                  == (f"creative:{candidate['media_kind']}_candidate:"
                      f"{candidate['candidate_id']}")
-                 and value["prompt_sha"] == candidate["request_sha"]
                  and value["input_artifact_refs"]
                  == candidate["parent_refs"]
                  and value["model_id"] == backend["model_id"]
-                 and value["model_version"] == backend["adapter_version"]
-                 and value["model_sha"]
-                 == json_hash(_model_identity(candidate))
-                 and value["config_sha"]
-                 == json_hash(_generation_config(candidate))
                  and value["seed"] == backend["seed"],
                  "generation_experiment_candidate_mismatch")
         if value["execution_mode"] == "fake_metadata_only":
-            _require(backend["model_id"] == "none"
+            _require(value["prompt_sha"] == candidate["request_sha"]
+                     and value["model_version"] == backend["adapter_version"]
+                     and value["model_sha"]
+                     == json_hash(_model_identity(candidate))
+                     and value["config_sha"]
+                     == json_hash(_generation_config(candidate))
+                     and backend["model_id"] == "none"
                      and candidate["placeholder"]["generated"] is False
                      and value["generation_time_ms"] == 0,
                      "generation_experiment_fake_mode_invalid")
+        else:
+            _require(backend["adapter_id"] in {
+                "real_image_adapter", "real_video_adapter"}
+                and candidate["placeholder"]["generated"] is True,
+                "generation_experiment_real_mode_invalid")
+            _require(real_execution is not None
+                     and set(real_execution) == REAL_EXECUTION_FIELDS
+                     and all(value[key] == real_execution[key]
+                             for key in REAL_EXECUTION_FIELDS),
+                     "generation_experiment_real_execution_mismatch")

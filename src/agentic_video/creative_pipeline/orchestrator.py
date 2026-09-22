@@ -46,7 +46,15 @@ from src.agentic_video.creative_pipeline.generation.image import (
 )
 from src.agentic_video.creative_pipeline.generation.experiment import (
     build_generation_experiment_record,
+    build_real_generation_experiment_record,
     validate_generation_experiment_record,
+)
+from src.agentic_video.creative_pipeline.generation.real import (
+    RealVideoAdapter,
+    build_real_generation_request,
+    real_request_parent_refs,
+    validate_generated_media,
+    validate_real_candidate,
 )
 from src.agentic_video.creative_pipeline.generation.video import (
     FakeVideoGenerator,
@@ -92,6 +100,7 @@ WAVE2_SELECTION_POLICY_VERSION = "wave2_fixture_shortlist_v1"
 WAVE4_PRODUCTION_POLICY_VERSION = "wave4_fake_production_v1"
 WAVE5_GENERATION_POLICY_VERSION = "wave5_first_passing_fake_v1"
 R2E_EVALUATION_POLICY_VERSION = "r2e_fake_evaluation_v1"
+R2E1_REAL_GENERATION_POLICY_VERSION = "r2e1_controlled_generation_v1"
 
 FROZEN_STAGE_DAG = (
     {
@@ -1037,6 +1046,264 @@ class CreativePipelineOrchestrator:
             "shot_results": shot_results,
             "structure_coverage_ref": artifact_ref(
                 coverage_name, coverage_ref["sha"]),
+            "lineage_report": build_lineage_report(self.workspace),
+        }
+
+    def run_r2e1_real_video_acceptance(
+            self, adapter: RealVideoAdapter, *, output_dir: Path
+            ) -> dict[str, Any]:
+        """Generate 3x3 real shot candidates without evaluation or selection."""
+
+        def read_current(name: str, artifact_type: str) -> dict[str, Any]:
+            if self.workspace.effective_status(name) != "committed":
+                raise PipelineBlocked("r2e1_parent_not_committed", name)
+            value = self.workspace.read_artifact(name)
+            if (not isinstance(value, dict)
+                    or json_hash(value) != self.workspace.get_sha(name)):
+                raise PipelineBlocked("r2e1_parent_sha_mismatch", name)
+            validate_artifact_envelope(value)
+            if (value["artifact_type"] != artifact_type
+                    or value["artifact_id"] != name):
+                raise PipelineBlocked("r2e1_parent_type_mismatch", name)
+            return value
+
+        upstream_names = (
+            "creative:asset_graph", "creative:shot_plan",
+            "creative:storyboard",
+        )
+        upstream_before = {
+            name: {
+                "sha": self.workspace.get_sha(name),
+                "version": self.workspace.state["artifacts"].get(
+                    name, {}).get("active_version"),
+                "status": self.workspace.effective_status(name),
+            }
+            for name in upstream_names
+        }
+        asset_envelope = read_current("creative:asset_graph", "asset_graph")
+        shot_envelope = read_current("creative:shot_plan", "shot_plan")
+        board_envelope = read_current("creative:storyboard", "storyboard")
+        asset_graph = asset_envelope["payload"]
+        shot_plan = shot_envelope["payload"]
+        storyboard = board_envelope["payload"]
+        asset_sha = str(self.workspace.get_sha("creative:asset_graph"))
+        shot_sha = str(self.workspace.get_sha("creative:shot_plan"))
+        board_sha = str(self.workspace.get_sha("creative:storyboard"))
+        if (shot_plan["asset_graph_sha"] != asset_sha
+                or storyboard["asset_graph_sha"] != asset_sha
+                or storyboard["shot_plan_sha"] != shot_sha):
+            raise PipelineBlocked("r2e1_parent_binding_mismatch")
+
+        shots = list(shot_plan["shots"])
+        boards = {row["shot_id"]: row for row in storyboard["boards"]}
+        roles = [
+            "I0_PRIOR_INTERPRETATION", "E1_NEW_INFORMATION",
+            "I1_UPDATED_INTERPRETATION",
+        ]
+        if (len(shots) != 3 or set(boards) != {
+                row["shot_id"] for row in shots}):
+            raise PipelineBlocked("r2e1_three_shot_boundary_invalid")
+        actual_roles = [row["narrative_role"] for row in shots]
+        if sorted(actual_roles) != sorted(roles):
+            raise PipelineBlocked("r2e1_structure_role_coverage_invalid",
+                                  actual_roles)
+
+        asset_ref_value = artifact_ref("creative:asset_graph", asset_sha)
+        shot_ref = artifact_ref("creative:shot_plan", shot_sha)
+        board_ref = artifact_ref("creative:storyboard", board_sha)
+        contract_rows: list[tuple[dict[str, Any], dict[str, str]]] = []
+        for shot in shots:
+            shot_id = shot["shot_id"]
+            contract = build_shot_contract(
+                shot=shot, board=boards[shot_id], asset_graph=asset_graph,
+                shot_plan_sha=shot_sha, storyboard_sha=board_sha,
+                asset_graph_sha=asset_sha)
+            name = f"creative:shot_contract:{shot_id}"
+            if self.workspace.effective_status(name) == "committed":
+                envelope = read_current(name, "generation_shot_contract")
+                if envelope["payload"] != contract:
+                    raise PipelineBlocked("r2e1_shot_contract_conflict", name)
+                ref = artifact_ref(name, str(self.workspace.get_sha(name)))
+            else:
+                written = self._write_envelope(
+                    name, artifact_type="generation_shot_contract",
+                    payload_schema_version="generation_shot_contract_v1",
+                    payload=contract,
+                    dependencies=["creative:shot_plan", "creative:storyboard",
+                                  "creative:asset_graph"],
+                    parent_refs=[shot_ref, board_ref, asset_ref_value],
+                    producer=self._runtime_producer("compile_shot_contract"),
+                    selection_policy_version=(
+                        R2E1_REAL_GENERATION_POLICY_VERSION))
+                ref = artifact_ref(name, written["sha"])
+            contract_rows.append((contract, ref))
+
+        t2v_name = "creative:generation_input:t2va"
+        t2v_payload = {
+            "schema_version": "no_source_image_v1", "mode": "t2va",
+        }
+        if self.workspace.effective_status(t2v_name) == "committed":
+            t2v_envelope = read_current(t2v_name, "generation_input")
+            if t2v_envelope["payload"] != t2v_payload:
+                raise PipelineBlocked("r2e1_t2va_input_conflict")
+            t2v_ref = artifact_ref(
+                t2v_name, str(self.workspace.get_sha(t2v_name)))
+        else:
+            t2v_written = self._write_envelope(
+                t2v_name, artifact_type="generation_input",
+                payload_schema_version="no_source_image_v1",
+                payload=t2v_payload, dependencies=[], parent_refs=[],
+                producer=self._runtime_producer("declare_t2va_input"),
+                selection_policy_version=(
+                    R2E1_REAL_GENERATION_POLICY_VERSION))
+            t2v_ref = artifact_ref(t2v_name, t2v_written["sha"])
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        shot_results: list[dict[str, Any]] = []
+        candidate_count = 0
+        for contract, contract_ref in contract_rows:
+            shot_id = contract["shot_id"]
+            request = build_real_generation_request(
+                media_kind="video", shot_contract=contract,
+                shot_contract_ref=contract_ref,
+                asset_graph_ref=asset_ref_value, candidate_count=3,
+                source_image_ref=t2v_ref)
+            parent_refs = real_request_parent_refs(request)
+            dependency_names = [row["artifact_id"] for row in parent_refs]
+            generated = adapter.generate(
+                request, asset_graph=asset_graph,
+                output_dir=output_dir / shot_id)
+            if len(generated) != 3:
+                raise PipelineBlocked("r2e1_candidate_count_invalid",
+                                      f"{shot_id}:{len(generated)}")
+
+            records: list[CandidateRecord] = []
+            candidate_refs: list[dict[str, str]] = []
+            support_refs: list[dict[str, str]] = []
+            for result in generated:
+                candidate = result["candidate"]
+                media = result["media"]
+                execution = result["execution"]
+                validate_real_candidate(candidate, request)
+                validate_generated_media(media, verify_file=True)
+                if media["candidate_id"] != candidate["candidate_id"]:
+                    raise PipelineBlocked("r2e1_media_candidate_mismatch")
+                candidate_id = candidate["candidate_id"]
+
+                media_name = f"creative:generated_media:{candidate_id}"
+                media_written = self._write_envelope(
+                    media_name, artifact_type="generated_media",
+                    payload_schema_version="generated_media_v1",
+                    payload=media, dependencies=dependency_names,
+                    parent_refs=parent_refs,
+                    producer=self._runtime_producer("real_video_adapter"),
+                    selection_policy_version=(
+                        R2E1_REAL_GENERATION_POLICY_VERSION))
+                media_ref = artifact_ref(media_name, media_written["sha"])
+
+                candidate_name = f"creative:video_candidate:{candidate_id}"
+                candidate_written = self._write_envelope(
+                    candidate_name, artifact_type="video_candidate",
+                    payload_schema_version="video_candidate_v1",
+                    payload=candidate,
+                    dependencies=[media_name, *dependency_names],
+                    parent_refs=[media_ref, *parent_refs],
+                    producer=self._runtime_producer("real_video_adapter"),
+                    selection_policy_version=(
+                        R2E1_REAL_GENERATION_POLICY_VERSION))
+                candidate_ref = artifact_ref(
+                    candidate_name, candidate_written["sha"])
+                experiment = build_real_generation_experiment_record(
+                    candidate=candidate, candidate_ref=candidate_ref,
+                    execution=execution)
+                experiment_name = (
+                    f"creative:generation_experiment:{candidate_id}")
+                experiment_written = self._write_envelope(
+                    experiment_name, artifact_type="generation_experiment",
+                    payload_schema_version=(
+                        "generation_experiment_record_v1"),
+                    payload=experiment,
+                    dependencies=[candidate_name, media_name,
+                                  *dependency_names],
+                    parent_refs=[candidate_ref, media_ref, *parent_refs],
+                    producer=self._runtime_producer(
+                        "record_real_generation_experiment"),
+                    selection_policy_version=(
+                        R2E1_REAL_GENERATION_POLICY_VERSION))
+                experiment_ref = artifact_ref(
+                    experiment_name, experiment_written["sha"])
+                records.append(CandidateRecord(
+                    candidate_id=candidate_id,
+                    artifact_id=candidate_name,
+                    artifact_type="video_candidate",
+                    artifact_sha=candidate_written["sha"],
+                    parent_shas=tuple(row["sha"] for row in parent_refs),
+                    status="generated"))
+                candidate_refs.append(candidate_ref)
+                support_refs.extend([media_ref, experiment_ref])
+
+            pool_payload = CandidatePool(
+                pool_id=f"REAL_VIDEO_POOL_{shot_id}",
+                stage="real_video_generation",
+                candidate_artifact_type="video_candidate",
+                parent_refs=tuple(parent_refs), candidates=tuple(records),
+                selection_policy_version=(
+                    R2E1_REAL_GENERATION_POLICY_VERSION),
+            ).to_dict()
+            pool_name = f"creative:real_video_pool:{shot_id}"
+            pool_written = self._write_envelope(
+                pool_name, artifact_type="candidate_pool",
+                payload_schema_version="creative_candidate_pool_v1",
+                payload=pool_payload,
+                dependencies=[*dependency_names,
+                              *[row.artifact_id for row in records],
+                              *[row["artifact_id"] for row in support_refs]],
+                parent_refs=[*parent_refs, *candidate_refs, *support_refs],
+                producer=self._runtime_producer("pool_real_video"),
+                selection_policy_version=(
+                    R2E1_REAL_GENERATION_POLICY_VERSION))
+            shot_results.append({
+                "shot_id": shot_id,
+                "structure_roles": list(
+                    contract["structure_trace"]["structure_roles"]),
+                "shot_contract_ref": contract_ref,
+                "candidate_pool_ref": artifact_ref(
+                    pool_name, pool_written["sha"]),
+                "candidate_refs": candidate_refs,
+            })
+            candidate_count += len(records)
+
+        upstream_after = {
+            name: {
+                "sha": self.workspace.get_sha(name),
+                "version": self.workspace.state["artifacts"].get(
+                    name, {}).get("active_version"),
+                "status": self.workspace.effective_status(name),
+            }
+            for name in upstream_names
+        }
+        if upstream_before != upstream_after:
+            raise PipelineBlocked("r2e1_upstream_mutated")
+        self.workspace.record_trace(
+            21, {"stage": "r2e1_controlled_real_generation"},
+            {"shot_count": len(shot_results),
+             "candidate_count": candidate_count},
+            {"passed": True,
+             "validators_run": [
+                 "validate_real_candidate", "validate_generated_media",
+                 "validate_generation_experiment_record"],
+             "model_calls": candidate_count, "media_generated": True,
+             "evaluation": "not_run", "selection": "not_run"})
+        return {
+            "schema_version": "r2_e1_acceptance_result_v1",
+            "status": "PASS", "shot_count": len(shot_results),
+            "candidate_count": candidate_count,
+            "model_calls": candidate_count, "media_generated": True,
+            "candidate_status": "generated",
+            "evaluation": "not_run", "selection": "not_run",
+            "full_video_generation": False,
+            "shot_results": shot_results,
             "lineage_report": build_lineage_report(self.workspace),
         }
 

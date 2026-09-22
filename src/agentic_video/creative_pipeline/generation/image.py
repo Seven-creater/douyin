@@ -30,6 +30,11 @@ def _require(condition: bool, reason: str) -> None:
         raise ContractError(reason)
 
 
+def _sha(value: object) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value))
+
+
 def placeholder_content_sha(*, media_kind: str, request_sha: str,
                             candidate_id: str, seed: int) -> str:
     return json_hash({
@@ -58,20 +63,36 @@ def validate_image_candidate_schema(value: dict[str, Any]) -> None:
     _require(isinstance(value["asset_refs"], list),
              "image_candidate_asset_refs_invalid")
     backend = value["backend"]
-    _require(isinstance(backend, dict) and set(backend) == BACKEND_FIELDS
-             and backend["adapter_id"] == "fake_image_generator"
-             and backend["model_id"] == "none"
-             and isinstance(backend["seed"], int),
+    is_fake = (isinstance(backend, dict) and set(backend) == BACKEND_FIELDS
+               and backend["adapter_id"] == "fake_image_generator"
+               and backend["model_id"] == "none")
+    is_real = (isinstance(backend, dict) and set(backend) == BACKEND_FIELDS
+               and backend["adapter_id"] == "real_image_adapter"
+               and isinstance(backend["model_id"], str)
+               and backend["model_id"] not in {"", "none"})
+    _require((is_fake or is_real) and isinstance(backend["seed"], int),
              "image_candidate_backend_invalid")
     placeholder = value["placeholder"]
-    _require(isinstance(placeholder, dict)
-             and set(placeholder) == PLACEHOLDER_FIELDS
-             and placeholder["media_type"] == "image"
-             and placeholder["materialization"] == "metadata_only"
-             and placeholder["generated"] is False
-             and placeholder["content_sha"] == placeholder_content_sha(
-                 media_kind="image", request_sha=value["request_sha"],
-                 candidate_id=value["candidate_id"], seed=backend["seed"]),
+    fake_placeholder = (isinstance(placeholder, dict)
+                        and set(placeholder) == PLACEHOLDER_FIELDS
+                        and placeholder["media_type"] == "image"
+                        and placeholder["materialization"] == "metadata_only"
+                        and placeholder["generated"] is False
+                        and placeholder["content_sha"]
+                        == placeholder_content_sha(
+                            media_kind="image",
+                            request_sha=value["request_sha"],
+                            candidate_id=value["candidate_id"],
+                            seed=backend["seed"]))
+    real_placeholder = (isinstance(placeholder, dict)
+                        and set(placeholder) == PLACEHOLDER_FIELDS
+                        and placeholder["media_type"] == "image"
+                        and placeholder["materialization"]
+                        == ("artifact:creative:generated_media:"
+                            f"{value['candidate_id']}")
+                        and placeholder["generated"] is True
+                        and _sha(placeholder["content_sha"]))
+    _require((is_fake and fake_placeholder) or (is_real and real_placeholder),
              "image_candidate_placeholder_invalid")
     _require(isinstance(value["structure_trace"], dict),
              "image_candidate_trace_invalid")
