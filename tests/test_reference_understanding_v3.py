@@ -105,6 +105,24 @@ def test_actual_sampling_times_and_short_shot_block_motion():
         validate_local_observation(value, probe, payload, sampling)
 
 
+def test_generic_action_change_is_valid_but_still_needs_sample_support():
+    static, _ = fixture()
+    probe = {"probe_id": "p1", "issue_id": "x", "channel": "V",
+             "shot_ids": ["s1", "s2"], "interval": [1., 3.], "fps": 8.}
+    payload = _probe_payload(probe, static)
+    sampling = {"sampling_verified": True,
+                "actual_frame_timestamps_relative_s": [0., .125, 1., 1.125]}
+    value = {"schema_version": "reference_local_observation_v3",
+             "shots": [{"shot_id": "s1", "changes": [{"description": "an action",
+                         "kind": "action", "first_visible_s": 0.,
+                         "epistemic_status": "supported"}]},
+                       {"shot_id": "s2", "changes": []}],
+             "connections": [{"from_shot_id": "s1", "to_shot_id": "s2",
+                              "continuity": "unknown"}]}
+    assert validate_local_observation(value, probe, payload, sampling)[
+        "change_findings"][0]["effective_status"] == "supported"
+
+
 def test_high_impact_verification_is_new_sampling_and_neutral():
     static, _ = fixture()
     record = {"probe_id": "probe_01", "issue_id": "outcome", "channel": "V",

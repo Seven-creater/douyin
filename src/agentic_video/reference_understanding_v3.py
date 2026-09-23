@@ -37,7 +37,7 @@ Return JSON only:
 {"schema_version":"reference_local_observation_v3","shots":[
 {"shot_id":"...","entry_state":"... or unknown","visible_action":"... or unknown",
 "exit_state":"... or unknown","changes":[{"description":"...",
-"kind":"posture|contact|identity|causal|other","first_visible_s":0.0,
+"kind":"action|posture|contact|identity|causal|other","first_visible_s":0.0,
 "epistemic_status":"supported|contested|insufficient"}],"limitations":[]}],
 "connections":[{"from_shot_id":"...","to_shot_id":"...",
 "continuity":"same_action|new_action|possible_ellipsis|unknown",
@@ -58,7 +58,7 @@ shot. Report change times relative to this clip.
 {"schema_version":"reference_local_observation_v3","shots":[
 {"shot_id":"...","entry_state":"... or unknown","visible_action":"... or unknown",
 "exit_state":"... or unknown","changes":[{"description":"...",
-"kind":"posture|contact|identity|causal|other","first_visible_s":0.0,
+"kind":"action|posture|contact|identity|causal|other","first_visible_s":0.0,
 "epistemic_status":"supported|contested|insufficient"}],
 "attributed_statement_ids":[],"audible_event_type":"unknown","limitations":[]}],
 "connections":[{"from_shot_id":"...","to_shot_id":"...",
@@ -391,7 +391,7 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
             status = change.get("epistemic_status")
             if status not in {"supported", "contested", "insufficient"}:
                 raise ValueError("change_status_invalid")
-            if change.get("kind") not in {"posture", "contact", "identity",
+            if change.get("kind") not in {"action", "posture", "contact", "identity",
                                            "causal", "other"}:
                 raise ValueError("change_kind_invalid")
             if when is not None and not lo-0.04 <= float(when) <= hi+0.04:
