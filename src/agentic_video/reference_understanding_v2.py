@@ -55,12 +55,16 @@ adjacent shot IDs. Distinguish visible actions, attributed on-screen statements,
 audible events, and inferred editing functions. An edit can omit time, but do
 not claim an omission or direct causation unless the media supports it. A fast
 sequence alone does not prove montage; an audio-energy peak does not prove a
-musical beat. Do not use a predetermined story template or output numerical
-times. Return JSON only:
+musical beat. The text statements below come from a separate T channel: cite
+their IDs only for the matching shot, never reassign or re-transcribe them.
+Without an A-channel transcript, do not quote speech. Classify audible events
+only as music, speech, sound_effect, other, or unknown. Do not use a preset
+story template or output numerical times. Return JSON only:
 {"schema_version":"reference_local_observation_v2","observations":[
 {"shot_id":"...","visible_action":"... or null",
-"visible_result":"... or null","attributed_statement":"... or null",
-"audible_event":"... or null","uncertainty":"..."}],"connections":[
+"visible_result":"... or null","attributed_statement_ids":[],
+"audible_event_type":"music|speech|sound_effect|other|unknown",
+"uncertainty":"..."}],"connections":[
 {"from_shot_id":"...","to_shot_id":"...",
 "observed_continuity":"... or unknown",
 "information_added":"... or unknown",
@@ -68,9 +72,9 @@ times. Return JSON only:
 "unresolved":["..."]}
 Input: """
 
-REVISE_PROMPT = """Re-evaluate the preliminary reading using the accepted
-evidence and the new local observations. The preliminary reading is a fallible
-hypothesis, not a fact. Build section/event-level narrative units and only
+REVISE_PROMPT = """Synthesize the accepted evidence and local observations.
+If a previous revision is supplied, treat it as a fallible hypothesis and
+revise or discard it using new evidence. Build section/event-level units and only
 supported relations. Explain what the work may communicate, how the viewer's
 information changes, and how the ending affects the earlier reading. The
 video's on-screen text is attributed speech by the work, not independent
@@ -78,6 +82,9 @@ physical proof. Separate visible facts, stated claims, and interpretations.
 Do not force a reversal, three-act shape, moral, or specific topic. Cite
 accepted claim/event IDs; local observations may be cited by probe and shot ID.
 Write each local observation reference as "<probe_id>:<shot_id>".
+For each theme hypothesis, explicitly explain how the final visible or stated
+item relates to the preceding information; "unknown" is acceptable. Do not
+replace this relation with a one-word tone label.
 If uncertainty remains, return the relevant unresolved issue IDs from the
 provided issue list. Return JSON only:
 {"schema_version":"reference_story_graph_v2","narrative_units":[
@@ -87,7 +94,8 @@ provided issue list. Return JSON only:
 "description":"...","support_ids":[],"local_observation_refs":[]}],
 "theme_hypotheses":[{"hypothesis_id":"...","topic":"...",
 "stance":"...","viewer_information_path":"...",
-"ending_tone":"...","support_ids":[],"alternative":"...",
+"ending_tone":"...","ending_relation":"...",
+"support_ids":[],"alternative":"...",
 "uncertainty":"..."}],"unresolved_issue_ids":[],"limitations":[]}
 Input: """
 
@@ -205,7 +213,7 @@ def validate_probe_selection(selection: dict[str, Any],
 def _clip_context(probe: dict[str, Any], static: dict[str, Any]) -> dict[str, Any]:
     index = _shot_index(static)
     origin = probe["interval"][0]
-    return {
+    context = {
         "interval": probe["interval"],
         "clip_duration_s": round(probe["interval"][1] - origin, 6),
         "shots": [{"shot_id": shot_id,
@@ -214,10 +222,21 @@ def _clip_context(probe: dict[str, Any], static: dict[str, Any]) -> dict[str, An
                        round(float(index[shot_id]["end_s"]) - origin, 6)]}
                   for shot_id in probe["shot_ids"]],
     }
+    if probe["channel"] == "AV":
+        text_index = {row["claim_id"]: row for row in static["text_timeline"]}
+        context["text_statements"] = [
+            {"shot_id": shot_id, "claim_id": claim_id,
+             "observed_text": text_index[claim_id]["observed_text"],
+             "source_type": "attributed_on_screen_text"}
+            for shot_id in probe["shot_ids"]
+            for claim_id in index[shot_id].get("text_claim_ids") or []
+            if claim_id in text_index]
+    return context
 
 
 def validate_local_observation(value: dict[str, Any],
-                               probe: dict[str, Any]) -> None:
+                               probe: dict[str, Any],
+                               context: dict[str, Any] | None = None) -> None:
     if value.get("schema_version") != "reference_local_observation_v2":
         raise ValueError("local_observation_schema_invalid")
     ids = probe["shot_ids"]
@@ -231,9 +250,21 @@ def validate_local_observation(value: dict[str, Any],
             connections] != list(zip(ids, ids[1:])):
         raise ValueError("local_observation_connection_coverage_invalid")
     if probe["channel"] == "V" and any(
-            row.get("attributed_statement") or row.get("audible_event")
+            row.get("attributed_statement_ids") or row.get("audible_event_type")
             for row in observed):
         raise ValueError("visual_observation_crosses_modality")
+    if probe["channel"] == "AV":
+        scoped_text = {(row["shot_id"], row["claim_id"]) for row in
+                       (context or {}).get("text_statements") or []}
+        for row in observed:
+            if "attributed_statement" in row or "audible_event" in row:
+                raise ValueError("unscoped_text_or_audio_content")
+            if any((row["shot_id"], claim_id) not in scoped_text for claim_id
+                   in row.get("attributed_statement_ids") or []):
+                raise ValueError("text_claim_assigned_to_wrong_shot")
+            if row.get("audible_event_type") not in {
+                    "music", "speech", "sound_effect", "other", "unknown"}:
+                raise ValueError("audible_event_type_invalid")
 
 
 def build_editing_graph(static: dict[str, Any],
@@ -333,6 +364,8 @@ def validate_story_graph(story: dict[str, Any],
             if kind == "relation" and (row.get("source") not in unit_ids or
                                        row.get("target") not in unit_ids):
                 raise ValueError("story_relation_unit_invalid")
+            if kind == "theme" and not str(row.get("ending_relation") or "").strip():
+                raise ValueError("story_theme_ending_relation_missing")
     issue_ids = {row["issue_id"] for row in issues}
     if any(value not in issue_ids for value in
            story.get("unresolved_issue_ids") or []):
@@ -378,22 +411,27 @@ def run_reference_understanding_v2(
         "schema_version": "reference_review_issues_v2", "issues": issues,
         "baseline_readout_sha": sha256_file(baseline_readout_path),
         "human_gold_in_model_requests": False})
-    prior = baseline.get("narrative_reading") or {}
     observations: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     story = None
     for round_index in (1, 2):
+        observed_visual_shots = {shot_id for record in observations
+                                 if record["channel"] == "V"
+                                 for shot_id in record["shot_ids"]}
+        pending_ids = set(story.get("unresolved_issue_ids", [])) if story else set()
+        for issue in issues:
+            if (issue["reason_code"] == "one_action_claim_spans_multiple_shots" and
+                    any(shot_id not in observed_visual_shots for shot_id in
+                        issue["shot_ids"])):
+                pending_ids.add(issue["issue_id"])
         pending = issues if story is None else [
-            issue for issue in issues if issue["issue_id"] in
-            story.get("unresolved_issue_ids", []) and
+            issue for issue in issues if issue["issue_id"] in pending_ids and
             counts[issue["issue_id"]] < MAX_PROBES_PER_ISSUE]
         if not pending or sum(counts.values()) >= MAX_LOCAL_PROBES:
             break
         plan_payload = {
             "issues": pending, "prior_probe_counts": dict(counts),
             "remaining_total_budget": MAX_LOCAL_PROBES - sum(counts.values()),
-            "unverified_preliminary_reading": prior,
-            "latest_revision": story,
         }
         selection = _model_call(
             runner, name=f"round_{round_index}_plan", prompt=PLAN_PROMPT,
@@ -415,7 +453,7 @@ def run_reference_understanding_v2(
                 prompt=(VISUAL_PROBE_PROMPT if probe["channel"] == "V"
                         else AV_PROBE_PROMPT), payload=context, output=output,
                 media=clip, channel=probe["channel"], fps=fps)
-            validate_local_observation(value, probe)
+            validate_local_observation(value, probe, context)
             observations.append({**probe, "media_sha": sha256_file(clip),
                                  "response": value})
         _write_json(output / "local_observations.json", {
@@ -425,9 +463,15 @@ def run_reference_understanding_v2(
             "section_bundles": static["section_bundles"],
             "accepted_claim_ids": [row["claim_id"] for row in reference["claims"]],
             "accepted_event_ids": [row["event_id"] for row in reference["events"]],
-            "unverified_preliminary_reading": prior,
             "previous_revision": story,
             "local_observations": observations,
+            "final_observed_item": {
+                "shot_id": static["shots"][-1]["shot_id"],
+                "text_statements": [
+                    row for row in static["text_timeline"]
+                    if row["claim_id"] in
+                    (static["shots"][-1].get("text_claim_ids") or [])],
+                "attribution": "video_statement_not_independent_fact"},
             "issue_ids": [row["issue_id"] for row in issues],
         }
         story = _model_call(
@@ -447,6 +491,9 @@ def run_reference_understanding_v2(
         output=output, max_new_tokens=3072)
     audit_positive = validate_story_audit(audit, story)
     _write_json(output / "story_grounding_audit_v2.json", audit)
+    observed_visual_shots = {shot_id for record in observations
+                             if record["channel"] == "V"
+                             for shot_id in record["shot_ids"]}
     result = {
         "schema_version": VERSION,
         "status": "human_review_pending",
@@ -462,7 +509,12 @@ def run_reference_understanding_v2(
         "story_ready": False, "editing_ready": False,
         "creation_brief_generated": False,
         "production_release_allowed": False,
-        "unresolved_issue_ids": story.get("unresolved_issue_ids") or [],
+        "unresolved_issue_ids": sorted(set(story.get("unresolved_issue_ids") or []) |
+                                       {issue["issue_id"] for issue in issues
+                                        if issue["reason_code"] ==
+                                        "one_action_claim_spans_multiple_shots"
+                                        and any(shot_id not in observed_visual_shots
+                                                for shot_id in issue["shot_ids"])}),
     }
     result["artifact_sha"] = json_hash(result)
     _write_json(output / "reference_understanding_v2.json", result)

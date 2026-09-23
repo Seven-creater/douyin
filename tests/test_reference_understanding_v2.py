@@ -3,7 +3,7 @@ from collections import Counter
 import pytest
 
 from src.agentic_video.reference_understanding_v2 import (
-    VISUAL_PROBE_PROMPT, build_editing_graph, build_review_issues,
+    VISUAL_PROBE_PROMPT, _clip_context, build_editing_graph, build_review_issues,
     validate_local_observation, validate_probe_selection,
     validate_story_audit, validate_story_graph,
 )
@@ -32,7 +32,8 @@ def _fixture():
             {"section_id": "A", "interval": [0.0, 3.0]},
             {"section_id": "B", "interval": [3.0, 5.0]},
             {"section_id": "C", "interval": [5.0, 7.0]}],
-        "text_timeline": [{"claim_id": "T1", "interval": [6.0, 7.0]}],
+        "text_timeline": [{"claim_id": "T1", "interval": [6.0, 7.0],
+                           "observed_text": "A statement"}],
         "measured_editing": {"structural_grammar": {}},
         "audio": {"music_beat_status": "unverified",
                   "beat_synced_status": "unverified"},
@@ -85,10 +86,28 @@ def test_visual_observation_requires_every_shot_and_adjacent_pair():
                  {"from_shot_id": "S1", "to_shot_id": "S2"},
                  {"from_shot_id": "S2", "to_shot_id": "S3"}]}
     validate_local_observation(value, probe)
-    value["observations"][0]["audible_event"] = "speech"
+    value["observations"][0]["audible_event_type"] = "speech"
     with pytest.raises(ValueError, match="crosses_modality"):
         validate_local_observation(value, probe)
     assert "kick" not in VISUAL_PROBE_PROMPT.lower()
+
+
+def test_av_text_statement_cannot_be_assigned_to_another_shot():
+    static, _reference = _fixture()
+    static["shots"][-1]["text_claim_ids"] = ["T1"]
+    probe = {"channel": "AV", "shot_ids": ["S6", "S7"],
+             "interval": [5.0, 7.0]}
+    context = _clip_context(probe, static)
+    assert context["text_statements"][0]["shot_id"] == "S7"
+    value = {"schema_version": "reference_local_observation_v2",
+             "observations": [
+                 {"shot_id": "S6", "attributed_statement_ids": ["T1"],
+                  "audible_event_type": "unknown"},
+                 {"shot_id": "S7", "attributed_statement_ids": [],
+                  "audible_event_type": "unknown"}],
+             "connections": [{"from_shot_id": "S6", "to_shot_id": "S7"}]}
+    with pytest.raises(ValueError, match="text_claim_assigned_to_wrong_shot"):
+        validate_local_observation(value, probe, context)
 
 
 def test_editing_graph_keeps_measured_time_and_unknown_semantics():
@@ -124,7 +143,8 @@ def test_story_graph_and_audit_never_turn_unsupported_claims_into_facts():
              "local_observation_refs": ["probe_01:S1"]}],
         "relations": [],
         "theme_hypotheses": [
-            {"hypothesis_id": "H1", "support_ids": ["V1"]}],
+            {"hypothesis_id": "H1", "support_ids": ["V1"],
+             "ending_relation": "unknown"}],
         "unresolved_issue_ids": [],
     }
     validate_story_graph(story, reference, issues, observations)
