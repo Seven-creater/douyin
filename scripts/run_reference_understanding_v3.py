@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--baseline-v2", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--asr-json", type=Path)
+    parser.add_argument("--replay-from", type=Path)
     parser.add_argument("--gpu-pair", default="0,1")
     parser.add_argument("--config", type=Path)
     args = parser.parse_args()
@@ -31,7 +32,8 @@ def main() -> None:
     runner = OmniRunner(config.perception["omni"])
     value = run_reference_understanding_v3(
         args.reference, args.video, args.masked_video, args.baseline_v2,
-        args.output, runner, asr_path=args.asr_json)
+        args.output, runner, asr_path=args.asr_json,
+        replay_from=args.replay_from)
     print(json.dumps({"status": value["status"],
                       "artifact_sha": value["artifact_sha"],
                       "local_media_call_count": value["local_media_call_count"],

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
 from src.agentic_video.reference_understanding_v3 import (
     MAX_LOCAL_MEDIA_CALLS, V_PROMPT, _counterfactual_sections,
-    _observation_view, _probe_payload, build_editing_graph, plan_probes,
+    _observation_view, _probe_payload, _replay_media, build_editing_graph, plan_probes,
     sampling_from_runner, select_neutral_verification,
     validate_local_observation, validate_probe_plan,
 )
+from src.agentic_video.recipe_v2 import sha256_file
 
 
 def fixture():
@@ -123,6 +125,10 @@ def test_generic_action_change_is_valid_but_still_needs_sample_support():
                               "continuity": "unknown"}]}
     assert validate_local_observation(value, probe, payload, sampling)[
         "change_findings"][0]["effective_status"] == "supported"
+    value["shots"][0]["changes"][0]["kind"] = "scene_change"
+    unknown_kind = validate_local_observation(value, probe, payload, sampling)
+    assert unknown_kind["change_findings"][0]["effective_status"] == "insufficient"
+    assert unknown_kind["change_findings"][0]["issue_code"] == "unknown_change_kind"
 
 
 def test_high_impact_verification_is_new_sampling_and_neutral():
@@ -187,3 +193,39 @@ def test_counterfactual_inputs_remove_terminal_statement_and_reorder():
     reversed_rows = _counterfactual_sections(static, reverse_order=True)
     assert reversed_rows[0]["attributed_statements"][0]["observed_text"] == "last line"
     assert reversed_rows[0]["ordinal"] == 1
+
+
+def test_replay_requires_exact_request_and_media_sha(tmp_path, monkeypatch):
+    static, _ = fixture()
+    probe = {"probe_id": "probe_01", "issue_id": "x", "channel": "V",
+             "shot_ids": ["s1", "s2"], "interval": [1., 3.], "fps": 8.,
+             "purpose": "coarse_action_coverage"}
+    source = tmp_path / "source"
+    stage = source / "calls" / "probe_01"
+    stage.mkdir(parents=True)
+    clip = source / "clips" / "probe_01" / "clip_visual.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"fixed media")
+    (source / "probe_plan.json").write_text(json.dumps({"probes": [probe]}),
+                                            encoding="utf-8")
+    request = V_PROMPT + json.dumps(_probe_payload(probe, static),
+                                    ensure_ascii=False, separators=(",", ":"))
+    (stage / "request.txt").write_text(request, encoding="utf-8")
+    (stage / "raw_response.txt").write_text("raw", encoding="utf-8")
+    (stage / "model_call.json").write_text(json.dumps({
+        "media_sha": sha256_file(clip)}), encoding="utf-8")
+    (stage / "sampling_audit.json").write_text(json.dumps({
+        "sampling_verified": False}), encoding="utf-8")
+    (stage / "parsed.json").write_text(json.dumps({
+        "schema_version": "reference_local_observation_v3",
+        "shots": [{"shot_id": "s1", "changes": []},
+                  {"shot_id": "s2", "changes": []}],
+        "connections": [{"from_shot_id": "s1", "to_shot_id": "s2",
+                         "continuity": "unknown"}]}), encoding="utf-8")
+    monkeypatch.setattr(
+        "src.agentic_video.reference_understanding_v3.preserve_sampled_source_frames",
+        lambda *_: {"status": "sampling_not_verified"})
+    replayed = _replay_media(probe, static, source, tmp_path / "output")
+    assert replayed["replayed_from"] == str(source)
+    assert replayed["media_sha"] == sha256_file(clip)
+    assert (tmp_path / "output/calls/probe_01/replay_provenance.json").exists()

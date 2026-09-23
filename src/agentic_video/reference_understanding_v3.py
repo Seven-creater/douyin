@@ -6,6 +6,7 @@ remain hypotheses even when the same model agrees with itself twice.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -343,7 +344,7 @@ def preserve_sampled_source_frames(clip: Path, sampling: dict[str, Any],
     subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(clip), "-vf",
          f"select={expression},scale=360:-2", "-vsync", "0", "-start_number", "0",
-         "-q:v", "3", str(directory / "frame_%04d.jpg")],
+         "-q:v", "3", "-y", str(directory / "frame_%04d.jpg")],
         check=True, capture_output=True)
     files = sorted(directory.glob("frame_*.jpg"))
     relative = sampling["actual_frame_timestamps_relative_s"]
@@ -377,6 +378,8 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
     text_ids = {(r["shot_id"], r["claim_id"])
                 for r in payload.get("text_statements") or []}
     findings: list[dict[str, Any]] = []
+    issue_codes: list[str] = []
+    invalid_text_assignments: dict[str, list[str]] = {}
     for row, scope in zip(rows, payload["shots"]):
         sid = row["shot_id"]
         lo, hi = map(float, scope["relative_interval"])
@@ -389,23 +392,28 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
         if probe["channel"] == "AV":
             if row.get("audible_event_type") not in {
                     "music", "speech", "sound_effect", "other", "unknown"}:
-                raise ValueError("audio_type_invalid")
-            if any((sid, cid) not in text_ids for cid in
-                   row.get("attributed_statement_ids") or []):
-                raise ValueError("text_wrong_shot")
+                issue_codes.append(f"{sid}:audio_type_invalid")
+            wrong = [cid for cid in row.get("attributed_statement_ids") or []
+                     if (sid, cid) not in text_ids]
+            if wrong:
+                issue_codes.append(f"{sid}:text_wrong_shot")
+                invalid_text_assignments[sid] = wrong
         for change in row.get("changes") or []:
             when = change.get("first_visible_s")
             status = change.get("epistemic_status")
-            if status not in {"supported", "contested", "insufficient"}:
-                raise ValueError("change_status_invalid")
-            if change.get("kind") not in {"action", "posture", "contact", "identity",
-                                           "causal", "other"}:
-                raise ValueError("change_kind_invalid")
-            time_in_shot = (when is not None and
-                            lo-0.04 <= float(when) <= hi+0.04)
-            aligned = (when is not None and any(abs(float(when)-t) <= 0.09
-                                                  for t in in_shot) and time_in_shot)
-            effective = (status if sampling.get("sampling_verified") and
+            status_valid = status in {"supported", "contested", "insufficient"}
+            kind_valid = change.get("kind") in {
+                "action", "posture", "contact", "identity", "causal", "other"}
+            try:
+                numerical_when = float(when) if when is not None else None
+            except (TypeError, ValueError):
+                numerical_when = None
+            time_in_shot = (numerical_when is not None and
+                            lo-0.04 <= numerical_when <= hi+0.04)
+            aligned = (numerical_when is not None and any(
+                abs(numerical_when-t) <= 0.09 for t in in_shot) and time_in_shot)
+            effective = (status if status_valid and kind_valid and
+                         sampling.get("sampling_verified") and
                          len(in_shot) >= MOTION_MIN_SAMPLES and aligned else
                          "insufficient")
             # Causal and identity claims require separate verification; one
@@ -417,7 +425,11 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
                              "declared_status": status, "effective_status": effective,
                              "sample_aligned": aligned,
                              "time_in_shot": time_in_shot,
-                             "issue_code": ("first_visible_time_outside_shot"
+                             "issue_code": ("unknown_change_kind"
+                                            if not kind_valid else
+                                            "change_status_invalid"
+                                            if not status_valid else
+                                            "first_visible_time_outside_shot"
                                             if not time_in_shot else
                                             "sample_not_aligned" if not aligned else
                                             "insufficient_motion_samples"
@@ -426,9 +438,12 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
     for edge in edges:
         if edge.get("continuity") not in {
                 "same_action", "new_action", "possible_ellipsis", "unknown"}:
-            raise ValueError("continuity_invalid")
+            issue_codes.append(f"{edge['from_shot_id']}:{edge['to_shot_id']}"
+                               ":continuity_invalid")
     return {"sampling_verified": bool(sampling.get("sampling_verified")),
-            "change_findings": findings}
+            "change_findings": findings,
+            "issue_codes": issue_codes,
+            "invalid_text_assignments": invalid_text_assignments}
 
 
 def build_editing_graph(static: dict[str, Any], observations: list[dict[str, Any]]
@@ -451,7 +466,9 @@ def build_editing_graph(static: dict[str, Any], observations: list[dict[str, Any
         obs = by_edge.get(key, [])
         labels = {row["continuity"] for row in obs
                   if row["sampling_verified"] and
-                  not row["endpoint_change_invalid"]}
+                  not row["endpoint_change_invalid"] and
+                  row["continuity"] in {"same_action", "new_action",
+                                        "possible_ellipsis", "unknown"}}
         status = ("insufficient" if not labels or labels == {"unknown"} else
                   "contested" if len(labels) > 1 else "provisional")
         transition = right.get("transition_in")
@@ -553,16 +570,25 @@ def _observation_view(observations: list[dict[str, Any]]) -> list[dict[str, Any]
                               "exit_state": (original.get("exit_state")
                                              if frame_state_usable else None),
                               "changes": changes,
-                              "attributed_statement_ids": original.get(
-                                  "attributed_statement_ids") or [],
-                              "audible_event_type": original.get("audible_event_type"),
+                              "attributed_statement_ids": [cid for cid in
+                                  original.get("attributed_statement_ids") or []
+                                  if cid not in row["validation"].get(
+                                      "invalid_text_assignments", {}).get(
+                                          original["shot_id"], [])],
+                              "audible_event_type": (original.get("audible_event_type")
+                                  if original.get("audible_event_type") in {
+                                      "music", "speech", "sound_effect", "other",
+                                      "unknown"} else "unknown"),
                               "limitations": original.get("limitations") or []})
         invalid_shots = {shot["shot_id"] for shot in shot_rows
                          if any(change["status"] == "insufficient"
                                 for change in shot["changes"])}
         connections = []
         for edge in row["response"].get("connections") or []:
-            if edge["from_shot_id"] in invalid_shots or edge["to_shot_id"] in invalid_shots:
+            if (edge["from_shot_id"] in invalid_shots or
+                    edge["to_shot_id"] in invalid_shots or
+                    edge.get("continuity") not in {"same_action", "new_action",
+                                                   "possible_ellipsis", "unknown"}):
                 connections.append({"from_shot_id": edge["from_shot_id"],
                                     "to_shot_id": edge["to_shot_id"],
                                     "continuity": "unknown",
@@ -767,16 +793,77 @@ def _call_media(runner: Any, probe: dict[str, Any], static: dict[str, Any],
                     sampling)
     validation = validate_local_observation(value, probe, payload, sampling)
     validation["sampled_frames_status"] = frame_manifest["status"]
+    validation_status = ("WARN" if validation["issue_codes"] or any(
+        row["effective_status"] == "insufficient"
+        for row in validation["change_findings"]) else "PASS")
     _write_json(output / "calls" / probe["probe_id"] / "validation.json",
-                {"status": "PASS", **validation})
+                {"status": validation_status, **validation})
     return {**probe, "media_sha": sha256_file(clip), "sampling": sampling,
             "validation": validation, "response": value}
+
+
+def _replay_media(probe: dict[str, Any], static: dict[str, Any],
+                  replay_source: Path, output: Path) -> dict[str, Any] | None:
+    """Revalidate one untouched prior response; never call the model again."""
+    source_stage = replay_source / "calls" / probe["probe_id"]
+    if not (source_stage / "parsed.json").exists():
+        return None
+    source_plan = json.loads((replay_source / "probe_plan.json")
+                             .read_text(encoding="utf-8"))
+    old = next((row for row in source_plan["probes"]
+                if row["probe_id"] == probe["probe_id"]), None)
+    if old != probe:
+        raise ValueError("replayed_probe_plan_mismatch")
+    payload = _probe_payload(probe, static)
+    prompt = V_PROMPT if probe["channel"] == "V" else AV_PROMPT
+    expected_request = prompt + json.dumps(payload, ensure_ascii=False,
+                                           separators=(",", ":"))
+    if (source_stage / "request.txt").read_text(encoding="utf-8") != expected_request:
+        raise ValueError("replayed_request_mismatch")
+    clip_name = "clip_visual.mp4" if probe["channel"] == "V" else "clip.mp4"
+    source_clip = replay_source / "clips" / probe["probe_id"] / clip_name
+    source_meta = json.loads((source_stage / "model_call.json")
+                             .read_text(encoding="utf-8"))
+    if sha256_file(source_clip) != source_meta["media_sha"]:
+        raise ValueError("replayed_media_sha_mismatch")
+    dest_stage = output / "calls" / probe["probe_id"]
+    dest_clip_dir = output / "clips" / probe["probe_id"]
+    shutil.copytree(source_stage, dest_stage)
+    shutil.copytree(source_clip.parent, dest_clip_dir)
+    clip = dest_clip_dir / clip_name
+    value = json.loads((dest_stage / "parsed.json").read_text(encoding="utf-8"))
+    sampling = json.loads((dest_stage / "sampling_audit.json")
+                          .read_text(encoding="utf-8"))
+    sampling["sampling_verified"] = bool(sampling.get("sampling_verified"))
+    frame_manifest = preserve_sampled_source_frames(
+        clip, sampling, dest_stage / "sampled_frames")
+    if frame_manifest["status"] == "frame_count_mismatch":
+        sampling["sampling_verified"] = False
+        sampling["sampling_error"] = "source_frame_reconstruction_count_mismatch"
+        _write_json(dest_stage / "sampling_audit.json", sampling)
+    validation = validate_local_observation(value, probe, payload, sampling)
+    validation["sampled_frames_status"] = frame_manifest["status"]
+    _write_json(dest_stage / "validation.json", {
+        "status": "REPLAYED_WARN" if validation["issue_codes"] or any(
+            row["effective_status"] == "insufficient"
+            for row in validation["change_findings"]) else "REPLAYED_PASS",
+        **validation})
+    _write_json(dest_stage / "replay_provenance.json", {
+        "source_run": str(replay_source), "source_probe_id": probe["probe_id"],
+        "source_request_sha": sha256_file(source_stage / "request.txt"),
+        "source_response_sha": sha256_file(source_stage / "raw_response.txt"),
+        "source_media_sha": source_meta["media_sha"],
+        "model_recalled": False})
+    return {**probe, "media_sha": source_meta["media_sha"],
+            "sampling": sampling, "validation": validation,
+            "response": value, "replayed_from": str(replay_source)}
 
 
 def run_reference_understanding_v3(
         reference_path: Path, video: Path, masked_video: Path,
         baseline_v2_path: Path, output: Path, runner: Any,
-        *, asr_path: Path | None = None) -> dict[str, Any]:
+        *, asr_path: Path | None = None,
+        replay_from: Path | None = None) -> dict[str, Any]:
     output = Path(output)
     if output.exists() and any(output.iterdir()):
         raise ValueError("output_directory_not_empty")
@@ -801,8 +888,10 @@ def run_reference_understanding_v3(
         "human_gold_in_model_requests": False})
     observations = []
     for probe in probes:
-        observations.append(_call_media(runner, probe, static, video,
-                                        masked_video, output))
+        reused = (_replay_media(probe, static, Path(replay_from), output)
+                  if replay_from is not None else None)
+        observations.append(reused if reused is not None else _call_media(
+            runner, probe, static, video, masked_video, output))
         _write_json(output / "local_observations.json", {
             "schema_version": "reference_local_observations_v3",
             "observations": observations})
@@ -888,6 +977,8 @@ def run_reference_understanding_v3(
               "baseline_v2_sha": sha256_file(baseline_v2_path),
               "static_review_sha": static["artifact_sha"],
               "local_media_call_count": len(observations),
+              "replayed_media_call_count": sum("replayed_from" in row
+                                               for row in observations),
               "media_budget": MAX_LOCAL_MEDIA_CALLS,
               "probe_omissions": omitted,
               "story_validation_issues": story_errors,
