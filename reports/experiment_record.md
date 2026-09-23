@@ -78,3 +78,92 @@ Theme 生成并通过结构校验。Story 原始内容包含城市地铁“鬼�
 - 没有接受的真实 Screenplay、人工或模型创意质量评估，也没有图片、视频生成。
 - 没有多随机种子、Best-of-N 或“有 Intent”对照；不能据此估计成功率或因果改进。
 - 本实验只保留并报告失败，不对第二次 Story 或 Screenplay 做事后修正。
+
+# 实验2：Story 直接修订与 Critic→修订的受控单例对照
+
+## 1. 任务要求
+
+### 1.1 总目标
+
+在不修改 R2-D 生产 DAG、不增加 Creative Plan 或整套 Reviewer Layer 的条件下，检验一次独立 Story Critic 是否比同等调用次数的直接修订更能纠正已观察到的信息更新语义绑定错误。
+
+### 1.2 共同输入与边界
+
+两臂共享实验1第二次运行的同一 Theme 和 Story（Story JSON SHA256 `5204f7025ec99561a1c31a1e1ff0dcd5b2b473c41a537c4ac761314bfd3f4dba`），及冻结的 `CREATIVE-STRUCTURE-V1`。A 臂为直接修订两次，B 臂为独立 Critic 一次、依据反馈修订一次。随后对最终两个 Story 做左右顺序互换的匿名比较两次。每个模型调用只执行一次，无 retry；保留请求、原始回复和计量。模型输入只包括公开结构、Theme、当前 Story 与实验约束，不包括参考视频及 Reference Zone 证据。仅生成文本 Story；无 Screenplay、媒体或生产提交。
+
+### 1.3 复现入口
+
+独立代码入口为 `scripts/run_creative_critique_trial.py`；模型为服务器 Python 3.10.20 环境下的文本 Omni，GPU 0/1。三个按版本隔离的 run 位于 `data/agentic_runs/r2d_critique_trial_20260923_7989e4e/`、`..._3223bc4/`、`..._6a7fc78/`，各目录不覆盖。最终有效对照为 `6a7fc78`；前两次为保留的失败/受污染 pilot，不并入有效对照。
+
+## 2. 实际做法与进展顺序
+
+### 第一步：隔离实验入口和静态校验
+
+新增 `critique_trial.py` 与 CLI，不接入生产 workspace。相同 Story 编译与现有结构校验用于两臂；Critic 与 Judge 的原始响应独立保存。每个请求保存完整 prompt、payload SHA、token 上限；每个响应保存原文、SHA、token 与耗时。本地全量测试 `1133 passed, 1 skipped`，服务器专项测试 `7 passed`，均在首次真实运行前完成。
+
+### 第二步：首轮格式失败（`7989e4e`）
+
+直接修订第 1 次的回复把 `event_relations` 写成对象而非契约要求的单元素数组；现有 `_compile_story` 报 `story_event_relations_invalid`，运行在 1 次有响应调用后停止。原始回复及失败记录未覆盖。原因是实验 prompt 写了“exactly one object”但未明确“array containing exactly one object”；后续只澄清 JSON 容器形状，不放宽 schema。
+
+### 第三步：第一次完整 pilot 暴露输入污染（`3223bc4`）
+
+六次调用均完成，两次交换顺序的 Judge 都给 `tie`。但实验输入把运行状态 `text_only=true`、`media_generation=false` 误放进了创作约束，Critic、修订器和 Judge 将其解释为“故事必须纯文本交付”，产物及评价出现 voiceover/text-only 假设。这使 pilot 不适于判断正常短视频创作质量。修订仅从模型 payload 删除这两个运行标记；输出元数据仍记录未生成媒体。
+
+### 第四步：干净单例对照（`6a7fc78`）
+
+新目录运行全部六次调用，现有 Story 契约均通过。A 臂最终仍将 `I0` 绑定到“发现录像”，将 `I1` 绑定到“群众准备攻击”；B 臂最终将 `I0` 绑定到“公众相信鬼魂”、`E1` 绑定到“录像显示避寒者”、`I1` 绑定到“记者意识到真人处境”。两次匿名 Judge 分别在左右顺序下选择 `right`、`left`，均指向 B 臂。此结果也可直接从两个最终 `candidate.json` 的事件描述与 `event_relations` 核查，而不只依赖 Judge 文本。
+
+## 3. 出现的问题与解决过程
+
+### 3.1 JSON 形状歧义使对照在首调用中止
+
+**现象：** `7989e4e/01_direct_revision_1/raw_response.txt` 中 `event_relations` 是对象；`result.json` 为 `BLOCKED`，原因 `story_event_relations_invalid`。
+
+**根因：** 实验 prompt 对“恰好一条关系”的措辞未说明数组容器，而 Story 契约需要列表；这是提示词与契约不一致，非质量判定。
+
+**解决：** 仅明确输出为“a JSON array containing exactly one object”。
+
+**验证：** 后续两个独立 run 的 Story 输出均能通过同一个 `_compile_story` 和 `validate_story_structure`；没有修改 Story schema 或失败目录。
+
+### 3.2 实验执行标记污染创作评估
+
+**现象：** `3223bc4` 的 Critic 把“不生成媒体”当作生产可行性优点；Judge 认为两组都是“text-only delivery”，均判平局。
+
+**根因：** `text_only` 与 `media_generation` 本意是本次实验的执行范围，却被放进所有模型请求的 `experiment_constraints`。
+
+**解决：** 模型侧约束只保留 30 秒目标与最多 3 场；未生成媒体只在运行结果元数据中记录。
+
+**验证：** 新增测试断言六个请求不含这两个标记；`6a7fc78` 的实际请求与回复不再以“纯文本交付”作为创作条件。本次纠正不改变结构 spec、Theme、基线 Story 或两臂算法。
+
+### 3.3 结构 PASS 掩盖语义绑定错误
+
+**现象：** 干净 run 中 A、B 的 Story 均通过确定性结构校验，但 A 的 `prior_event_id` 指向录像发现，`updated_event_id` 指向群众攻击；B 则形成可辨认的旧解释→证据→更新解释。
+
+**根因：** 现有校验只验证字段、引用和关系形式，不检验事件文本是否承担其所绑定的信息角色。这一点已在实验1观察到。
+
+**处理：** 此对照没有新增 answer-shaped gate。独立 Critic 明确指出“录像发现不是旧解释、群众恐慌不是更新解释”；修订器根据反馈产出另一 Story。Critic 的个别具体建议仍有瑕疵，因此不把其每句话都当成正确答案。
+
+**验证：** `6a7fc78/03_critic/critique.json`、两份最终 `candidate.json` 和顺序互换的两份 `judgment.json` 提供相互可核查的原始证据。Judge 只是一台同源模型的重复排序，不构成独立人类 Gold。
+
+## 4. 简洁实验报告
+
+### 4.1 主要结果
+
+| Run | 有响应调用 | 终态 | 比较结论 |
+|---|---:|---|---|
+| `7989e4e` | 1 | `BLOCKED` | 首调用 JSON 形状失败，不比较 |
+| `3223bc4` | 6 | `PASS`，但输入受污染 | Judge 两次平局；不纳入有效对照 |
+| `6a7fc78` | 6 | `PASS` | 两次换序均选 Critic→修订，且角色绑定可人工核查 |
+
+干净 run 的 A 臂两次直接修订为 `3560` input、`1025` output tokens，模型耗时合计 `76.09 s`；B 臂 Critic 加修订为 `4083` input、`1133` output tokens，耗时 `83.32 s`。两次 Judge 另用 `4686` input、`670` output tokens，耗时 `49.70 s`。六次调用合计 `12329` input、`2828` output tokens，模型调用耗时合计 `209.11 s`，不含加载；B 臂比 A 臂多 `523` input、`108` output tokens 和 `7.23 s`，所以并非等 token 成本对照。最终 run 的输入 SHA、两臂 Story SHA、顺序结果见其 `result.json`。
+
+### 4.2 结论
+
+本次一份真实基线 Story 的受控探索中，Story Critic 能指出确定性 validator 漏掉的语义角色错配；Critic→修订产物修正了该错配，而两次直接修订未修正。两次同模型、交换顺序的 Judge 与这项可直接核对的差异一致。证据支持继续检验“语义 Reviewer 是否有用”，**不支持**据此直接上四类 Reviewer、20 个 Theme 或生产级自动修复循环，也不证明整体原创性、观众吸引力或视频质量提高。
+
+### 4.3 尚未完成
+
+- 仅一份 Theme/Story、一个模型配置；没有随机种子或跨题材重复，无法估计成功率或泛化。
+- Critic、修订器、Judge 使用同源模型，Judge 不是独立 Gold；没有人工盲评。
+- 未运行 Screenplay、Storyboard、媒体生成或视频评价；两组仅是 Story Blueprint。
+- 未把实验入口接入生产 DAG；`production_committed=false`，`media_generation=not_run`。
