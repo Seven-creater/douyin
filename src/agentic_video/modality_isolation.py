@@ -17,7 +17,7 @@ from src.perception.common import run_ffmpeg, run_ffprobe_json
 
 ISOLATION_SCHEMA = "modality_request_audit_v1"
 MASK_SCHEMA = "visual_mask_v1"
-CHANNELS = {"V", "A", "T", "FUSION"}
+CHANNELS = {"V", "A", "T", "FUSION", "AV"}
 
 _ALLOWED_PAYLOAD_KEYS = {
     "V": {"request_id", "channel", "interval", "anonymous_subject_ids",
@@ -26,6 +26,8 @@ _ALLOWED_PAYLOAD_KEYS = {
     "T": {"request_id", "channel", "interval", "text_region_refs",
           "text_tasks"},
     "FUSION": {"request_id", "channel", "claim_ids", "event_ids"},
+    "AV": {"request_id", "channel", "interval", "claim_ids", "event_ids",
+           "observation_dimensions", "sampling"},
 }
 
 
@@ -163,6 +165,11 @@ def audit_request(
     elif channel == "A":
         if not media or any("video" in row["streams"] for row in media):
             raise IsolationError("audio_request_contains_visual")
+    elif channel == "AV":
+        if not media or any(
+                "video" not in row["streams"] or "audio" not in row["streams"]
+                for row in media):
+            raise IsolationError("audiovisual_request_missing_stream")
     elif channel in {"T", "FUSION"} and media:
         raise IsolationError("non_media_channel_contains_media")
 
@@ -195,4 +202,3 @@ def require_audio_only_capability(runner: Any) -> None:
     """Fail closed; a video-bearing fallback is not an audio-only call."""
     if not callable(getattr(runner, "inspect_audio", None)):
         raise IsolationError("audio_only_backend_unavailable")
-
