@@ -24,7 +24,8 @@ be distinct events connected by an actual information update. Do not copy or
 infer any reference video. Return exactly one JSON object with: logline,
 characters, setting, goal, stakes, events, event_relations,
 production_assumptions. characters: [{character_id, role}]. events:
-[{event_id, role, description}]. event_relations: exactly one object with
+[{event_id, role, description}]. event_relations: a JSON array containing
+exactly one object with
 {relation_id, type, prior_event_id, evidence_event_id, updated_event_id};
 type=information_update and the three event IDs are distinct. Do not include
 structure_bindings; the program derives them. No markdown or commentary.
