@@ -43,15 +43,13 @@ STORY_PROMPT = """Create ONE original, filmable story blueprint for this theme.
 Use only the supplied public structure and selected theme. Preserve the
 information-update mechanism without copying any reference video.
 Return one JSON object with exactly: logline, characters, setting, goal,
-stakes, events, event_relations, structure_bindings, production_assumptions.
+stakes, events, event_relations, production_assumptions.
 characters: [{character_id, role}]. events: at least three objects with
 {event_id, role, description}; IDs use letters, digits and underscores.
 event_relations: exactly one {relation_id, type, prior_event_id,
 evidence_event_id, updated_event_id}, type=information_update, and its three
-event IDs must be distinct. structure_bindings maps I0_PRIOR_INTERPRETATION,
-E1_NEW_INFORMATION, I1_UPDATED_INTERPRETATION to those event IDs and maps
-R1_INFORMATION_UPDATE to {prior, evidence, updated, statement}; the first
-three are component IDs and statement is the relation_id.
+event IDs must be distinct. Do not write structure_bindings; the program
+derives that mechanical mapping from your event_relations.
 production_assumptions is a list of strings. Do not output markdown.
 """
 
@@ -175,6 +173,35 @@ def _compile_screenplay(draft: dict[str, Any], request: dict[str, Any]
     }
 
 
+def _compile_story(draft: dict[str, Any], structure_sha: str,
+                   theme_id: str) -> dict[str, Any]:
+    _fields(draft, {"logline", "characters", "setting", "goal", "stakes",
+                    "events", "event_relations", "production_assumptions"},
+            "story")
+    relations = draft["event_relations"]
+    if not isinstance(relations, list) or len(relations) != 1:
+        raise ContractError("story_event_relations_invalid")
+    relation = relations[0]
+    return {
+        "schema_version": "story_blueprint_v1",
+        "blueprint_id": "REAL_BASELINE_BLUEPRINT_01",
+        "theme_id": theme_id,
+        "parent_structure_sha": structure_sha,
+        **draft,
+        "structure_bindings": {
+            "I0_PRIOR_INTERPRETATION": relation["prior_event_id"],
+            "E1_NEW_INFORMATION": relation["evidence_event_id"],
+            "I1_UPDATED_INTERPRETATION": relation["updated_event_id"],
+            "R1_INFORMATION_UPDATE": {
+                "prior": "I0_PRIOR_INTERPRETATION",
+                "evidence": "E1_NEW_INFORMATION",
+                "updated": "I1_UPDATED_INTERPRETATION",
+                "statement": relation["relation_id"],
+            },
+        },
+    }
+
+
 def run_real_text_baseline(runner: Any, structure: dict[str, Any],
                            output_dir: Path, *, format_constraints: dict[str, Any],
                            user_brief: dict[str, Any] | None = None,
@@ -219,15 +246,8 @@ def run_real_text_baseline(runner: Any, structure: dict[str, Any],
             "creative_structure_spec": structure, "selected_theme": theme,
         }, 3072)
         calls += 1
-        _fields(story_draft, {"logline", "characters", "setting", "goal",
-                              "stakes", "events", "event_relations",
-                              "structure_bindings", "production_assumptions"},
-                "story")
-        story = {"schema_version": "story_blueprint_v1",
-                 "blueprint_id": "REAL_BASELINE_BLUEPRINT_01",
-                 "theme_id": theme["theme_id"],
-                 "parent_structure_sha": structure["artifact_sha"],
-                 **story_draft}
+        story = _compile_story(story_draft, structure["artifact_sha"],
+                               theme["theme_id"])
         validate_story_structure(story, structure_sha=structure["artifact_sha"],
                                  theme_id=theme["theme_id"])
         _write_json(root / stage / "candidate.json", story)

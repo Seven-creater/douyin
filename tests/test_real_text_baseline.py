@@ -53,7 +53,8 @@ class StubRunner:
                 _spec()["artifact_sha"], payload["selected_theme"])[0]
             result = {key: value for key, value in candidate.items()
                       if key not in {"schema_version", "blueprint_id",
-                                     "theme_id", "parent_structure_sha"}}
+                                     "theme_id", "parent_structure_sha",
+                                     "structure_bindings"}}
         else:
             screenplay = FakeScreenplaySkill().run(payload["writer_request"])
             result = {key: screenplay[key] for key in (
