@@ -197,18 +197,14 @@ def plan_probes(static: dict[str, Any], reference: dict[str, Any]
             while end + 1 < len(shots) and end - final < 2 and (
                     related_event_ids & set(shots[end + 1].get("event_ids") or [])):
                 end += 1
-            if end > final:
+            for boundary in range(final, end):
                 add(f"outcome_link_{issue['issue_id']}", "V",
-                    [row["shot_id"] for row in shots[max(0, final-1):end+1]],
+                    [shots[boundary]["shot_id"], shots[boundary+1]["shot_id"]],
                     12.0, "action_to_later_state")
     for issue in issues:
         if issue["reason_code"] == "final_text_relation_unverified":
             add(issue["issue_id"], "AV", issue["shot_ids"], 8.0,
                 "terminal_statement_connection")
-    for issue in issues:
-        if issue["reason_code"] == "cross_section_connection_unverified":
-            add(issue["issue_id"], "AV", issue["shot_ids"], 8.0,
-                "cross_section_edit")
     # The coarse-action section was already sampled densely; spend the
     # remaining local capacity on an edit sequence not yet covered.
     visually_covered = {sid for probe in selected if probe["channel"] == "V"
@@ -224,6 +220,17 @@ def plan_probes(static: dict[str, Any], reference: dict[str, Any]
             for window in windows:
                 add(issue["issue_id"], "AV", window, 8.0,
                     "dense_edit_connection")
+    action_positions = [positions[sid] for issue in issues if issue["reason_code"] ==
+                        "one_action_claim_spans_multiple_shots"
+                        for sid in issue["shot_ids"]]
+    boundaries = [issue for issue in issues if issue["reason_code"] ==
+                  "cross_section_connection_unverified"]
+    boundaries.sort(key=lambda issue: min(
+        (abs(positions[issue["shot_ids"][0]]-position)
+         for position in action_positions), default=0))
+    for issue in boundaries:
+        add(issue["issue_id"], "AV", issue["shot_ids"], 8.0,
+            "cross_section_edit")
     return selected, omitted
 
 
@@ -254,12 +261,11 @@ def select_neutral_verification(observations: list[dict[str, Any]],
     """Spend at most one reserved call on a localized, high-impact change."""
     if len(observations) >= MAX_LOCAL_MEDIA_CALLS:
         return None
-    counts = Counter(row["issue_id"] for row in observations)
     ordered = [row["shot_id"] for row in static["shots"]]
     index = {row["shot_id"]: row for row in static["shots"]}
     candidates = []
     for record in observations:
-        if record["channel"] != "V" or counts[record["issue_id"]] >= 2:
+        if record["channel"] != "V":
             continue
         for finding in record["validation"]["change_findings"]:
             if finding["kind"] not in {"posture", "contact", "identity", "causal"}:
@@ -279,7 +285,8 @@ def select_neutral_verification(observations: list[dict[str, Any]],
     ids = ordered[lo:hi]
     interval = [float(index[ids[0]]["start_s"]), float(index[ids[-1]]["end_s"])]
     return {"probe_id": f"probe_{len(observations)+1:02d}",
-            "issue_id": source["issue_id"], "channel": "V",
+            "issue_id": f"verify_{finding['shot_id']}_{finding['kind']}",
+            "channel": "V",
             "shot_ids": ids, "interval": interval, "fps": 16.0,
             "purpose": "neutral_verify", "prior_probe_id": source["probe_id"],
             "selected_change_kind": finding["kind"],

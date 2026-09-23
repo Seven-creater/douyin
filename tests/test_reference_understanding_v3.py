@@ -136,7 +136,8 @@ def test_high_impact_verification_is_new_sampling_and_neutral():
     assert chosen["purpose"] == "neutral_verify"
     assert chosen["shot_ids"] == ["s5", "s6", "s7"]
     assert "description" not in chosen
-    assert select_neutral_verification([record, {**record, "probe_id": "probe_02"}],
+    assert chosen["issue_id"].startswith("verify_s6_posture")
+    assert select_neutral_verification([record]*MAX_LOCAL_MEDIA_CALLS,
                                        static) is None
 
 
