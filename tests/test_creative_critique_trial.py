@@ -82,6 +82,8 @@ def test_isolated_trial_shares_baseline_and_swaps_judge_order(
     assert left_right["right_story"] == right_left["left_story"]
     assert all("accepted_claims" not in prompt and "reference_video" not in prompt
                for prompt in runner.prompts)
+    assert all('"text_only"' not in prompt and '"media_generation"' not in prompt
+               for prompt in runner.prompts)
     for stage in STAGES:
         assert (output / stage / "request.json").is_file()
         assert (output / stage / "raw_response.txt").is_file()

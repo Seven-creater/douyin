@@ -61,8 +61,7 @@ mechanism, coherence, filmability, originality, feasibility string fields).
 No markdown or commentary.
 """
 
-CONSTRAINTS = {"target_duration_s": 30, "max_scenes": 3,
-               "text_only": True, "media_generation": False}
+CONSTRAINTS = {"target_duration_s": 30, "max_scenes": 3}
 STAGES = ("01_direct_revision_1", "02_direct_revision_2", "03_critic",
           "04_guided_revision", "05_judge_lr", "06_judge_rl")
 
