@@ -76,6 +76,18 @@ def test_planner_selection_enforces_scope_and_per_issue_budget():
     selected["probes"][0]["shot_ids"] = ["S1", "S3"]
     with pytest.raises(ValueError, match="probe_shots_not_consecutive"):
         validate_probe_selection(selected, issues, static)
+    selected["probes"][0] = {"issue_id": "terminal_statement_relation",
+                             "shot_ids": ["S6"], "reason": "ending"}
+    with pytest.raises(ValueError, match="probe_issue_or_scope_invalid"):
+        validate_probe_selection(selected, issues, static)
+    selected["probes"][0]["shot_ids"] = ["S5", "S6"]
+    with pytest.raises(ValueError, match="probe_shot_outside_issue"):
+        validate_probe_selection(selected, issues, static)
+    terminal_issue = next(row for row in issues if row["issue_id"] ==
+                          "terminal_statement_relation")
+    terminal_issue["shot_ids"] = ["S5", "S6", "S7"]
+    with pytest.raises(ValueError, match="terminal_probe_omits_final_shot"):
+        validate_probe_selection(selected, issues, static)
 
 
 def test_visual_observation_requires_every_shot_and_adjacent_pair():
@@ -147,6 +159,8 @@ def test_story_graph_and_audit_never_turn_unsupported_claims_into_facts():
              "ending_relation": "unknown"}],
         "unresolved_issue_ids": [],
     }
+    validate_story_graph(story, reference, issues, observations)
+    story["narrative_units"][0]["local_observation_refs"] = ["probe_01"]
     validate_story_graph(story, reference, issues, observations)
     story["theme_hypotheses"][0]["support_ids"] = ["unseen"]
     with pytest.raises(ValueError, match="story_theme_support_invalid"):

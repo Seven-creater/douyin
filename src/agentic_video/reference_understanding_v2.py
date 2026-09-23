@@ -79,9 +79,10 @@ supported relations. Explain what the work may communicate, how the viewer's
 information changes, and how the ending affects the earlier reading. The
 video's on-screen text is attributed speech by the work, not independent
 physical proof. Separate visible facts, stated claims, and interpretations.
-Do not force a reversal, three-act shape, moral, or specific topic. Cite
-accepted claim/event IDs; local observations may be cited by probe and shot ID.
-Write each local observation reference as "<probe_id>:<shot_id>".
+Do not force a reversal, three-act shape, moral, or specific topic. Every
+unit, relation, and theme must cite at least one accepted claim/event ID.
+Omit a relation rather than invent support. Local observations may also be
+cited by probe ID or by "<probe_id>:<shot_id>".
 For each theme hypothesis, explicitly explain how the final visible or stated
 item relates to the preceding information; "unknown" is acceptable. Do not
 replace this relation with a one-word tone label.
@@ -143,7 +144,7 @@ def build_review_issues(static: dict[str, Any],
             issues.append({"issue_id": "terminal_statement_relation",
                            "reason_code": "final_text_relation_unverified",
                            "priority": 1, "channel": "AV", "shot_ids": (
-                               final_shots[-4:] if len(final_shots) >= 2 else
+                               final_shots[-2:] if len(final_shots) >= 2 else
                                [shot["shot_id"] for shot in shots[-2:]]),
                            "claim_ids": []})
     for left, right in zip(sections, sections[1:]):
@@ -193,6 +194,9 @@ def validate_probe_selection(selection: dict[str, Any],
         if any(value not in issue["shot_ids"] or value not in shot_index
                for value in ids):
             raise ValueError("probe_shot_outside_issue")
+        if (issue["reason_code"] == "final_text_relation_unverified" and
+                ids[-1] != issue["shot_ids"][-1]):
+            raise ValueError("terminal_probe_omits_final_shot")
         positions = [ordered.index(value) for value in ids]
         if positions != list(range(positions[0], positions[0] + len(ids))):
             raise ValueError("probe_shots_not_consecutive")
@@ -340,8 +344,9 @@ def validate_story_graph(story: dict[str, Any],
     if not sections:
         sections = {str(row["section_id"]) for row in
                     reference["shot_storyboard"]["shot_cards"]}
-    local_refs = {f"{record['probe_id']}:{shot_id}"
-                  for record in observations for shot_id in record["shot_ids"]}
+    local_refs = ({record["probe_id"] for record in observations} |
+                  {f"{record['probe_id']}:{shot_id}"
+                   for record in observations for shot_id in record["shot_ids"]})
     units = story.get("narrative_units")
     relations = story.get("relations")
     themes = story.get("theme_hypotheses")
@@ -414,6 +419,7 @@ def run_reference_understanding_v2(
     observations: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     story = None
+    story_validation_issues: list[str] = []
     for round_index in (1, 2):
         observed_visual_shots = {shot_id for record in observations
                                  if record["channel"] == "V"
@@ -423,6 +429,11 @@ def run_reference_understanding_v2(
             if (issue["reason_code"] == "one_action_claim_spans_multiple_shots" and
                     any(shot_id not in observed_visual_shots for shot_id in
                         issue["shot_ids"])):
+                pending_ids.add(issue["issue_id"])
+            if issue["reason_code"] == "final_text_relation_unverified" and not any(
+                    record["issue_id"] == issue["issue_id"] and
+                    issue["shot_ids"][-1] in record["shot_ids"]
+                    for record in observations):
                 pending_ids.add(issue["issue_id"])
         pending = issues if story is None else [
             issue for issue in issues if issue["issue_id"] in pending_ids and
@@ -464,6 +475,7 @@ def run_reference_understanding_v2(
             "accepted_claim_ids": [row["claim_id"] for row in reference["claims"]],
             "accepted_event_ids": [row["event_id"] for row in reference["events"]],
             "previous_revision": story,
+            "previous_validation_issue_codes": story_validation_issues,
             "local_observations": observations,
             "final_observed_item": {
                 "shot_id": static["shots"][-1]["shot_id"],
@@ -478,7 +490,14 @@ def run_reference_understanding_v2(
             runner, name=f"round_{round_index}_story_revision",
             prompt=REVISE_PROMPT, payload=revision_payload,
             output=output, max_new_tokens=4096)
-        validate_story_graph(story, reference, issues, observations)
+        try:
+            validate_story_graph(story, reference, issues, observations)
+            story_validation_issues = []
+        except ValueError as exc:
+            story_validation_issues = [str(exc)]
+        _write_json(output / f"round_{round_index}_story_validation.json", {
+            "status": "PASS" if not story_validation_issues else "FAIL",
+            "issue_codes": story_validation_issues})
         _write_json(output / "story_graph_v2.json", story)
     if story is None:
         raise ValueError("no_story_revision_generated")
@@ -489,7 +508,12 @@ def run_reference_understanding_v2(
         payload={"accepted_evidence": static["section_bundles"],
                  "local_observations": observations, "story": story},
         output=output, max_new_tokens=3072)
-    audit_positive = validate_story_audit(audit, story)
+    try:
+        audit_positive = validate_story_audit(audit, story)
+        audit_validation_issue = None
+    except ValueError as exc:
+        audit_positive = False
+        audit_validation_issue = str(exc)
     _write_json(output / "story_grounding_audit_v2.json", audit)
     observed_visual_shots = {shot_id for record in observations
                              if record["channel"] == "V"
@@ -506,15 +530,22 @@ def run_reference_understanding_v2(
         "local_probe_count": len(observations),
         "probe_counts_by_issue": dict(counts),
         "grounding_audit_positive": audit_positive,
+        "story_validation_issue_codes": story_validation_issues,
+        "audit_validation_issue_code": audit_validation_issue,
         "story_ready": False, "editing_ready": False,
         "creation_brief_generated": False,
         "production_release_allowed": False,
-        "unresolved_issue_ids": sorted(set(story.get("unresolved_issue_ids") or []) |
-                                       {issue["issue_id"] for issue in issues
-                                        if issue["reason_code"] ==
-                                        "one_action_claim_spans_multiple_shots"
-                                        and any(shot_id not in observed_visual_shots
-                                                for shot_id in issue["shot_ids"])}),
+        "unresolved_issue_ids": sorted(
+            set(story.get("unresolved_issue_ids") or []) |
+            {issue["issue_id"] for issue in issues
+             if issue["reason_code"] == "one_action_claim_spans_multiple_shots"
+             and any(shot_id not in observed_visual_shots
+                     for shot_id in issue["shot_ids"])} |
+            {issue["issue_id"] for issue in issues
+             if issue["reason_code"] == "final_text_relation_unverified"
+             and not any(record["issue_id"] == issue["issue_id"] and
+                         issue["shot_ids"][-1] in record["shot_ids"]
+                         for record in observations)}),
     }
     result["artifact_sha"] = json_hash(result)
     _write_json(output / "reference_understanding_v2.json", result)
