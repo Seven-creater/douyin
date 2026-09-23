@@ -6,7 +6,7 @@ import pytest
 
 from src.agentic_video.reference_understanding_v3 import (
     MAX_LOCAL_MEDIA_CALLS, V_PROMPT, _counterfactual_sections,
-    _probe_payload, build_editing_graph, plan_probes,
+    _observation_view, _probe_payload, build_editing_graph, plan_probes,
     sampling_from_runner, select_neutral_verification,
     validate_local_observation, validate_probe_plan,
 )
@@ -101,8 +101,10 @@ def test_actual_sampling_times_and_short_shot_block_motion():
     checked = validate_local_observation(value, probe, payload, sampling)
     assert checked["change_findings"][0]["effective_status"] == "insufficient"
     value["shots"][0]["changes"][0]["first_visible_s"] = 0.5
-    with pytest.raises(ValueError, match="change_time_outside_shot"):
-        validate_local_observation(value, probe, payload, sampling)
+    invalid_time = validate_local_observation(value, probe, payload, sampling)
+    assert invalid_time["change_findings"][0]["effective_status"] == "insufficient"
+    assert invalid_time["change_findings"][0]["issue_code"] == (
+        "first_visible_time_outside_shot")
 
 
 def test_generic_action_change_is_valid_but_still_needs_sample_support():
@@ -148,6 +150,32 @@ def test_edit_graph_never_upgrades_unknown_or_onset_to_function():
     assert len(graph["adjacent_edges"]) == len(static["shots"])-1
     assert graph["adjacent_edges"][0]["semantic_status"] == "insufficient"
     assert graph["audio_measurement_status"]["beat_synced_status"] == "unverified"
+
+
+def test_invalid_time_cannot_flow_as_supported_story_or_edit_observation():
+    static, _ = fixture()
+    record = {"probe_id": "p1", "channel": "V", "shot_ids": ["s1", "s2"],
+              "interval": [1., 3.], "sampling": {"sampling_verified": True},
+              "validation": {"change_findings": [{
+                  "shot_id": "s2", "description": "an unsupported event",
+                  "kind": "action", "first_visible_s": 0.,
+                  "effective_status": "insufficient",
+                  "sample_count_in_shot": 4,
+                  "issue_code": "first_visible_time_outside_shot"}]},
+              "response": {"shots": [
+                  {"shot_id": "s1", "entry_state": "first state", "changes": []},
+                  {"shot_id": "s2", "entry_state": "invented state",
+                   "visible_action": "invented action", "exit_state": "invented exit",
+                   "changes": []}],
+                  "connections": [{"from_shot_id": "s1", "to_shot_id": "s2",
+                                   "continuity": "same_action",
+                                   "information_added": "invented link"}]}}
+    view = _observation_view([record])[0]
+    assert view["shots"][1]["entry_state"] is None
+    assert view["shots"][1]["visible_action"] is None
+    assert view["connections"][0]["continuity"] == "unknown"
+    graph = build_editing_graph(static, [record])
+    assert graph["adjacent_edges"][1]["semantic_status"] == "insufficient"
 
 
 def test_counterfactual_inputs_remove_terminal_statement_and_reorder():

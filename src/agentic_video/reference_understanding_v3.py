@@ -394,10 +394,10 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
             if change.get("kind") not in {"action", "posture", "contact", "identity",
                                            "causal", "other"}:
                 raise ValueError("change_kind_invalid")
-            if when is not None and not lo-0.04 <= float(when) <= hi+0.04:
-                raise ValueError("change_time_outside_shot")
+            time_in_shot = (when is not None and
+                            lo-0.04 <= float(when) <= hi+0.04)
             aligned = (when is not None and any(abs(float(when)-t) <= 0.09
-                                                  for t in in_shot))
+                                                  for t in in_shot) and time_in_shot)
             effective = (status if sampling.get("sampling_verified") and
                          len(in_shot) >= MOTION_MIN_SAMPLES and aligned else
                          "insufficient")
@@ -409,6 +409,12 @@ def validate_local_observation(value: dict[str, Any], probe: dict[str, Any],
                              "kind": change["kind"], "first_visible_s": when,
                              "declared_status": status, "effective_status": effective,
                              "sample_aligned": aligned,
+                             "time_in_shot": time_in_shot,
+                             "issue_code": ("first_visible_time_outside_shot"
+                                            if not time_in_shot else
+                                            "sample_not_aligned" if not aligned else
+                                            "insufficient_motion_samples"
+                                            if len(in_shot) < MOTION_MIN_SAMPLES else None),
                              "sample_count_in_shot": len(in_shot)})
     for edge in edges:
         if edge.get("continuity") not in {
@@ -422,16 +428,23 @@ def build_editing_graph(static: dict[str, Any], observations: list[dict[str, Any
                         ) -> dict[str, Any]:
     by_edge: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for record in observations:
+        invalid_shots = {row["shot_id"] for row in
+                         record.get("validation", {}).get("change_findings", [])
+                         if row["effective_status"] == "insufficient"}
         for row in record["response"].get("connections") or []:
             key = row["from_shot_id"], row["to_shot_id"]
             by_edge.setdefault(key, []).append({**row, "probe_id": record["probe_id"],
                                                   "sampling_verified": record[
-                                                      "sampling"]["sampling_verified"]})
+                                                      "sampling"]["sampling_verified"],
+                                                  "endpoint_change_invalid": bool(
+                                                      set(key) & invalid_shots)})
     edges = []
     for left, right in zip(_shots(static), _shots(static)[1:]):
         key = left["shot_id"], right["shot_id"]
         obs = by_edge.get(key, [])
-        labels = {row["continuity"] for row in obs if row["sampling_verified"]}
+        labels = {row["continuity"] for row in obs
+                  if row["sampling_verified"] and
+                  not row["endpoint_change_invalid"]}
         status = ("insufficient" if not labels or labels == {"unknown"} else
                   "contested" if len(labels) > 1 else "provisional")
         transition = right.get("transition_in")
@@ -516,25 +529,65 @@ def _observation_view(observations: list[dict[str, Any]]) -> list[dict[str, Any]
                 "kind": finding["kind"],
                 "first_visible_s": finding["first_visible_s"],
                 "status": finding["effective_status"],
+                "issue_code": finding["issue_code"],
                 "sample_count_in_shot": finding["sample_count_in_shot"]})
         shot_rows = []
         for original in row["response"].get("shots") or []:
+            changes = by_shot.get(original["shot_id"], [])
+            motion_usable = any(change["status"] == "supported"
+                                for change in changes)
+            frame_state_usable = not changes or motion_usable
             shot_rows.append({"shot_id": original["shot_id"],
-                              "entry_state": original.get("entry_state"),
-                              "visible_action": original.get("visible_action"),
-                              "exit_state": original.get("exit_state"),
-                              "changes": by_shot.get(original["shot_id"], []),
+                              "entry_state": (original.get("entry_state")
+                                              if frame_state_usable else None),
+                              "visible_action": (original.get("visible_action")
+                                                 if frame_state_usable
+                                                 else None),
+                              "exit_state": (original.get("exit_state")
+                                             if frame_state_usable else None),
+                              "changes": changes,
                               "attributed_statement_ids": original.get(
                                   "attributed_statement_ids") or [],
                               "audible_event_type": original.get("audible_event_type"),
                               "limitations": original.get("limitations") or []})
+        invalid_shots = {shot["shot_id"] for shot in shot_rows
+                         if any(change["status"] == "insufficient"
+                                for change in shot["changes"])}
+        connections = []
+        for edge in row["response"].get("connections") or []:
+            if edge["from_shot_id"] in invalid_shots or edge["to_shot_id"] in invalid_shots:
+                connections.append({"from_shot_id": edge["from_shot_id"],
+                                    "to_shot_id": edge["to_shot_id"],
+                                    "continuity": "unknown",
+                                    "information_added": "unknown",
+                                    "limitations": ["invalid_endpoint_change_evidence"]})
+            else:
+                connections.append(edge)
         view.append({"probe_id": row["probe_id"], "channel": row["channel"],
                      "shot_ids": row["shot_ids"], "interval": row["interval"],
                      "sampling_verified": row["sampling"]["sampling_verified"],
                      "shots": shot_rows,
-                     "connections": row["response"].get("connections") or [],
+                     "connections": connections,
                      "unresolved": row["response"].get("unresolved") or []})
     return view
+
+
+def _editing_view(editing: dict[str, Any],
+                  observation_view: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_edge: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in observation_view:
+        for edge in record["connections"]:
+            by_edge.setdefault((edge["from_shot_id"], edge["to_shot_id"]),
+                               []).append({**edge, "probe_id": record["probe_id"]})
+    return [{"from_shot_id": row["from_shot_id"],
+             "to_shot_id": row["to_shot_id"],
+             "edit_start_s": row["edit_start_s"],
+             "next_content_start_s": row["next_content_start_s"],
+             "transition": row["transition"],
+             "semantic_status": row["semantic_status"],
+             "observations": by_edge.get((row["from_shot_id"],
+                                          row["to_shot_id"]), [])}
+            for row in editing["adjacent_edges"]]
 
 
 def _counterfactual_sections(static: dict[str, Any], *,
@@ -757,12 +810,14 @@ def run_reference_understanding_v3(
             "observations": observations})
     editing = build_editing_graph(static, observations)
     _write_json(output / "editing_graph_v3.json", editing)
+    observation_view = _observation_view(observations)
+    editing_view = _editing_view(editing, observation_view)
     story = _model_call(runner, name="story_graph", prompt=STORY_PROMPT,
                         payload={"section_bundles": static["section_bundles"],
                                  "accepted_events": reference["events"],
                                  "text_timeline": static["text_timeline"],
-                                 "local_observations": _observation_view(observations),
-                                 "editing_edges": editing["adjacent_edges"]},
+                                 "local_observations": observation_view,
+                                 "editing_edges": editing_view},
                         output=output, max_new_tokens=4096)
     story_errors = validate_story_graph(story, reference, static, observations)
     _write_json(output / "story_graph_v3.json", story)
@@ -772,7 +827,7 @@ def run_reference_understanding_v3(
         runner, name="editing_functions", prompt=EDIT_FUNCTION_PROMPT,
         payload={"measured_editing": static["measured_editing"],
                  "audio_status": editing["audio_measurement_status"],
-                 "adjacent_edges": editing["adjacent_edges"],
+                 "adjacent_edges": editing_view,
                  "story_events": story.get("events") or []},
         output=output, max_new_tokens=3072)
     function_errors = validate_edit_functions(edit_functions, editing)
@@ -784,7 +839,7 @@ def run_reference_understanding_v3(
         runner, name="story_coherence", prompt=COHERENCE_PROMPT,
         payload={"accepted_evidence": static["section_bundles"],
                  "text_timeline": static["text_timeline"],
-                 "local_observations": _observation_view(observations),
+                 "local_observations": observation_view,
                  "story_graph": story},
         output=output, max_new_tokens=2048)
     _write_json(output / "story_coherence_v3.json", coherence)
