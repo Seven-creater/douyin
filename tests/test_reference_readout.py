@@ -4,7 +4,8 @@ import pytest
 
 from src.agentic_video.modality_isolation import IsolationError, audit_request
 from src.agentic_video.reference_readout import (
-    _citation_issues, _transfer_leaks, select_local_probes)
+    _citation_issues, _transfer_leaks, select_local_probes,
+    validate_local_patterns)
 
 
 def test_av_channel_requires_both_streams(monkeypatch) -> None:
@@ -28,6 +29,7 @@ def test_av_channel_requires_both_streams(monkeypatch) -> None:
 def test_probe_planner_uses_unresolved_motion_and_measured_edits() -> None:
     static = {
         "duration_s": 8.0,
+        "text_timeline": [],
         "section_bundles": [
             {"section_id": "A", "interval": [0.0, 5.0]},
             {"section_id": "B", "interval": [5.0, 7.0]},
@@ -56,6 +58,28 @@ def test_unknown_citation_does_not_become_valid_evidence() -> None:
                "relations": [], "message_hypotheses": []}
     assert _citation_issues(reading, [], {"functions": []}, reference) == [
         "unit:unknown_support:V9"]
+
+
+def test_editing_pattern_rejects_absolute_time_and_joined_types() -> None:
+    context = {"clip_duration_s": 1.7,
+               "shots": [{"shot_id": "A", "relative_interval": [0.0, 0.85]},
+                         {"shot_id": "B", "relative_interval": [0.85, 1.7]}],
+               "claim_ids": ["V1"], "event_ids": []}
+    response = {"schema_version": "reference_local_editing_v1",
+                "patterns": [
+                    {"pattern_id": "P1", "type": "cut_on_action",
+                     "shot_ids": ["A", "B"], "media_interval": [4.25, 5.95],
+                     "support_ids": ["V1"]},
+                    {"pattern_id": "P2", "type": "rapid_montage|insert_shot",
+                     "shot_ids": ["A", "B"], "media_interval": [0.1, 1.6],
+                     "support_ids": ["V1"]},
+                    {"pattern_id": "P3", "type": "contrast_cut",
+                     "shot_ids": ["A", "B"], "media_interval": [0.1, 1.6],
+                     "support_ids": ["V1"]}]}
+    accepted, rejected = validate_local_patterns(response, context)
+    assert [row["pattern_id"] for row in accepted] == ["P3"]
+    assert rejected[0]["reason_codes"] == ["clip_local_interval_invalid"]
+    assert rejected[1]["reason_codes"] == ["pattern_type_invalid"]
 
 
 def test_transfer_draft_blocks_reference_text_and_ids() -> None:

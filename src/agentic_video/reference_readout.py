@@ -241,13 +241,30 @@ audio onsets are supplied as facts. Report only content-dependent editing
 patterns supported by the visible and audible clip; use an empty list when
 none is clear. A fast sequence alone does not prove montage. A cut near an
 estimated audio onset alone does not prove music synchronization. Do not infer
-the story's overall purpose in this recognition step. Return JSON only:
+the story's overall purpose in this recognition step. Pick exactly one type
+per pattern from: rapid_montage, reaction_cut, contrast_cut, delayed_reveal,
+cut_on_action, match_cut, shot_reverse_shot, parallel_editing, insert_shot,
+audio_bridge, other. Use at least two adjacent shot IDs. The input interval
+is the absolute source span; output media_interval uses seconds relative to
+the start of this clip, from zero to clip_duration_s. Return JSON only:
 {"schema_version":"reference_local_editing_v1","patterns":[{
-"pattern_id":"EP1","type":"rapid_montage|reaction_cut|contrast_cut|delayed_reveal|cut_on_action|match_cut|shot_reverse_shot|parallel_editing|insert_shot|audio_bridge|other",
+"pattern_id":"EP1","type":"one allowed type",
 "shot_ids":[],"observed_connection":"...","support_ids":[],
 "media_interval":[0.0,0.0],"uncertainty":"..."}],"limitations":[]}
-Use clip-local seconds in media_interval and only supplied shot/evidence IDs.
+Use only supplied shot/evidence IDs.
 Input: """
+
+ENDING_PROMPT = """Watch the supplied final video span with sound. Describe
+what is visibly shown, what the video states in text or speech, and how the
+last item relates to the immediately preceding items. Keep observed content
+separate from a possible tone or meaning; allow more than one reading when
+ambiguous. Do not infer an unseen life history or a predetermined moral.
+Return JSON only:
+{"schema_version":"reference_ending_observation_v1","ending_id":"END1",
+"observations":"...","relation_to_preceding":"...",
+"tone_hypothesis":"...","alternative":"...","support_ids":[],
+"limitations":[]}
+Use supplied evidence IDs. Input: """
 
 EDITING_FUNCTION_PROMPT = """Infer what each observed local editing pattern
 may accomplish in the video, using the independently proposed narrative units.
@@ -262,13 +279,13 @@ Input: """
 
 GROUNDING_AUDIT_PROMPT = """Independently check whether every narrative
 unit, cross-unit relation, message hypothesis, editing pattern, and function
-is supported by its cited evidence. Check temporal scope and attribution of
+or ending observation is supported by its cited evidence. Check temporal scope and attribution of
 on-screen statements. Do not judge whether it is the most salient reading and
 do not demand a particular theme or narrative relation. Media-dependent
 claims not verifiable from the supplied evidence must be marked uncertain.
 Return JSON only:
 {"schema_version":"reference_grounding_audit_v1","checks":[{
-"kind":"unit|relation|message|pattern|function","id":"...",
+"kind":"unit|relation|message|pattern|function|ending","id":"...",
 "grounded":false,"attribution_preserved":false,
 "temporal_scope_valid":false,"reason":"..."}],"limitations":[]}
 Input: """
@@ -402,6 +419,12 @@ def select_local_probes(static: dict[str, Any]) -> list[dict[str, Any]]:
             probes.append({"probe_id": f"edit_sequence_{section_id}",
                            "channel": "AV", "interval": interval,
                            "fps": 4.0, "question": "cut_sequence"})
+    final_section_id, final_interval = sections[-1]
+    if any(row["interval"][0] >= final_interval[0] for row in
+           static["text_timeline"]):
+        probes.append({"probe_id": f"ending_{final_section_id}",
+                       "channel": "AV", "interval": final_interval,
+                       "fps": 6.0, "question": "ending_relationship"})
     if len(probes) > 8:
         raise ValueError("local probe budget exceeded")
     if len({row["question"] + str(row["interval"]) for row in probes}) != len(probes):
@@ -454,8 +477,56 @@ def _known_ids(reference: dict[str, Any]) -> set[str]:
         str(row["event_id"]) for row in reference["events"]}
 
 
+EDITING_TYPES = {"rapid_montage", "reaction_cut", "contrast_cut",
+                 "delayed_reveal", "cut_on_action", "match_cut",
+                 "shot_reverse_shot", "parallel_editing", "insert_shot",
+                 "audio_bridge", "other"}
+
+
+def validate_local_patterns(response: dict[str, Any], context: dict[str, Any]
+                            ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Check one media-relative contract without deciding narrative function."""
+    valid = []
+    rejected = []
+    shots = {row["shot_id"]: row["relative_interval"]
+             for row in context["shots"]}
+    known_support = set(context["claim_ids"] + context["event_ids"])
+    duration = float(context["clip_duration_s"])
+    for index, row in enumerate(response.get("patterns") or [], start=1):
+        reasons = []
+        ids = row.get("shot_ids") or []
+        interval = row.get("media_interval")
+        if response.get("schema_version") != "reference_local_editing_v1":
+            reasons.append("schema_version_invalid")
+        if row.get("type") not in EDITING_TYPES:
+            reasons.append("pattern_type_invalid")
+        if (len(ids) < 2 or any(not isinstance(value, str) for value in ids)
+                or len(ids) != len(set(map(str, ids))) or any(
+                    value not in shots for value in ids)):
+            reasons.append("shot_scope_invalid")
+        try:
+            start, end = map(float, interval)
+            if not 0 <= start < end <= duration + 0.001:
+                reasons.append("clip_local_interval_invalid")
+            elif sum(_overlap([start, end], shots[value])
+                     for value in ids if value in shots) < 2:
+                reasons.append("interval_does_not_cover_shot_relation")
+        except (TypeError, ValueError):
+            reasons.append("clip_local_interval_invalid")
+        if any(str(value) not in known_support
+               for value in row.get("support_ids") or []):
+            reasons.append("support_id_outside_clip")
+        if reasons:
+            rejected.append({"response_index": index, "reason_codes": reasons,
+                             "raw_pattern_id": row.get("pattern_id")})
+        else:
+            valid.append(row)
+    return valid, rejected
+
+
 def _citation_issues(reading: dict[str, Any], patterns: list[dict[str, Any]],
-                     functions: dict[str, Any], reference: dict[str, Any]) -> list[str]:
+                     functions: dict[str, Any], reference: dict[str, Any],
+                     ending: dict[str, Any] | None = None) -> list[str]:
     known = _known_ids(reference)
     units = {str(row.get("unit_id")) for row in reading.get("narrative_units") or []}
     pattern_ids = {str(row.get("pattern_id")) for row in patterns}
@@ -465,6 +536,8 @@ def _citation_issues(reading: dict[str, Any], patterns: list[dict[str, Any]],
     rows += [("message", row) for row in reading.get("message_hypotheses") or []]
     rows += [("pattern", row) for row in patterns]
     rows += [("function", row) for row in functions.get("functions") or []]
+    if ending is not None:
+        rows.append(("ending", ending))
     for kind, row in rows:
         for value in row.get("support_ids") or []:
             if str(value) not in known:
@@ -562,6 +635,8 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
     _write_json(output / "narrative_reading.json", reading)
 
     patterns = []
+    rejected_patterns = []
+    ending = None
     for probe in probes:
         if probe["channel"] != "AV":
             continue
@@ -571,26 +646,40 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
                         start_s=float(probe["interval"][0]),
                         end_s=float(probe["interval"][1]),
                         include_audio=True)
+        if probe["question"] == "ending_relationship":
+            ending = _model_call(
+                runner, name=probe["probe_id"], prompt=ENDING_PROMPT,
+                payload=context, output=output, media=clip,
+                channel="AV", fps=probe["fps"])
+            _write_json(output / "ending_observation.json", ending)
+            continue
         context["observation_dimensions"] = ["adjacent_shot_semantics",
                                              "editing_pattern"]
         response = _model_call(
             runner, name=probe["probe_id"], prompt=LOCAL_EDITING_PROMPT,
             payload=context, output=output, media=clip,
             channel="AV", fps=probe["fps"])
-        valid_shots = {row["shot_id"] for row in context["shots"]}
-        for index, row in enumerate(response.get("patterns") or [], start=1):
-            if not set(row.get("shot_ids") or []).issubset(valid_shots):
-                continue
+        accepted, rejected = validate_local_patterns(response, context)
+        rejected_patterns.extend({**row, "probe_id": probe["probe_id"]}
+                                 for row in rejected)
+        _write_json(output / "calls" / probe["probe_id"] /
+                    "pattern_validation.json", {
+                        "accepted_count": len(accepted), "rejected": rejected})
+        for index, row in enumerate(accepted, start=1):
             patterns.append({**row,
                              "pattern_id": f"{probe['probe_id']}:"
                                            f"{row.get('pattern_id') or index}",
                              "original_pattern_id": row.get("pattern_id"),
                              "probe_id": probe["probe_id"],
                              "media_sha": sha256_file(clip),
-                             "media_origin_s": probe["interval"][0]})
+                             "media_origin_s": probe["interval"][0],
+                             "evidence_status": (
+                                 "provisional" if row.get("support_ids") else
+                                 "media_only_pending_review")})
     _write_json(output / "semantic_editing_patterns.json", {
         "schema_version": "reference_local_editing_v1",
-        "patterns": patterns, "local_probe_count": sum(
+        "patterns": patterns, "rejected_patterns": rejected_patterns,
+        "local_probe_count": sum(
             row["channel"] == "AV" for row in probes)})
 
     function_payload = {
@@ -598,6 +687,7 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
         "event_ids": global_payload["event_ids"],
         "narrative_units": reading.get("narrative_units") or [],
         "relations": reading.get("relations") or [],
+        "ending_observation": ending,
         "patterns": patterns,
         "measured_structural_grammar": static["measured_editing"].get(
             "structural_grammar"),
@@ -606,13 +696,15 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
         runner, name="editing_functions", prompt=EDITING_FUNCTION_PROMPT,
         payload=function_payload, output=output, max_new_tokens=2048)
     _write_json(output / "editing_functions.json", functions)
-    citation_issues = _citation_issues(reading, patterns, functions, reference)
+    citation_issues = _citation_issues(
+        reading, patterns, functions, reference, ending)
 
     audit_payload = {
         "claim_ids": global_payload["claim_ids"],
         "event_ids": global_payload["event_ids"],
         "evidence_bundles": static["section_bundles"],
         "narrative_reading": reading,
+        "ending_observation": ending,
         "editing_patterns": patterns,
         "editing_functions": functions,
         "citation_issues": citation_issues,
@@ -629,7 +721,8 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
          reading.get("message_hypotheses") or []] +
         [("pattern", str(row.get("pattern_id"))) for row in patterns] +
         [("function", str(row.get("pattern_id"))) for row in
-         functions.get("functions") or []])
+         functions.get("functions") or []] +
+        ([("ending", str(ending.get("ending_id")))] if ending else []))
     checks = audit.get("checks") or []
     actual_keys = [(str(row.get("kind")), str(row.get("id"))) for row in checks]
     audit_complete = sorted(actual_keys) == sorted(expected_keys) and all(
@@ -645,6 +738,7 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
         "claim_ids": [], "event_ids": [],
         "reviewed_message_hypotheses": reading.get("message_hypotheses") or [],
         "reviewed_narrative_relations": reading.get("relations") or [],
+        "reviewed_ending_observation": ending,
         "editing_functions": functions.get("functions") or [],
         "measured_structural_grammar": static["measured_editing"].get(
             "structural_grammar"),
@@ -674,11 +768,15 @@ def run_model_readout(reference_path: Path, video: Path, masked_video: Path,
         "probe_plan": probes,
         "shot_dynamics": visual_dynamics,
         "narrative_reading": reading,
+        "ending_observation": ending,
         "semantic_editing_patterns": patterns,
+        "rejected_editing_patterns": rejected_patterns,
         "editing_functions": functions,
         "grounding_audit": audit,
         "citation_issues": citation_issues,
-        "unresolved": static["unresolved"] + list(
+        "unresolved": static["unresolved"] + [
+            f"editing_pattern_rejected:{row['probe_id']}:{row['raw_pattern_id']}"
+            for row in rejected_patterns] + list(
             reading.get("limitations") or []) + list(
             functions.get("limitations") or []),
         "human_gold_evaluated": False,
