@@ -9,8 +9,9 @@ from src.agentic_video.manifest import json_hash
 MAPPING_PROMPT = """Compare every supplied brief field with each candidate story.
 Interpret each field literally, including every qualifier and domain restriction.
 For each field copy its FULL text as brief_quote. Give an exact substring of the
-story as candidate_quote when it maps or conflicts; use null if no corresponding
-event exists. A broad paraphrase must not erase a narrower requirement. Mark
+story as candidate_quote when available; use null if no exact span captures a
+negative finding. A mapped field must have an exact story quote. A broad
+paraphrase must not erase a narrower requirement. Mark
 mapped only if the candidate satisfies the whole field, conflict if it violates
 it, and unmapped if no event realizes it. Do not infer a hidden reference or
 rewrite the brief. Return JSON only:
@@ -62,8 +63,9 @@ def validate_mapping(value: dict[str, Any], cases: list[dict[str, Any]]) -> list
                         "mapped", "conflict", "unmapped"} or
                     not isinstance(row.get("reason"), str) or
                     not row["reason"].strip() or
-                    (row["verdict"] == "unmapped" and quote is not None) or
-                    (row["verdict"] != "unmapped" and (
+                    (row["verdict"] == "mapped" and (
+                        not isinstance(quote, str) or not quote.strip())) or
+                    (quote is not None and (
                         not isinstance(quote, str) or not quote.strip() or
                         quote not in case["story"]))):
                 return ["mapping_quote_or_verdict_invalid"]

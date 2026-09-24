@@ -62,6 +62,22 @@ def test_mapping_requires_full_field_text_and_exact_candidate_quote():
     assert validate_mapping(mapping, [case]) == ["mapping_coverage_invalid"]
 
 
+def test_negative_mapping_quotes_are_optional_but_must_be_exact_if_present():
+    case = _case()
+    mapping = _mapping(case)
+    row = mapping["checks"][0]["mappings"][0]
+    row.update({"verdict": "conflict", "candidate_quote": None})
+    assert validate_mapping(mapping, [case]) == []
+    row.update({"verdict": "unmapped", "candidate_quote": "new action evidence"})
+    assert validate_mapping(mapping, [case]) == []
+    row["candidate_quote"] = "fabricated"
+    assert validate_mapping(mapping, [case]) == [
+        "mapping_quote_or_verdict_invalid"]
+    row.update({"verdict": "mapped", "candidate_quote": None})
+    assert validate_mapping(mapping, [case]) == [
+        "mapping_quote_or_verdict_invalid"]
+
+
 def test_any_unmapped_hard_field_rejects_even_when_stance_matches():
     case = _case()
     mapping, stance = _mapping(case), _stance(case)
