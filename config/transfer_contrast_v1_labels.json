@@ -1,0 +1,9 @@
+{
+  "schema_version": "transfer_contrast_labels_v1",
+  "expected_accept": {
+    "C01": true,
+    "C02": true,
+    "C03": false,
+    "C04": false
+  }
+}

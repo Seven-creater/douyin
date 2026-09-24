@@ -1,0 +1,21 @@
+{
+  "schema_version": "transfer_contrast_cases_v1",
+  "cases": [
+    {
+      "case_id": "C01",
+      "story": "Kitchen coworkers assume an older dishwasher can only carry plates. When service stalls, he demonstrates several distinct cooking decisions and prepares a convincing meal. Their assessment of what he can contribute changes; a small everyday mistake keeps him human rather than flawless."
+    },
+    {
+      "case_id": "C02",
+      "story": "A student is written off as incapable of engineering because of a poor exam score. During a workshop she diagnoses a robot's fault through observable steps, then shows sustained work in other projects. Her classmates revise the narrow judgment without concluding she can do everything."
+    },
+    {
+      "case_id": "C03",
+      "story": "A young athlete missing both hands wins a taekwondo match. The film argues that only rare champions deserve respect and that people with ordinary disabilities are rightly dismissed. Its sporting images resemble an uplifting profile, but its concluding claim preserves the original dismissal."
+    },
+    {
+      "case_id": "C04",
+      "story": "A chef dismissed as unskilled serves a surprising dinner. The reveal is that the food is cursed and the guests disappear. The intended effect is fear and a mystery payoff, not a more grounded assessment of the chef's ability or worth."
+    }
+  ]
+}
