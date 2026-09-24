@@ -144,6 +144,8 @@ def main() -> None:
     parser.add_argument("--section", choices=("section_01", "section_02",
                                               "section_03"))
     parser.add_argument("--source-run", type=Path, required=True)
+    parser.add_argument("--static", type=Path, required=True)
+    parser.add_argument("--local", type=Path, required=True)
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--bgm", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -152,8 +154,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.job.startswith("section") and not args.section:
         parser.error("--section is required for section jobs")
-    static = _read(args.source_run / "static_review.json")
-    local = _read(args.source_run / "local_observations_combined.json")
+    static = _read(args.static)
+    local = _read(args.local)
     if static["source_sha"] != sha256_file(args.video):
         raise ValueError("source_media_sha_mismatch")
     args.output.mkdir(parents=True, exist_ok=True)
