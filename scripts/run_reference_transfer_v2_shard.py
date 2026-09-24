@@ -56,7 +56,7 @@ def _section(args, static: dict, local: dict, *, audit: bool) -> None:
                     start_s=origin, end_s=end, include_audio=True)
     payload["interval"] = [0.0, end - origin]
     if audit:
-        source = _read(args.output / f"analysis_{sid}" / "result.json")
+        source = _read(args.inputs_run / f"analysis_{sid}" / "result.json")
         payload["analysis"] = source
         payload["audit_ids"] = section_audit_ids(static, sid)
         name, prompt = f"audit_{sid}", SECTION_AUDIT_PROMPT
@@ -69,7 +69,7 @@ def _section(args, static: dict, local: dict, *, audit: bool) -> None:
 
 
 def _global_story(args, static: dict) -> None:
-    sections = [_read(args.output / f"analysis_section_0{i}" / "result.json")
+    sections = [_read(args.inputs_run / f"analysis_section_0{i}" / "result.json")
                 for i in range(1, 4)]
     payload = global_story_payload(static, sections)
     result = _call(args, "global_story", GLOBAL_STORY_PROMPT, payload,
@@ -78,9 +78,9 @@ def _global_story(args, static: dict) -> None:
 
 
 def _global_audit(args, static: dict) -> None:
-    story = _read(args.output / "global_story" / "result.json")
+    story = _read(args.inputs_run / "global_story" / "result.json")
     payload = global_story_payload(static, [
-        _read(args.output / f"analysis_section_0{i}" / "result.json")
+        _read(args.inputs_run / f"analysis_section_0{i}" / "result.json")
         for i in range(1, 4)])
     payload.update({"interval": [0.0, static["duration_s"]],
                     "global_story": story,
@@ -91,9 +91,16 @@ def _global_audit(args, static: dict) -> None:
 
 
 def _compile(args, static: dict, local: dict) -> None:
-    sections = [_read(args.output / f"analysis_section_0{i}" / "result.json")
+    sections = [_read(args.inputs_run / f"analysis_section_0{i}" / "result.json")
                 for i in range(1, 4)]
-    global_story = _read(args.output / "global_story" / "result.json")
+    global_story = _read(args.inputs_run / "global_story" / "result.json")
+    normalized_keys = {key: key.strip() for key in global_story
+                       if key != key.strip()}
+    if normalized_keys:
+        global_story = {key.strip(): value for key, value in global_story.items()}
+        _write_json(args.output / "key_normalization.json",
+                    {"trimmed_keys": normalized_keys,
+                     "semantic_content_changed": False})
     shots = [row for section in sections for row in section.get("shots") or []]
     edges = ([row for section in sections for row in section.get("edges") or []] +
              list(global_story.get("cross_edges") or []))
@@ -119,6 +126,7 @@ def _compile(args, static: dict, local: dict) -> None:
     blueprint = build_reference_blueprint(static, local, analysis, audit)
     blueprint["audio"]["bgm_asset"] = inspect_bgm_asset(args.video, args.bgm)
     blueprint["parent_source_run"] = str(args.source_run)
+    blueprint["analysis_run"] = str(args.inputs_run)
     blueprint["parent_source_run_sha256"] = sha256_file(
         args.source_run / "run_failure.json")
     blueprint["artifact_sha"] = json_hash({key: value for key, value in
@@ -144,6 +152,7 @@ def main() -> None:
     parser.add_argument("--section", choices=("section_01", "section_02",
                                               "section_03"))
     parser.add_argument("--source-run", type=Path, required=True)
+    parser.add_argument("--inputs-run", type=Path)
     parser.add_argument("--static", type=Path, required=True)
     parser.add_argument("--local", type=Path, required=True)
     parser.add_argument("--video", type=Path, required=True)
@@ -152,6 +161,7 @@ def main() -> None:
     parser.add_argument("--gpu-pair", default="0,1")
     parser.add_argument("--config", type=Path)
     args = parser.parse_args()
+    args.inputs_run = args.inputs_run or args.output
     if args.job.startswith("section") and not args.section:
         parser.error("--section is required for section jobs")
     static = _read(args.static)

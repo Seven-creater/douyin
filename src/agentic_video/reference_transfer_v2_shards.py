@@ -36,10 +36,12 @@ observations. A text statement is not visual proof; discrete sampled frames
 do not prove an entire action or unseen causal chain. An ID match alone is
 not semantic support. Mark contested or insufficient when needed. Audit each
 supplied ID exactly once, with no added importance or required-story-role
-test. Return JSON only:
-{"schema_version":"reference_section_audit_v2","checks":[
-{"id":"shot:<id>|technique:<id>|edge:<from>-><to>",
-"verdict":"supported|contested|insufficient","reason":"..."}]}
+test. The input audit_ids is an exact ordered list. Output exactly one check
+PER audit_ids item, in that order. Copy each ID character-for-character.
+Never combine IDs with a vertical bar. Keep each reason under 20 words.
+Return JSON only, with schema_version="reference_section_audit_v2" and a
+checks array. Each check has id (copied from audit_ids), verdict (exactly
+one of supported, contested, insufficient), and a brief evidence reason.
 Input: """
 
 GLOBAL_STORY_PROMPT = """Synthesize the three temporally ordered section
@@ -72,10 +74,12 @@ edit edges against the original audiovisual video and attributed on-screen
 statements. Especially check that the final item's semantic content is not
 omitted from the claimed ending relation. Do not accept an apparent formal
 result or causal action unsupported by media. A reference ID match alone is
-not semantic proof. Audit each supplied ID exactly once. Return JSON only:
-{"schema_version":"reference_global_audit_v2","checks":[
-{"id":"theme_stance|viewer_change|ending|edge:<from>-><to>",
-"verdict":"supported|contested|insufficient","reason":"..."}]}
+not semantic proof. The input audit_ids is an exact ordered list. Output
+exactly one check PER audit_ids item, in that order; copy the ID literally.
+Never combine IDs with a vertical bar. Keep each reason under 20 words.
+Return JSON only, with schema_version="reference_global_audit_v2" and a
+checks array. Each check has id (copied from audit_ids), verdict (exactly
+one of supported, contested, insufficient), and a brief evidence reason.
 Input: """
 
 

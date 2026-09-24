@@ -136,6 +136,13 @@ def test_missing_narrative_audit_still_blocks_story():
     assert not blueprint["story_candidate_ready"]
 
 
+def test_unknown_ending_cannot_enter_theme_generation_even_if_audit_passes():
+    static, local, analysis, audit = fixture()
+    analysis["ending"]["relation"] = "unknown"
+    blueprint = build_reference_blueprint(static, local, analysis, audit)
+    assert not blueprint["story_candidate_ready"]
+
+
 def test_transfer_spec_preserves_exact_slots_but_rejects_surface_and_beat():
     static, local, analysis, audit = fixture()
     blueprint = build_reference_blueprint(static, local, analysis, audit)

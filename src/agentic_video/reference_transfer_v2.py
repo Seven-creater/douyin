@@ -274,6 +274,15 @@ def build_reference_blueprint(static: dict[str, Any], local: dict[str, Any],
         verdicts.get(key) == "supported" and
         analysis.get(key, {}).get("status") == "provisional"
         for key in ("theme_stance", "viewer_change", "ending"))
+    semantic_fields = (("theme_stance", "position"), ("viewer_change", "prior"),
+                       ("viewer_change", "later"), ("ending", "relation"),
+                       ("ending", "tone"))
+    if any(str((analysis.get(parent) or {}).get(field) or "").strip().lower()
+           in {"", "unknown", "unclear", "undetermined"}
+           for parent, field in semantic_fields):
+        story_ready = False
+    if not analysis.get("narrative_units"):
+        story_ready = False
     analyzed_shots = {row.get("shot_id"): row for row in analysis.get("shots") or []}
     shot_rows = []
     technique_keys = ("shot_size", "camera_angle", "camera_motion", "motion_speed")
