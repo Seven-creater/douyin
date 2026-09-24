@@ -146,14 +146,14 @@ def run(args: argparse.Namespace) -> dict:
                     "story": frozen_story}]
     frozen_mapping, frozen_stance = _judge(
         runner, args.output, "frozen_badcase", frozen_case)
-    conflict_paths = [row["path"] for row in frozen_mapping[
-        "checks"][0]["mappings"] if row["verdict"] == "conflict" and
-        row["path"] in {"stance", "roles.V1.function", "roles.V2.function"}]
+    unmatched_paths = [row["path"] for row in frozen_mapping[
+        "checks"][0]["mappings"] if row["verdict"] != "mapped" and
+        row["path"] in {"roles.V1.function", "roles.V2.function"}]
     frozen_badcase = {"schema_version": "frozen_badcase_regression_v2",
                       "passed": (not decisions(frozen_mapping, frozen_stance,
                                                frozen_case)["FROZEN_BADCASE"]
-                                 and bool(conflict_paths)),
-                      "conflict_paths": conflict_paths,
+                                 and bool(unmatched_paths)),
+                      "unmatched_paths": unmatched_paths,
                       "brief_sha": frozen_brief["artifact_sha"]}
     _write_json(args.output / "frozen_badcase_regression.json",
                 frozen_badcase)
