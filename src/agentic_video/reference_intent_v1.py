@@ -83,10 +83,15 @@ objects, quotations, exact times, source IDs, or media paths. Do not invent
 unsupported camera or music techniques. Express a source-specific subject
 as an abstract role and a source-specific action as an evidence function.
 Every sentence must remain usable after the character, domain, visible
-attribute, and action are all changed. Do not reuse a complete sentence
-from the private intent. Provide at least one free slot that a writer may
-rebind. Beat preferences are optional: they must not say must, required,
-always, or exactly. Return JSON only:
+attribute, reason for the audience's initial judgment, and action are all
+changed. A metaphor or euphemism for a source-specific condition is still
+source-specific. Before returning, test the whole brief against two
+unrelated imagined domains with different reasons for the initial judgment;
+keep only wording that works for both. Do not output those examples. Do not
+reuse a complete sentence from the private intent. Free slots should name
+general variation dimensions, not disguised reference details. Beat
+preferences are optional: they must not say must, required, always, or
+exactly. Return JSON only:
 {"schema_version":"creative_story_brief_v1","communicative_goal":"...",
 "audience_prior":"...","evidence_mechanism":"...",
 "audience_update":"...","tone":null,"beat_preferences":[],
@@ -97,7 +102,9 @@ creative brief. Check that the communicative position and the role of
 evidence survive, while reference-specific surface content, quotes, paths,
 IDs and exact times do not. Mark source_surface_absent false if ANY public
 field names or paraphrases a private person, bodily attribute, profession,
-activity, setting, object, or specific skill. Test whether every public
+activity, setting, object, or specific skill, including euphemisms for them.
+Free slots must be general variation dimensions, not disguised source
+bindings. Test whether every public
 sentence still works after changing all such bindings; if not, mark false.
 Mark structure_optional true when the beat list is merely a preference,
 including a nonempty list, unless its wording requires an exact structure.
