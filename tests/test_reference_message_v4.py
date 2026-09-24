@@ -164,6 +164,7 @@ def test_compare_stops_before_themes_when_both_briefs_fail(
     record = artifact_with_sha({
         "schema_version": "reference_message_record_v4",
         "source_sha": "media", "static_sha": trial.sha256_file(static_path),
+        "model_config_sha": json_hash({}),
         "reading": reading, "status": "private_candidate"})
     record_path = tmp_path / "new.json"
     trial._write_json(record_path, record)
@@ -172,6 +173,7 @@ def test_compare_stops_before_themes_when_both_briefs_fail(
     monkeypatch.setattr(trial, "_inputs", lambda _: (reference, {}, {}))
     monkeypatch.setattr(trial, "_lineage", lambda *args: {})
     monkeypatch.setattr(trial, "_runner", lambda _: object())
+    monkeypatch.setattr(trial, "_baseline_config_sha", lambda _: json_hash({}))
     monkeypatch.setattr(trial, "_calibration_inputs", lambda *args: ([], {}))
     monkeypatch.setattr(trial, "_contrast_inputs", lambda *args: ([], {}))
     monkeypatch.setattr(trial, "_reusable_calibration", lambda *args: (

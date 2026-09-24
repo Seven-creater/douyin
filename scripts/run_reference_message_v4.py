@@ -71,15 +71,19 @@ def _inputs(args: argparse.Namespace) -> tuple[dict, dict, dict]:
     return reference, static, old
 
 
+def _baseline_config_sha(args: argparse.Namespace) -> str:
+    baseline = _read(args.old_intent.parent / "calls" / "intent_initial" /
+                     "model_call.json")
+    return baseline["model_config_sha"]
+
+
 def extract(args: argparse.Namespace) -> dict:
     reference, static, _ = _inputs(args)
     _fresh(args.output)
     _write_json(args.output / "input_lineage.json", _lineage(args, reference))
     runner = _runner(args)
-    baseline_call = _read(args.old_intent.parent / "calls" /
-                          "intent_initial" / "model_call.json")
-    if json_hash(getattr(runner, "cfg", {}) or {}) != baseline_call.get(
-            "model_config_sha"):
+    model_config_sha = json_hash(getattr(runner, "cfg", {}) or {})
+    if model_config_sha != _baseline_config_sha(args):
         raise ValueError("baseline_model_config_mismatch")
     reading = _model_call(runner, name="audience_message",
                           prompt=AUDIENCE_PROMPT,
@@ -99,6 +103,7 @@ def extract(args: argparse.Namespace) -> dict:
             "schema_version": "reference_message_record_v4",
             "source_sha": reference["source_sha"],
             "static_sha": sha256_file(args.static),
+            "model_config_sha": model_config_sha,
             "reading": reading, "status": "private_candidate"})
         _write_json(args.output / "reference_message_v4.json", record)
     _write_json(args.output / "result.json", result)
@@ -269,6 +274,10 @@ def compare(args: argparse.Namespace) -> dict:
     calibration_cases, calibration_labels = _calibration_inputs(
         args.calibration_cases, args.calibration_labels)
     runner = _runner(args)
+    if (new_record.get("model_config_sha") != json_hash(
+            getattr(runner, "cfg", {}) or {}) or
+            new_record["model_config_sha"] != _baseline_config_sha(args)):
+        raise ValueError("comparison_model_config_mismatch")
     calibration, reused = _reusable_calibration(
         args, runner, calibration_cases, calibration_labels)
     _write_json(args.output / "calibration_report.json", calibration)
