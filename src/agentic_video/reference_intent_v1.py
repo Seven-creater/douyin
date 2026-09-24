@@ -80,7 +80,13 @@ goal, the audience's information change, and the role of concrete evidence.
 The beat list is a preference, not a mandatory structure. Do not copy or
 paraphrase reference-specific people, physical attributes, activity, setting,
 objects, quotations, exact times, source IDs, or media paths. Do not invent
-unsupported camera or music techniques. Return JSON only:
+unsupported camera or music techniques. Express a source-specific subject
+as an abstract role and a source-specific action as an evidence function.
+Every sentence must remain usable after the character, domain, visible
+attribute, and action are all changed. Do not reuse a complete sentence
+from the private intent. Provide at least one free slot that a writer may
+rebind. Beat preferences are optional: they must not say must, required,
+always, or exactly. Return JSON only:
 {"schema_version":"creative_story_brief_v1","communicative_goal":"...",
 "audience_prior":"...","evidence_mechanism":"...",
 "audience_update":"...","tone":null,"beat_preferences":[],
@@ -89,8 +95,14 @@ unsupported camera or music techniques. Return JSON only:
 BRIEF_AUDIT_PROMPT = """Compare the private intent with the proposed public
 creative brief. Check that the communicative position and the role of
 evidence survive, while reference-specific surface content, quotes, paths,
-IDs and exact times do not. Beat preferences must not be mandatory roles.
-Do not rewrite the draft or quote a leak in feedback. Return JSON only:
+IDs and exact times do not. Mark source_surface_absent false if ANY public
+field names or paraphrases a private person, bodily attribute, profession,
+activity, setting, object, or specific skill. Test whether every public
+sentence still works after changing all such bindings; if not, mark false.
+Mark structure_optional true when the beat list is merely a preference,
+including a nonempty list, unless its wording requires an exact structure.
+Provide a short reason code for every false verdict. Do not rewrite the
+draft or quote a leak in feedback. Return JSON only:
 {"schema_version":"creative_story_brief_audit_v1",
 "goal_preserved":false,"evidence_logic_preserved":false,
 "source_surface_absent":false,"structure_optional":false,
@@ -206,8 +218,18 @@ def validate_story_brief(brief: dict[str, Any], intent: dict[str, Any],
             brief.get("free_slots"), list) or not isinstance(
                 brief.get("limitations"), list):
         errors.append("brief_lists_invalid")
+    elif not brief["free_slots"] or any(
+            not _is_known(slot) for slot in brief["free_slots"]):
+        errors.append("brief_free_slots_missing")
     if not intent.get("story_candidate_ready"):
         errors.append("parent_intent_not_ready")
+    source_fields = (("communicative_goal", "statement"),
+                     ("audience_prior", "interpretation"),
+                     ("evidence_mechanism", "description"),
+                     ("audience_update", "interpretation"))
+    if any(brief.get(field) == intent.get("analysis", {}).get(field, {}).get(
+            source_key) for field, source_key in source_fields):
+        errors.append("private_sentence_reused")
     serialized = str(brief).casefold()
     if any(marker and marker.casefold() in serialized
            for marker in forbidden_markers):

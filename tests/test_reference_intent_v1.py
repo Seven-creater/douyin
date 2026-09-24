@@ -120,6 +120,14 @@ def test_brief_is_abstract_and_no_timed_slots():
     leaked["communicative_goal"] = "source words"
     with pytest.raises(ValueError, match="reference_surface_leak"):
         publish_story_brief(leaked, intent, brief_audit, ["source words"])
+    copied = copy.deepcopy(brief)
+    copied["communicative_goal"] = analysis["communicative_goal"]["statement"]
+    with pytest.raises(ValueError, match="private_sentence_reused"):
+        publish_story_brief(copied, intent, brief_audit, [])
+    no_slots = copy.deepcopy(brief)
+    no_slots["free_slots"] = []
+    with pytest.raises(ValueError, match="brief_free_slots_missing"):
+        publish_story_brief(no_slots, intent, brief_audit, [])
 
 
 def test_theme_hard_checks_before_soft_structure_rank():
