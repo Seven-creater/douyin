@@ -218,6 +218,9 @@ def test_v2_theme_story_trial_keeps_private_bindings_out_of_writer(
         "source_sha": "media-sha"})
     monkeypatch.setattr(creative_trial, "_markers", lambda args: [])
     monkeypatch.setattr(creative_trial, "_runner", lambda args: object())
+    monkeypatch.setattr(creative_trial, "_trial_acceptance",
+                        lambda args, brief, record: {
+                            "artifact_sha": "accepted-trial-sha"})
     writer_payloads = []
 
     def fake_ask(runner, root, stage, prompt, payload, max_tokens):

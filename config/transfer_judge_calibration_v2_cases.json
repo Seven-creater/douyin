@@ -1,0 +1,57 @@
+{
+  "schema_version": "transfer_judge_calibration_v2",
+  "cases": [
+    {
+      "case_id": "K01",
+      "fields": [{"path": "stance", "text": "The repair must be completed without automation."}],
+      "story": "A maintenance robot diagnoses the fault and completes the repair automatically while the team watches."
+    },
+    {
+      "case_id": "K02",
+      "fields": [{"path": "stance", "text": "Credit belongs to the original discoverer rather than the public spokesperson."}],
+      "story": "The film credits the public spokesperson for the discovery and never recognizes the original researcher."
+    },
+    {
+      "case_id": "K03",
+      "fields": [
+        {"path": "stance", "text": "Expertise may flow against an expected hierarchy."},
+        {"path": "relations.R1.relation", "text": "The tutor learns a new method from the pupil."}
+      ],
+      "story": "The tutor demonstrates a new method, and the pupil learns it from the tutor."
+    },
+    {
+      "case_id": "K04",
+      "fields": [
+        {"path": "stance", "text": "A timely warning lets people escape danger before it arrives."},
+        {"path": "relations.R1.relation", "text": "The early alarm causes the evacuation before the flood arrives."}
+      ],
+      "story": "The flood arrives first. Residents flee, and only afterward does someone sound the alarm."
+    },
+    {
+      "case_id": "K05",
+      "fields": [{"path": "stance", "text": "The kitchen's wasteful practices should be challenged, not celebrated."}],
+      "story": "In the same busy kitchen, cooks throw away usable food. The film celebrates their waste as a mark of luxury."
+    },
+    {
+      "case_id": "K06",
+      "fields": [{"path": "stance", "text": "The school should expose cheating as unfair to honest students."}],
+      "story": "At school, a student cheats on an exam. The ending praises cheating as the smartest way to succeed."
+    },
+    {
+      "case_id": "K07",
+      "fields": [
+        {"path": "stance", "text": "An ignored early warning deserves reconsideration when independent evidence confirms it."},
+        {"path": "relations.R1.relation", "text": "Later independent evidence confirms the earlier warning."}
+      ],
+      "story": "A sailor's warning about a hidden current is ignored. Days later, an independent ocean survey confirms the current; the crew reconsiders the warning."
+    },
+    {
+      "case_id": "K08",
+      "fields": [
+        {"path": "stance", "text": "Cooperation becomes preferable when rivals discover a resource they can share."},
+        {"path": "relations.R1.relation", "text": "Discovery of a shared resource changes rivalry into cooperation."}
+      ],
+      "story": "Two laboratories compete for limited microscope time. They discover a shared remote instrument, then cooperate on a joint schedule instead of competing."
+    }
+  ]
+}

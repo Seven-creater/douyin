@@ -19,6 +19,7 @@ from src.agentic_video.creative_pipeline.intent_trial import (
 )
 from src.agentic_video.creative_pipeline.real_text_baseline import _ask
 from src.agentic_video.manifest import json_hash
+from src.agentic_video.transfer_eval_v2 import validate_acceptance
 from src.agentic_video.reference_readout import (
     _model_call, _write_json, load_reference,
 )
@@ -74,6 +75,32 @@ def _private_kernel(args, brief: dict) -> dict | None:
     return record
 
 
+def _trial_acceptance(args, brief: dict, record: dict | None) -> dict | None:
+    if brief["schema_version"] != "creative_story_brief_v2":
+        return None
+    if args.trial_acceptance is None or record is None:
+        raise ValueError("trial_acceptance_required_for_v2")
+    path = args.trial_acceptance
+    acceptance = _read(path)
+    parent = path.parent
+    result = _read(parent / "result.json")
+    attempt = result.get("attempt")
+    if (result.get("status") != "model_checked_candidate" or
+            type(attempt) is not int or attempt not in (1, 2) or
+            result.get("acceptance_sha") != acceptance.get("artifact_sha")):
+        raise ValueError("trial_acceptance_result_invalid")
+    prefix = f"attempt_{attempt:02d}"
+    validate_acceptance(
+        brief, acceptance, kernel_sha=record["artifact_sha"],
+        audit=record["audit"],
+        calibration=_read(parent / "calibration_report.json"),
+        frozen_badcase=_read(parent / "frozen_badcase_regression.json"),
+        mapping=_read(parent / f"{prefix}_mapping.json"),
+        stance=_read(parent / f"{prefix}_stance.json"),
+        regression=_read(parent / f"{prefix}_regression.json"))
+    return acceptance
+
+
 def _source_audit(runner, output: Path, record: dict,
                   candidates: list[dict]) -> dict:
     audit = _model_call(runner, name="source_copy_audit",
@@ -96,6 +123,7 @@ def themes(args) -> dict:
     brief = _read(args.brief)
     theme_prompt, critique_prompt, _, _ = prompts_for_brief(brief)
     record = _private_kernel(args, brief)
+    acceptance = _trial_acceptance(args, brief, record)
     markers = _markers(args)
     _fresh(args.output)
     runner = _runner(args)
@@ -134,6 +162,8 @@ def themes(args) -> dict:
               "selected_theme_ids": selected,
               "status": "model_checked_candidate" if selected else "blocked",
               "production_committed": False}
+    if acceptance is not None:
+        result["trial_acceptance_sha"] = acceptance["artifact_sha"]
     _write_json(args.output / "selection.json", result)
     return result
 
@@ -141,6 +171,10 @@ def themes(args) -> dict:
 def story(args) -> dict:
     brief, selection = _read(args.brief), _read(args.selection)
     _, _, story_prompt, _ = prompts_for_brief(brief)
+    acceptance = _trial_acceptance(args, brief, _private_kernel(args, brief))
+    if acceptance is not None and selection.get(
+            "trial_acceptance_sha") != acceptance["artifact_sha"]:
+        raise ValueError("selection_trial_acceptance_invalid")
     if selection["brief_sha"] != brief["artifact_sha"] or args.theme_id not in (
             selection["selected_theme_ids"]):
         raise ValueError("theme_not_selected")
@@ -167,6 +201,10 @@ def review(args) -> dict:
     brief, selection = _read(args.brief), _read(args.selection)
     _, _, _, critique_prompt = prompts_for_brief(brief)
     record = _private_kernel(args, brief)
+    acceptance = _trial_acceptance(args, brief, record)
+    if acceptance is not None and selection.get(
+            "trial_acceptance_sha") != acceptance["artifact_sha"]:
+        raise ValueError("selection_trial_acceptance_invalid")
     if selection["brief_sha"] != brief["artifact_sha"]:
         raise ValueError("selection_parent_invalid")
     theme_ids = selection["selected_theme_ids"]
@@ -211,6 +249,7 @@ def main() -> None:
                         required=True)
     parser.add_argument("--brief", type=Path, required=True)
     parser.add_argument("--private-kernel", type=Path)
+    parser.add_argument("--trial-acceptance", type=Path)
     parser.add_argument("--selection", type=Path)
     parser.add_argument("--theme-id")
     parser.add_argument("--story-dir", dest="story_dirs", type=Path,

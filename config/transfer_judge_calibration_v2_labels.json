@@ -1,0 +1,13 @@
+{
+  "schema_version": "transfer_judge_calibration_labels_v2",
+  "expected_accept": {
+    "K01": false,
+    "K02": false,
+    "K03": false,
+    "K04": false,
+    "K05": false,
+    "K06": false,
+    "K07": true,
+    "K08": true
+  }
+}
