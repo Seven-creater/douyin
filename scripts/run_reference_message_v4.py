@@ -92,19 +92,21 @@ def extract(args: argparse.Namespace) -> dict:
                           max_new_tokens=2048)
     _write_json(args.output / "reading_raw.json", reading)
     issues = validate_message(reading, _known_ids(reference))
-    if not issues and reading["takeaway_candidate"]["text"].strip(
+    structural_issues = list(issues)
+    if not structural_issues and reading["takeaway_candidate"]["text"].strip(
             ).casefold() in {"unknown", "unclear", "undetermined"}:
         issues.append("message_unknown")
     result = {"status": "blocked" if issues else "reading_candidate",
               "issues": issues, "full_video_calls": 1,
               "production_release_allowed": False}
-    if not issues:
+    if not structural_issues:
         record = artifact_with_sha({
             "schema_version": "reference_message_record_v4",
             "source_sha": reference["source_sha"],
             "static_sha": sha256_file(args.static),
             "model_config_sha": model_config_sha,
-            "reading": reading, "status": "private_candidate"})
+            "reading": reading,
+            "status": "private_candidate" if not issues else "unknown"})
         _write_json(args.output / "reference_message_v4.json", record)
     _write_json(args.output / "result.json", result)
     return result
@@ -209,8 +211,10 @@ def _theme_trial(args: argparse.Namespace, runner, reference: dict,
     if has_reference_surface(batch, _markers(args)):
         issues.append("literal_source_surface_leak")
     if issues:
-        return {"status": "themes_blocked", "issues": issues,
-                "production_release_allowed": False}
+        report = {"status": "themes_blocked", "issues": issues,
+                  "production_release_allowed": False}
+        _write_json(args.output / "theme_report.json", report)
+        return report
     critique = _model_call(
         runner, name="theme_critique", prompt=THEME_CRITIC_PROMPT,
         payload={"creative_message_brief": public, "themes": batch},
@@ -218,8 +222,10 @@ def _theme_trial(args: argparse.Namespace, runner, reference: dict,
     _write_json(args.output / "theme_critique.json", critique)
     issues = validate_theme_critique(critique)
     if issues:
-        return {"status": "themes_blocked", "issues": issues,
-                "production_release_allowed": False}
+        report = {"status": "themes_blocked", "issues": issues,
+                  "production_release_allowed": False}
+        _write_json(args.output / "theme_report.json", report)
+        return report
     source_copy = _model_call(
         runner, name="theme_source_copy", prompt=SOURCE_COPY_PROMPT,
         payload={"private_source_bindings": [
@@ -235,8 +241,10 @@ def _theme_trial(args: argparse.Namespace, runner, reference: dict,
     issues = validate_source_copy_audit(source_copy,
                                         [f"T{i}" for i in range(1, 7)])
     if issues:
-        return {"status": "themes_blocked", "issues": issues,
-                "production_release_allowed": False}
+        report = {"status": "themes_blocked", "issues": issues,
+                  "production_release_allowed": False}
+        _write_json(args.output / "theme_report.json", report)
+        return report
     checks = []
     for row, copy in zip(critique["checks"], source_copy["checks"]):
         checks.append({"theme_id": row["theme_id"],
@@ -257,6 +265,7 @@ def compare(args: argparse.Namespace) -> dict:
     reference, static, old = _inputs(args)
     new_record = _read(args.new_message)
     if (new_record.get("source_sha") != reference["source_sha"] or
+            new_record.get("status") not in {"private_candidate", "unknown"} or
             new_record.get("static_sha") != sha256_file(args.static) or
             new_record.get("artifact_sha") != json_hash({
                 key: value for key, value in new_record.items()
@@ -292,8 +301,11 @@ def compare(args: argparse.Namespace) -> dict:
     for name, reading in (("old", old_message_input(old)),
                           ("new", new_message_input(
                               new_record["reading"]))):
-        branches[name] = _assess_branch(
-            args, runner, reference, reading, name, cases, labels)
+        branches[name] = ({"status": "blocked", "reason": "message_unknown"}
+                          if name == "new" and new_record["status"] ==
+                          "unknown" else _assess_branch(
+                              args, runner, reference, reading, name,
+                              cases, labels))
     eligible = [name for name in ("new", "old") if branches[name][
         "status"] == "model_checked_candidate"]
     selected = eligible[0] if eligible else None

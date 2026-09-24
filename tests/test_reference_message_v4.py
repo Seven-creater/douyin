@@ -49,7 +49,7 @@ def _kernel() -> dict:
 def test_prompts_do_not_contain_known_answers_or_cases():
     for prompt in (AUDIENCE_PROMPT, ABSTRACTION_PROMPT):
         for marker in ("C01", "C02", "chef", "taekwondo", "lost both hands",
-                       "break prejudice", "older dishwasher"):
+                       "break prejudice", "older dishwasher", "disability"):
             assert marker not in prompt.casefold()
 
 
@@ -122,6 +122,11 @@ def test_themes_require_six_items_and_distinct_judgment_cues():
     for row in themes[3:]:
         row["initial_cue"] = "Cue 1"
     assert "theme_cues_not_distinct" in validate_themes({
+        "schema_version": "message_theme_batch_v4", "themes": themes})
+    for index, row in enumerate(themes):
+        row["initial_cue"] = f"Cue {index}"
+        row["domain"] = "Same domain"
+    assert "theme_domains_not_distinct" in validate_themes({
         "schema_version": "message_theme_batch_v4", "themes": themes})
 
 
@@ -198,3 +203,52 @@ def test_unknown_message_can_be_recorded_but_not_promoted():
     reading["takeaway_candidate"]["text"] = "unknown"
     assert validate_message(reading, IDS) == []
     assert reading["takeaway_candidate"]["text"].casefold() == "unknown"
+
+
+def test_extract_preserves_unknown_reading_without_promoting_it(
+        tmp_path: Path, monkeypatch):
+    static = {"duration_s": 10, "section_bundles": [],
+              "audio_transcript_candidate": None}
+    reference = {"source_sha": "media", "claims": [{"claim_id": "S1_T02"}],
+                 "events": []}
+    old = tmp_path / "old" / "reference_intent_v1.json"
+    trial._write_json(old.parent / "calls" / "intent_initial" /
+                      "model_call.json", {"model_config_sha": json_hash({})})
+    static_path = tmp_path / "static.json"
+    static_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(trial, "_inputs", lambda _: (reference, static, {}))
+    monkeypatch.setattr(trial, "_lineage", lambda *args: {})
+    monkeypatch.setattr(trial, "_runner", lambda _: object())
+    reading = _reading()
+    reading["takeaway_candidate"]["text"] = "unknown"
+    monkeypatch.setattr(trial, "_model_call", lambda *args, **kwargs: reading)
+    args = Namespace(output=tmp_path / "run", video=tmp_path / "video.mp4",
+                     static=static_path, old_intent=old)
+    result = trial.extract(args)
+    assert result["status"] == "blocked"
+    assert result["issues"] == ["message_unknown"]
+    assert trial._read(args.output / "reference_message_v4.json")[
+        "status"] == "unknown"
+
+
+def test_theme_request_contains_only_public_brief(tmp_path: Path,
+                                                  monkeypatch):
+    brief = public_brief(_kernel())
+    brief["parent_kernel_sha"] = "private_sha"
+    brief["artifact_sha"] = "artifact_sha"
+    captured = []
+
+    def fake_call(_runner, **kwargs):
+        captured.append(kwargs)
+        return {"schema_version": "message_theme_batch_v4", "themes": []}
+
+    monkeypatch.setattr(trial, "_model_call", fake_call)
+    monkeypatch.setattr(trial, "_markers", lambda _: [])
+    args = Namespace(output=tmp_path)
+    report = trial._theme_trial(args, object(), {}, brief)
+    assert report["status"] == "themes_blocked"
+    assert len(captured) == 1
+    request = captured[0]["payload"]["creative_message_brief"]
+    assert "parent_kernel_sha" not in request
+    assert "artifact_sha" not in request
+    assert "private_substitutions" not in request

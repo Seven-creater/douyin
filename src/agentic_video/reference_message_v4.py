@@ -86,7 +86,8 @@ Allowed verdicts: portable, source_domain_required, uncertain. Input: """
 THEME_PROMPT = """Use only the public audience-message brief. Generate
 exactly six original, filmable short-video themes. Vary the BASIS of the
 initial judgment and the kind of corrective action, not merely the person's
-profession or setting. Preserve every hard message field; the optional
+profession or setting; use at least three distinct domains. Preserve every
+hard message field; the optional
 sequence may be changed. Each theme concerns one person's evaluation and
 must give concrete, observable evidence for its revised judgment. Do not
 invent a reference video, require one character per information function,
@@ -271,6 +272,8 @@ def validate_themes(batch: dict[str, Any]) -> list[str]:
         return ["theme_fields_invalid"]
     if len({row["initial_cue"].strip().casefold() for row in themes}) < 3:
         return ["theme_cues_not_distinct"]
+    if len({row["domain"].strip().casefold() for row in themes}) < 3:
+        return ["theme_domains_not_distinct"]
     return []
 
 
