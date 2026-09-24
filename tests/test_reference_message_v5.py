@@ -114,6 +114,12 @@ def test_frozen_self_assessment_is_not_a_deterministic_v5_gate(
     monkeypatch.setattr(trial, "_lineage", lambda *args: {})
     monkeypatch.setattr(trial, "_runner", lambda _: object())
     monkeypatch.setattr(trial, "_model_config_check", lambda *args: "sha")
+    monkeypatch.setattr(trial, "_calibration_inputs", lambda *args: ([], {}))
+    monkeypatch.setattr(trial, "_reusable_calibration", lambda *args: (
+        {"passed": True}, "reused"))
+    monkeypatch.setattr(trial, "_contrast_inputs", lambda *args: ([
+        {"case_id": "C01", "story": "unrelated story one"},
+        {"case_id": "C02", "story": "unrelated story two"}], {}))
     monkeypatch.setattr(trial, "v4_public_brief", lambda _: {
         "audience_takeaway": "source-bound"})
     monkeypatch.setattr(trial, "v4_public_fields", lambda *args, **kwargs: [
@@ -122,16 +128,21 @@ def test_frozen_self_assessment_is_not_a_deterministic_v5_gate(
 
     def fake_call(*args, **kwargs):
         calls.append(kwargs)
-        return {"schema_version": "message_portability_audit_v4",
-                "checks": [{"path": "audience_takeaway",
-                            "verdict": "source_domain_required",
-                            "reason": "the source setting is required"}]}
+        return {"schema_version": "transfer_mapping_eval_v2", "checks": [
+            {"case_id": case["case_id"], "mappings": [{
+                "path": "audience_takeaway", "brief_quote": "source-bound",
+                "candidate_quote": None, "verdict": "unmapped",
+                "reason": "the source setting is required"}]}
+            for case in kwargs["payload"]["cases"]]}
 
     monkeypatch.setattr(trial, "_model_call", fake_call)
-    args = Namespace(output=tmp_path / "diagnosis", frozen_compare=frozen)
+    args = Namespace(output=tmp_path / "diagnosis", frozen_compare=frozen,
+                     calibration_cases=tmp_path / "calibration_cases",
+                     calibration_labels=tmp_path / "calibration_labels",
+                     cases=tmp_path / "cases", labels=tmp_path / "labels")
     report = trial.diagnose(args)
     assert report["status"] == "diagnosis_passed"
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert all("media" not in call for call in calls)
 
 

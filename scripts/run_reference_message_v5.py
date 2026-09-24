@@ -23,10 +23,8 @@ from src.agentic_video.creative_pipeline.evaluation.structure import (
 from src.agentic_video.creative_pipeline.intent_trial import has_reference_surface
 from src.agentic_video.manifest import json_hash, sha256_file
 from src.agentic_video.reference_message_v4 import (
-    PORTABILITY_PROMPT as V4_PORTABILITY_PROMPT,
     public_brief as v4_public_brief,
     public_fields as v4_public_fields,
-    validate_audit as v4_validate_audit,
     validate_kernel as v4_validate_kernel,
     validate_message as v4_validate_message,
 )
@@ -120,42 +118,57 @@ def diagnose(args) -> dict:
     _write_json(args.output / "input_lineage.json", _lineage(args, reference))
     runner = _runner(args)
     _model_config_check(args, runner, new_record)
-    results = {}
+    calibration_cases, calibration_labels = _calibration_inputs(
+        args.calibration_cases, args.calibration_labels)
+    calibration, reused = _reusable_calibration(
+        args, runner, calibration_cases, calibration_labels)
+    _write_json(args.output / "calibration_report.json", calibration)
+    _write_json(args.output / "calibration_provenance.json", {
+        "reused_from": reused})
+    if not calibration["passed"]:
+        result = {"status": "judge_unreliable",
+                  "reason": "mapping_judge_calibration_failed",
+                  "theme_generation": "not_run"}
+        _write_json(args.output / "result.json", result)
+        return result
+    cases, _ = _contrast_inputs(args.cases, args.labels)
+    positives = [row for row in cases if row["case_id"] in {"C01", "C02"}]
+    if len(positives) != 2:
+        raise ValueError("diagnosis_case_coverage_invalid")
+    mapping_cases = []
     for name, kernel in zip(("old", "new"), kernels):
         draft = v4_public_brief(kernel)
-        fields = v4_public_fields(draft, include_optional=True)
-        audit = _model_call(runner, name=f"{name}_frozen_portability",
-                            prompt=V4_PORTABILITY_PROMPT,
-                            payload={"public_fields": fields,
-                                     "source_claim": kernel["source_claim"],
-                                     "private_substitutions": kernel[
-                                         "private_substitutions"]},
-                            output=args.output, max_new_tokens=3072)
-        _write_json(args.output / f"{name}_frozen_portability.json", audit)
-        checks = audit.get("checks", [])
-        source_bound = [row["path"] for row in checks if isinstance(row, dict)
-                        and row.get("path") in {
-                            "audience_takeaway", "misjudgment_mechanism",
-                            "corrective_evidence_role", "revised_judgment"}
-                        and row.get("verdict") == "source_domain_required"]
-        results[name] = {"audit_complete": (audit.get("schema_version") ==
-                         "message_portability_audit_v4" and
-                         isinstance(checks, list) and
-                         len(checks) == len(fields) and [row.get("path") for
-                         row in checks if isinstance(row, dict)] == [row[
-                             "path"] for row in fields] and all(
-                                 isinstance(row, dict) and row.get(
-                                     "verdict") in {"portable",
-                                                    "source_domain_required",
-                                                    "uncertain"} and
-                                 isinstance(row.get("reason"), str) and
-                                 bool(row["reason"].strip())
-                                 for row in checks)),
-                         "all_portable": v4_validate_audit(
-                             audit, fields, kind="portability"),
-                         "source_bound_hard_paths": source_bound}
-    passed = all(row["audit_complete"] and not row["all_portable"] and
-                 row["source_bound_hard_paths"] for row in results.values())
+        for row in positives:
+            mapping_cases.append({"case_id": f"{name}_{row['case_id']}",
+                                  "fields": v4_public_fields(
+                                      draft, include_optional=False),
+                                  "story": row["story"]})
+    mapping = _model_call(runner, name="frozen_mapping_diagnosis",
+                          prompt=MAPPING_PROMPT,
+                          payload={"cases": mapping_cases},
+                          output=args.output, max_new_tokens=8192)
+    _write_json(args.output / "frozen_mapping_diagnosis.json", mapping)
+    issues = validate_mapping(mapping, mapping_cases)
+    if issues:
+        result = {"status": "judge_unreliable", "reason": issues,
+                  "theme_generation": "not_run"}
+        _write_json(args.output / "result.json", result)
+        return result
+    results = {}
+    for name in ("old", "new"):
+        checks = [row for row in mapping["checks"] if row["case_id"].startswith(
+            f"{name}_")]
+        results[name] = {"case_results": [{
+            "case_id": row["case_id"],
+            "source_bound_paths": [item["path"] for item in row["mappings"]
+                                   if item["verdict"] != "mapped"],
+            "audience_takeaway_rejected": any(
+                item["path"] == "audience_takeaway" and
+                item["verdict"] != "mapped" for item in row["mappings"])}
+            for row in checks]}
+    passed = all(len(row["case_results"]) == 2 and all(
+        item["audience_takeaway_rejected"] for item in row["case_results"])
+        for row in results.values())
     result = {"status": "diagnosis_passed" if passed else "judge_unreliable",
               "branches": results, "video_calls": 0,
               "theme_generation": "not_run",
