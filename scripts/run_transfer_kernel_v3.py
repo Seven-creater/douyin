@@ -72,7 +72,7 @@ def _judge(runner, output: Path, brief: dict, cases: list[dict]
     mapping = _model_call(runner, name="contrast_mapping",
                           prompt=MAPPING_PROMPT,
                           payload={"cases": mapped_cases}, output=output,
-                          max_new_tokens=4096)
+                          max_new_tokens=8192)
     _write_json(output / "contrast_mapping.json", mapping)
     issues = validate_mapping(mapping, mapped_cases)
     if issues:

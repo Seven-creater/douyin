@@ -244,6 +244,7 @@ def test_one_bounded_run_publishes_only_after_regression(
                 payload["public_brief"])
             return portability_fixture(payload["public_brief"])
         if name == "contrast_mapping":
+            assert kwargs["max_new_tokens"] == 8192
             return {"schema_version": "transfer_mapping_eval_v2",
                     "checks": [{"case_id": case["case_id"],
                                 "mappings": [{
