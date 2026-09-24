@@ -268,7 +268,9 @@ def build_reference_blueprint(static: dict[str, Any], local: dict[str, Any],
            for row in checks):
         errors.append("audit_verdict_invalid")
     verdicts = {row.get("id"): row.get("verdict") for row in checks}
-    story_ready = not errors and all(
+    story_errors = set(errors) - {"edge_coverage_invalid",
+                                  "audit_coverage_invalid"}
+    story_ready = not story_errors and all(
         verdicts.get(key) == "supported" and
         analysis.get(key, {}).get("status") == "provisional"
         for key in ("theme_stance", "viewer_change", "ending"))
@@ -287,7 +289,7 @@ def build_reference_blueprint(static: dict[str, Any], local: dict[str, Any],
                           "start_s": row["start_s"], "end_s": row["end_s"],
                           "section_id": row["section_id"], **techniques,
                           "semantic": semantic})
-    editing_ready = (story_ready and all(verdicts.get(key) == "supported"
+    editing_ready = (story_ready and not errors and all(verdicts.get(key) == "supported"
                                          for key in expected[3:]) and all(
         all(row.get(key) is not None for key in technique_keys)
         for row in shot_rows))

@@ -2,15 +2,22 @@
 from __future__ import annotations
 
 import copy
+import json
+
+import pytest
 
 from src.agentic_video.creative_pipeline.transfer_v2 import (
-    validate_theme_batch, validate_timed_story,
+    STORY_CRITIC_PROMPT, STORY_PROMPT, THEME_CRITIC_PROMPT, THEME_PROMPT,
+    run_transfer_creative_trial, validate_theme_batch, validate_timed_story,
 )
 from src.agentic_video.reference_transfer_v2 import (
     _analysis_errors, abstraction_payload, build_analysis_payload,
     build_reference_blueprint, inspect_bgm_asset, plan_gap_probes,
     publish_candidate_spec,
     validate_transfer_spec,
+)
+from src.agentic_video.reference_transfer_v2_shards import (
+    global_audit_ids, global_story_payload, section_audit_ids, section_payload,
 )
 
 
@@ -103,7 +110,8 @@ def test_duplicate_edge_cannot_be_promoted_or_hidden():
     analysis["edges"].append(copy.deepcopy(analysis["edges"][-1]))
     assert "edge_coverage_invalid" in _analysis_errors(analysis, static, {"p1"})
     blueprint = build_reference_blueprint(static, local, analysis, audit)
-    assert not blueprint["story_candidate_ready"]
+    assert blueprint["story_candidate_ready"]
+    assert not blueprint["editing_candidate_ready"]
     assert not blueprint["production_release_allowed"]
 
 
@@ -117,6 +125,15 @@ def test_model_self_check_separates_story_and_editing_readiness():
     assert len(blueprint["transitions"]) == 1
     assert blueprint["audio"]["beat_synced_status"] == "unverified"
     assert len(abstraction_payload(blueprint)["slots"]) == 3
+
+
+def test_missing_narrative_audit_still_blocks_story():
+    static, local, analysis, audit = fixture()
+    audit["checks"] = [row for row in audit["checks"]
+                       if row["id"] != "theme_stance"]
+    blueprint = build_reference_blueprint(static, local, analysis, audit)
+    assert "audit_coverage_invalid" in blueprint["validation_issues"]
+    assert not blueprint["story_candidate_ready"]
 
 
 def test_transfer_spec_preserves_exact_slots_but_rejects_surface_and_beat():
@@ -209,3 +226,69 @@ def test_missing_bgm_never_becomes_verified_stem(tmp_path):
     assert inspect_bgm_asset(tmp_path / "source.mp4", None)["status"] == "missing"
     assert inspect_bgm_asset(tmp_path / "source.mp4", tmp_path / "bgm.m4a")[
         "status"] == "missing"
+
+
+def test_creative_trial_is_parallel_candidate_only(tmp_path):
+    spec = {"schema_version": "creative_transfer_spec_v2",
+            "status": "model_checked_candidate", "artifact_sha": "a" * 64,
+            "edit_slots": [{"slot_id": "slot_01", "start_s": 0.0, "end_s": 1.0},
+                           {"slot_id": "slot_02", "start_s": 1.0, "end_s": 2.0}],
+            "transition_slots": [],
+            "theme_contract": {"stance": "narrow judgments need wider evidence"}}
+    themes = {"schema_version": "transfer_theme_candidates_v2", "themes": [
+        {"theme_id": f"T{i}", "domain": f"domain {i}", "premise": "p",
+         "stance": "s", "audience_prior": "a", "evidence_mechanism": "e",
+         "audience_update": "u", "ending_relation": "r", "tone": "t"}
+        for i in range(1, 4)]}
+    critique = {"schema_version": "transfer_theme_critique_v2", "checks": [
+        {"theme_id": f"T{i}", "stance_preserved": i == 2,
+         "mechanism_preserved": i == 2, "independent_story": i == 2,
+         "reason": "test"} for i in range(1, 4)]}
+    story = {"schema_version": "timed_story_candidate_v2", "feasible": True,
+             "theme_id": "T2", "transition_slots": [], "reason": "fits",
+             "logline": "A new story", "ending": "light",
+             "slots": [{**row, "event": f"event {i}",
+                        "new_information": f"fact {i}",
+                        "visual_action": "filmable action", "cues": []}
+                       for i, row in enumerate(spec["edit_slots"])]}
+    assessment = {"schema_version": "timed_story_critique_v2",
+                  "stance_preserved": True, "causal_progression": True,
+                  "all_slots_filmable": True,
+                  "adjacent_information_distinct": True,
+                  "ending_preserved": True, "issues": []}
+
+    class Runner:
+        def ask(self, prompt, **_):
+            for prefix, value in ((THEME_PROMPT, themes),
+                                  (THEME_CRITIC_PROMPT, critique),
+                                  (STORY_PROMPT, story),
+                                  (STORY_CRITIC_PROMPT, assessment)):
+                if prompt.startswith(prefix):
+                    return json.dumps(value)
+            raise AssertionError("unknown prompt")
+
+    result = run_transfer_creative_trial(Runner(), spec, tmp_path / "trial",
+                                         forbidden_markers=["source text"])
+    assert result["status"] == "model_checked_candidate"
+    assert result["selected_theme_id"] == "T2"
+    assert result["media_generation"] == "not_run"
+    assert not result["production_committed"]
+    critique["checks"][1]["stance_preserved"] = False
+    with pytest.raises(ValueError, match="no_theme_passed_critique"):
+        run_transfer_creative_trial(Runner(), spec, tmp_path / "blocked",
+                                    forbidden_markers=["source text"])
+    assert (tmp_path / "blocked" / "result.json").is_file()
+
+
+def test_shards_partition_shots_and_cross_section_edges():
+    static, local, _, _ = fixture()
+    first = section_payload(static, local, "a")
+    second = section_payload(static, local, "b")
+    assert [row["shot_id"] for row in first["shots"]] == ["s1"]
+    assert [row["shot_id"] for row in second["shots"]] == ["s2", "s3"]
+    assert section_audit_ids(static, "b") == [
+        "shot:s2", "shot:s3", "technique:s2", "technique:s3", "edge:s2->s3"]
+    assert global_audit_ids(static) == ["theme_stance", "viewer_change",
+                                         "ending", "edge:s1->s2"]
+    payload = global_story_payload(static, [])
+    assert payload["cross_edges"] == [{"from_shot_id": "s1", "to_shot_id": "s2"}]
