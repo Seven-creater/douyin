@@ -91,6 +91,10 @@ def test_evidence_refs_and_two_independent_audit_gates():
     portability["checks"][1]["tested_bindings"] = ["same", "same"]
     with pytest.raises(ValueError, match="portability_audit_invalid"):
         validate_portability(portability, brief)
+    portability = portability_fixture(brief)
+    portability["checks"].pop(2)
+    with pytest.raises(ValueError, match="portability_audit_invalid"):
+        validate_portability(portability, brief)
 
 
 def test_v3_attestation_binds_parent_and_old_v2_cannot_pass():
@@ -236,6 +240,8 @@ def test_one_bounded_run_publishes_only_after_regression(
         if name == "grounding_audit":
             return grounding_fixture(payload["kernel"])
         if name == "portability_audit":
+            assert [row["path"] for row in payload["fields"]] == audit_paths(
+                payload["public_brief"])
             return portability_fixture(payload["public_brief"])
         if name == "contrast_mapping":
             return {"schema_version": "transfer_mapping_eval_v2",

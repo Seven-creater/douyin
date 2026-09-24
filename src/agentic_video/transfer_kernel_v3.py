@@ -49,15 +49,22 @@ Allowed verdicts: supported, contested, insufficient. Input: """
 
 PORTABILITY_PROMPT = """Audit only domain portability of the PUBLIC brief.
 Compare it with the private source bindings, but do not use evaluation stories
-or labels. Inspect the complete text of the goal, every role function, and
-every relation. A field is portable only when its literal wording does not
+or labels. The input contains an ordered fields array with exact dotted path
+and text. Return one check for EVERY field, in the SAME order, copying each
+path exactly; never invent a slash-delimited path. This includes both a
+role's function and its audience_effect. A field is portable only when its
+literal wording does not
 require the source domain or a broader version of that same domain. Test two
-substantially different, non-source bindings for each field and explain whether
-the field still holds. Do not excuse a restricted phrase by attending only to
-its generic clause. Do not rewrite the brief. Return one check per field path:
+substantially different, non-source-domain bindings for each field, from
+different domains from each other, and explain whether the full field still
+holds. Two variations inside the source domain do not demonstrate portability.
+Do not excuse a restricted phrase by attending only to its generic clause.
+Do not rewrite the brief. Return one check per supplied dotted field path:
 {"schema_version":"transfer_portability_audit_v3","checks":[
 {"path":"goal","verdict":"portable","reason":"...",
-"tested_bindings":["...","..."]}]}.
+"tested_bindings":["...","..."]},
+{"path":"roles.U1.audience_effect","verdict":"source_domain_required",
+"reason":"...","tested_bindings":["...","..."]}]}.
 Allowed verdicts: portable, source_domain_required, uncertain. Input: """
 
 THEME_PROMPT = """Use only this public far-domain story brief. Propose

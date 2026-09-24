@@ -232,11 +232,12 @@ def run(args: argparse.Namespace) -> dict:
     portability = _model_call(runner, name="portability_audit",
                               prompt=PORTABILITY_PROMPT,
                               payload={"public_brief": draft,
+                                       "fields": public_fields(draft),
                                        "source_bindings": [{"unit_id": row[
                                            "unit_id"], "source_binding": row[
                                            "source_binding"]}
                                            for row in kernel["units"]]},
-                              output=args.output, max_new_tokens=2048)
+                              output=args.output, max_new_tokens=3072)
     _write_json(args.output / "portability_audit.json", portability)
     portable = validate_portability(portability, draft)
     mapping, stance = _judge(runner, args.output, draft, contrast_cases)
